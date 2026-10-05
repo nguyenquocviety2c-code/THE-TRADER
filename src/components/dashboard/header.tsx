@@ -3,11 +3,12 @@
 import * as React from "react";
 import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
-import { Moon, RefreshCw, Sun, TrendingUp } from "lucide-react";
+import { Loader2, Moon, Play, RefreshCw, Sun, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet } from "@/lib/api";
+import { useRunAgents } from "@/hooks/use-run-agents";
 import { cn } from "@/lib/utils";
 import { formatVnd, isMarketOpen, vnClock, vnDate } from "@/lib/format";
 import type { PortfolioResponse } from "@/lib/types";
@@ -44,10 +45,12 @@ export function Header() {
   const mounted = useMounted();
   const now = useNow();
   const queryClient = useQueryClient();
+  const runAgents = useRunAgents();
 
   const { data: portfolio } = useQuery({
     queryKey: ["portfolio"],
     queryFn: () => apiGet<PortfolioResponse>("/api/portfolio"),
+    staleTime: 60_000,
   });
 
   const isRefreshing = useIsFetching() > 0;
@@ -130,6 +133,28 @@ export function Header() {
               </p>
             </div>
           </div>
+
+          {/* Run agents (blueprint §3 — header action) */}
+          <Button
+            onClick={() => runAgents.mutate()}
+            disabled={runAgents.isPending}
+            className="min-h-9 gap-2"
+            size="sm"
+          >
+            {runAgents.isPending ? (
+              <>
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                <span className="hidden sm:inline">Đang phân tích…</span>
+                <span className="sm:hidden">Phân tích…</span>
+              </>
+            ) : (
+              <>
+                <Play className="size-4" aria-hidden="true" />
+                <span className="hidden sm:inline">Chạy agent</span>
+                <span className="sm:hidden">Agent</span>
+              </>
+            )}
+          </Button>
 
           {/* Theme toggle */}
           <Button

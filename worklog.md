@@ -127,3 +127,38 @@ Work Log:
 
 Stage Summary:
 - Audit complete; implementation order proposal prepared for user approval
+
+---
+Task ID: 7
+Agent: main-orchestrator (Z.ai Code)
+Task: Phase 1 — close all 7 TECHNICAL_BLUEPRINT gaps (G1-G7) per approved roadmap
+
+Work Log:
+- G1: Rewrote POST /api/agents/run as full multi-agent cycle per blueprint §5.2 — snapshot (quotes, bars, positions, account, alerts) + computed indicators (SMA20/50, RSI14, 5d momentum, vol ratio via new src/lib/indicators.ts); 3 analysis agents (market/news/risk) run sequentially with 429-retry (SDK rate-limits concurrency); Portfolio Strategist consolidates → Signal; Execution Manager deterministic (5% NAV sizing, lot 100, LIMIT) → paper Order + AgentMessage; response {runId, messages[], signals[], order, failures[], durationMs}
+- G3: Dynamic health scoring in src/lib/health.ts (FAILED −12, COMPLETED +2, faster-than-P50 +1, clamp 0-100) applied after every AgentRun; agent cards highlight amber when < 60
+- G4: AuditLog AGENT_RUN_COMPLETED + SIGNAL_APPROVED + ORDER_CREATED written by the cycle
+- G5: accountNumber masked at API boundary (VD00••••1828) in /api/portfolio
+- G6: Zustand store src/lib/store.ts (selectedSymbol, chartDays, portfolioTab, watchlistOnly); staleTime tiers (quotes/watchlist 30s, portfolio/orders/signals/risk 60s, bars 5min); shared hook src/hooks/use-run-agents.ts
+- G7: New GET /api/market/watchlist; Switch toggle in quotes table (VN30 30 mã ⇄ Danh mục theo dõi 8 mã); footer data-source status badge + reactive last-updated (query cache subscription); Run button moved to Header per blueprint §3
+- Fixed dev-server crash cause (transient bad import during HMR → 21k error repeats → JSON.stringify RangeError); restarted clean
+- E2E verified: cycle 5/5 agents OK (8.8s), signal VIB SELL 75 + order 3100@20400 PENDING persisted; health scores moved (95/100/100/100/88); audit chain correct; UI: header button, watchlist toggle, masked account, footer status all confirmed via agent-browser + VLM
+- Updated docs/TECHNICAL_BLUEPRINT.md: §3 table, §4 API surface (11 routes), §5.2 contract note, §5.3 health scoring, §6 PII, §7 caching, §9 Change Log v0.2
+- bunx tsc clean (app code), bun run lint exit 0
+
+Stage Summary:
+- All 7 blueprint gaps closed; app now implements TECHNICAL_BLUEPRINT.md faithfully
+- Remaining per DATA_SOURCES.md roadmap: S3 VNDIRECT live trading (flag), S4 market data feed + stale marking, S5 news RSS crawler, S6 alternative data, scheduler, WebSocket realtime
+
+---
+Task ID: 8
+Agent: main-orchestrator (Z.ai Code)
+Task: Final cleanup — clear stale Turbopack cache, verify pristine state
+
+Work Log:
+- Identified stale .next cache serving historical compile errors ([browser] Module not found from transient edit states)
+- pkill next dev; rm -rf .next dev.log; fresh restart
+- Verified: 0 errors in dev.log, 0 browser errors, header Run button + masked account + footer data-source badge all render
+- All 5 Phase-1 steps (G1-G7) closed and browser-verified
+
+Stage Summary:
+- The Trader v0.2 stable and clean; ready for Phase 2 (DATA_SOURCES roadmap) upon user approval

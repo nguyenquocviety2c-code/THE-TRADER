@@ -2,10 +2,12 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { Search, Star } from "lucide-react";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -15,55 +17,99 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiGet } from "@/lib/api";
+import { useUiStore } from "@/lib/store";
 import { changeColor, formatPrice, formatPct, formatSigned, formatVolume } from "@/lib/format";
-import type { QuoteRow, QuotesResponse } from "@/lib/types";
+import type { QuoteRow, QuotesResponse, WatchlistResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-export function QuotesTable({
-  selectedSymbol,
-  onSelect,
-}: {
-  selectedSymbol: string;
-  onSelect: (symbol: string) => void;
-}) {
-  const { data, isLoading, isError, error } = useQuery({
+export function QuotesTable() {
+  const selectedSymbol = useUiStore((s) => s.selectedSymbol);
+  const setSelectedSymbol = useUiStore((s) => s.setSelectedSymbol);
+  const watchlistOnly = useUiStore((s) => s.watchlistOnly);
+  const setWatchlistOnly = useUiStore((s) => s.setWatchlistOnly);
+
+  const quotesQuery = useQuery({
     queryKey: ["quotes"],
     queryFn: () => apiGet<QuotesResponse>("/api/market/quotes"),
+    staleTime: 30_000,
   });
+  const watchlistQuery = useQuery({
+    queryKey: ["watchlist"],
+    queryFn: () => apiGet<WatchlistResponse>("/api/market/watchlist"),
+    staleTime: 30_000,
+    enabled: watchlistOnly,
+  });
+
   const [search, setSearch] = React.useState("");
 
+  const source: QuoteRow[] = React.useMemo(
+    () =>
+      watchlistOnly
+        ? (watchlistQuery.data?.watchlist.quotes ?? [])
+        : (quotesQuery.data?.quotes ?? []),
+    [watchlistOnly, watchlistQuery.data, quotesQuery.data]
+  );
+  const totalCount = watchlistOnly
+    ? (watchlistQuery.data?.watchlist.count ?? 0)
+    : (quotesQuery.data?.quotes.length ?? 0);
+
   const quotes = React.useMemo(() => {
-    if (!data) return [] as QuoteRow[];
     const q = search.trim().toLowerCase();
-    if (!q) return data.quotes;
-    return data.quotes.filter(
+    if (!q) return source;
+    return source.filter(
       (row) =>
         row.symbol.toLowerCase().includes(q) ||
         row.name.toLowerCase().includes(q) ||
         row.sector.toLowerCase().includes(q)
     );
-  }, [data, search]);
+  }, [source, search]);
+
+  const isLoading = watchlistOnly ? watchlistQuery.isLoading : quotesQuery.isLoading;
+  const isError = watchlistOnly ? watchlistQuery.isError : quotesQuery.isError;
+  const error = watchlistOnly ? watchlistQuery.error : quotesQuery.error;
 
   return (
     <Card className="gap-4">
       <CardHeader>
-        <CardTitle className="text-base">Bảng giá VN30</CardTitle>
+        <CardTitle className="text-base">
+          {watchlistOnly ? "Danh mục theo dõi" : "Bảng giá VN30"}
+        </CardTitle>
         <CardDescription>Nhấp vào một mã để xem biểu đồ giá</CardDescription>
         <CardAction>
-          <div className="relative">
-            <Search
-              className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <Input
-              type="search"
-              inputMode="search"
-              placeholder="Tìm mã / tên / ngành…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="h-9 w-44 pl-8 text-sm sm:w-56"
-              aria-label="Tìm kiếm mã chứng khoán"
-            />
+          <div className="flex items-center gap-3">
+            <div
+              className="flex items-center gap-2"
+              title="Chỉ hiển thị các mã trong danh mục theo dõi mặc định"
+            >
+              <Switch
+                id="watchlist-mode"
+                checked={watchlistOnly}
+                onCheckedChange={setWatchlistOnly}
+                aria-label="Chỉ hiển thị danh mục theo dõi"
+              />
+              <Label
+                htmlFor="watchlist-mode"
+                className="hidden cursor-pointer items-center gap-1 text-xs text-muted-foreground sm:flex"
+              >
+                <Star className="size-3.5" aria-hidden="true" />
+                Theo dõi
+              </Label>
+            </div>
+            <div className="relative">
+              <Search
+                className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <Input
+                type="search"
+                inputMode="search"
+                placeholder="Tìm mã / tên / ngành…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="h-9 w-36 pl-8 text-sm sm:w-48"
+                aria-label="Tìm kiếm mã chứng khoán"
+              />
+            </div>
           </div>
         </CardAction>
       </CardHeader>
@@ -96,11 +142,11 @@ export function QuotesTable({
                   {quotes.map((q) => (
                     <TableRow
                       key={q.symbol}
-                      onClick={() => onSelect(q.symbol)}
+                      onClick={() => setSelectedSymbol(q.symbol)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
-                          onSelect(q.symbol);
+                          setSelectedSymbol(q.symbol);
                         }
                       }}
                       tabIndex={0}
@@ -152,8 +198,8 @@ export function QuotesTable({
               </Table>
             </div>
             <p className="px-6 py-3 text-[11px] text-muted-foreground">
-              Hiển thị {quotes.length}/{data?.quotes.length ?? 0} mã · sắp xếp theo
-              khối lượng
+              Hiển thị {quotes.length}/{totalCount} mã{" "}
+              {watchlistOnly ? "· danh mục theo dõi" : "· sắp xếp theo khối lượng"}
             </p>
           </>
         )}

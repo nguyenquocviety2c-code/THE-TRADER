@@ -84,20 +84,20 @@ flowchart TB
 
 | Section | Nội dung | Nguồn dữ liệu |
 |---|---|---|
-| **Header** | Brand "The Trader", đồng hồ phiên (ATO 09:00–09:15, liên tục 09:15–11:30 / 13:00–14:45, ATC 14:45–15:00), theme toggle, nút **Run agents** (gọi `POST /api/agents/run`, toast sonner khi xong) | Zustand + `GET /api/agents` |
-| **Market summary** | VN-Index proxy (trung bình có trọng số từ quotes VN30), số mã tăng/giảm/đứng giá, top movers | `GET /api/market/summary` |
-| **Watchlist** | Bảng mã đang theo dõi: last, change, changePct (màu semantic), volume; click chọn mã cho chart | `GET /api/market/watchlist` |
-| **Price chart** | Recharts: nến/area OHLCV **90 ngày** + volume; range selector | `GET /api/market/instruments/[symbol]/bars` |
-| **Portfolio tabs** | Tabs: **Vị thế** (Position + giá trị thị trường & unrealized PnL runtime), **Lệnh** (Order + trạng thái), **Giao dịch** (Trade + fee/tax) | `GET /api/portfolio` |
-| **Multi-agent panel** | 5 thẻ agent (role, status badge, `healthScore` progress, `lastRunAt`) + feed `AgentMessage` broadcast (content/reasoning/sentiment) + AgentTask list | `GET /api/agents`, `GET /api/agents/messages` |
-| **Signals** | Bảng Signal: direction badge, confidence, score, target/stop-loss/take-profit, rationale, expiresAt | `GET /api/signals` |
+| **Header** | Brand "The Trader", đồng hồ phiên (ATO 09:00–09:15, liên tục 09:15–11:30 / 13:00–14:45, ATC 14:45–15:00), badge mở/đóng cửa, chip tài khoản (số tài khoản **đã mask**), nút **Chạy agent** (gọi `POST /api/agents/run`, toast sonner khi xong), theme toggle, nút làm mới | Zustand + `GET /api/portfolio` |
+| **Market summary** | VN-Index proxy (trung bình biến động VN30), số mã tăng/giảm/đứng giá, thanh khoản, top movers | `GET /api/market/quotes` (trường `summary` nhúng) |
+| **Watchlist** | Bảng giá với **chế độ chuyển đổi**: Toàn bộ VN30 (30 mã, sắp xếp theo khối lượng) ⇄ Danh mục theo dõi mặc định (8 mã) qua Switch; tìm kiếm theo mã/tên/ngành; click chọn mã cho chart | `GET /api/market/quotes` hoặc `GET /api/market/watchlist` |
+| **Price chart** | Recharts: area OHLCV **90 ngày** + volume + SMA20; range selector 30/60/90 ngày; symbol picker | `GET /api/instruments/bars?symbol=&days=` |
+| **Portfolio tabs** | Tabs: **Vị thế** (Position + giá trị thị trường & unrealized PnL runtime + dòng tổng), **Lệnh** (Order + trạng thái), **Giao dịch** (Trade + fee/tax) | `GET /api/portfolio`, `GET /api/orders` |
+| **Multi-agent panel** | 5 thẻ agent (role, status badge, `healthScore` progress **cập nhật động sau mỗi run**, viền cảnh báo khi < 60), `lastRunAt`) + feed `AgentMessage` broadcast (content/reasoning/sentiment) + AgentTask list + nút **Chạy chu kỳ phân tích** + chỉ báo "Chu kỳ đa tác tử đang chạy…" | `GET /api/agents`, `GET /api/agents/messages` |
+| **Signals** | Bảng Signal: direction badge, confidence, score, target/stop-loss/take-profit, rationale, expiresAt + nút **Chuyển lệnh** (POST convert) | `GET /api/signals` |
 | **Risk alerts** | Thẻ cảnh báo theo severity (CRITICAL/WARNING/INFO): message + metricValue vs threshold | `GET /api/risk/alerts` |
-| **Sticky footer** | Trạng thái nguồn dữ liệu (seed/paper), last-updated, disclaimer "dữ liệu mô phỏng — paper trading" | Zustand + query meta |
+| **Sticky footer** | Trạng thái nguồn dữ liệu (badge "mô phỏng/paper"), cập nhật cache lần cuối (relative, tự refresh 15s), disclaimer | Query cache meta + Zustand |
 
 ### State management
 
-- **TanStack Query — server state:** query keys chuẩn `[resource, params]` (VD `['watchlist']`, `['bars', symbol]`, `['agents']`); `staleTime` ngắn cho quote, dài cho bars; `refetchInterval` cho poll quote; sau `POST /api/agents/run` thành công thì `invalidateQueries` toàn bộ key `['agents']`/`['signals']`/`['portfolio']` để phản ánh kết quả chu kỳ mới.
-- **Zustand — local UI state:** `selectedSymbol`, `activePortfolioTab`, chart range, auto-refresh toggle. Không chứa dữ liệu server (tránh dual source of truth).
+- **TanStack Query — server state:** query keys chuẩn `[resource, params]` (VD `['quotes']`, `['watchlist']`, `['bars', symbol, days]`, `['agents']`); `staleTime` phân tầng: quote/watchlist 30s, agent messages 30s, portfolio/orders/signals/risk 60s, bars 5 phút; sau `POST /api/agents/run` thành công thì `invalidateQueries` toàn bộ key `['agents']`/`['agent-messages']`/`['signals']`/`['orders']`/`['portfolio']`/`['quotes']`/`['risk-alerts']` để phản ánh kết quả chu kỳ mới (gộp trong hook dùng chung `useRunAgents`).
+- **Zustand — local UI state** (`src/lib/store.ts`): `selectedSymbol`, `chartDays`, `portfolioTab`, `watchlistOnly`. Không chứa dữ liệu server (tránh dual source of truth).
 
 ### Theming & design tokens
 
@@ -114,16 +114,17 @@ Tất cả route là **Route Handlers** trả JSON; lỗi trả `{ "error": stri
 
 | Method | Route | Mục đích | Response (tóm tắt) |
 |---|---|---|---|
-| GET | `/api/market/summary` | Tổng quan thị trường từ quotes VN30 | `{ vnIndexProxy, advances, declines, unchanged, topGainers[], topLosers[] }` |
-| GET | `/api/market/watchlist` | Watchlist mặc định + quote mới nhất mỗi mã | `WatchlistItem[]` join `Instrument` + `Quote` (last, change, changePct, volume) |
-| GET | `/api/market/instruments/[symbol]` | Thông tin mã + quote hiện tại | `Instrument` + `Quote` (đủ refPrice/ceilingPrice/floorPrice) |
-| GET | `/api/market/instruments/[symbol]/bars?days=90` | Chuỗi OHLCV cho price chart | `Bar[]` tăng dần theo `date` (mặc định 90 ngày, cap 90) |
-| GET | `/api/portfolio` | Sổ tài khoản demo | `{ account: BrokerAccount, positions[] (+marketValue, unrealizedPnl tính runtime), orders[], trades[] }` |
-| GET | `/api/agents` | Trạng thái 5 agent | `Agent[]` (status, healthScore, lastRunAt, config, model) |
-| POST | `/api/agents/run` | **Kích hoạt chu kỳ phân tích đa agent** (LLM glm-4.6) | `{ runId, messages: AgentMessage[], signals: Signal[] }` — audit `AgentRun` mỗi agent |
-| GET | `/api/agents/messages?limit=20` | Feed tin broadcast gần nhất | `AgentMessage[]` join `fromAgent` (name/role), sort `createdAt` desc |
-| GET | `/api/signals?limit=` | Tín hiệu còn hiệu lực + gần nhất | `Signal[]` join `Instrument` + `Agent` |
-| GET | `/api/risk/alerts` | Cảnh báo rủi ro | `RiskAlert[]` sort severity + `createdAt` desc |
+| GET | `/api/market/quotes` | Toàn bộ VN30 + quote mới nhất (volume desc) **+ summary** (VN-Index proxy, bề rộng, thanh khoản, top gainer/loser) | `{ quotes: QuoteRow[], summary }` |
+| GET | `/api/market/watchlist` | Watchlist mặc định + quote mới nhất mỗi mã (cùng dạng QuoteRow) | `{ watchlist: { name, count, quotes[] } }` |
+| GET | `/api/instruments/bars?symbol=VCB&days=90` | Chuỗi OHLCV + SMA20 cho price chart (cap 90 ngày) | `{ symbol, name, last, change, changePct, bars[] }` |
+| GET | `/api/portfolio` | Sổ tài khoản demo (**accountNumber đã mask**) + positions P&L runtime + totals | `{ account, positions[], totals }` |
+| GET | `/api/orders` | 20 lệnh + 20 bút toán gần nhất (fee/tax dạng Number) | `{ orders[], trades[] }` |
+| GET | `/api/agents` | Trạng thái 5 agent (config parse, pendingTaskCount, lastRun) + 12 nhiệm vụ | `{ agents[], tasks[] }` |
+| POST | `/api/agents/run` | **Chu kỳ phân tích đa agent đầy đủ** (4 LLM call: 3 agent phân tích song song → strategist tổng hợp → execution giấy, xem §5.2) | `{ runId, messages[], signals[], order, failures[], durationMs }` |
+| GET | `/api/agents/messages?limit=30` | Feed tin broadcast gần nhất | `{ messages[] }` join `fromAgent` |
+| GET | `/api/signals?limit=` | Tín hiệu còn hiệu lực + gần nhất | `{ signals[] }` join `Instrument` + `Agent` |
+| POST | `/api/signals/[id]/convert` | Chuyển tín hiệu BUY/SELL thành lệnh PENDING (giữ 409 nếu đã act) | `{ order }` |
+| GET | `/api/risk/alerts` | Cảnh báo rủi ro | `{ alerts[] }` sort severity + `createdAt` desc |
 
 Tham chiếu field: mỗi response khớp định nghĩa model tại [DB_SCHEMA.md §6](./DB_SCHEMA.md); nguồn gốc dữ liệu của từng field tại [DATA_SOURCES.md §3–4](./DATA_SOURCES.md).
 
@@ -166,15 +167,15 @@ sequenceDiagram
     API-->>U: { runId, messages[], signals[] } — UI invalidateQueries + toast
 ```
 
-Bước 1–6 là **contract của orchestrator**: mọi lời gọi LLM đều có prompt chứa snapshot dữ liệu thật từ DB; mọi kết quả đều được persist (`AgentMessage`, `Signal`, `Order`) kèm audit (`AgentRun`, `AuditLog`) — không có kết quả AI nào "bay lơ lửng" ngoài persisted state.
+Bước 1–6 là **contract của orchestrator** (đã implement đầy đủ trong `src/app/api/agents/run/route.ts`): mọi lời gọi LLM đều có prompt chứa snapshot dữ liệu thật từ DB (kèm chỉ báo kỹ thuật SMA20/50, RSI14, động lượng 5 phiên, KL/TL20 tính từ `Bar`); 3 agent phân tích chạy **tuần tự** (SDK giới hạn concurrency — kèm retry backoff 2.5s khi gặp 429; một agent lỗi không kéo sập chu kỳ, strategist vẫn tổng hợp từ các agent còn lại); mọi kết quả đều được persist (`AgentMessage`, `Signal`, `Order` giấy) kèm audit (`AgentRun` mỗi agent, `AuditLog`: SIGNAL_APPROVED · ORDER_CREATED · AGENT_RUN_COMPLETED) — không có kết quả AI nào "bay lơ lửng" ngoài persisted state. Execution Manager chạy **xác định** (không cần LLM): sizing 5% NAV, lô 100 cp, giá LIMIT.
 
 ### 5.3 Health scoring
 
-`Agent.healthScore` (Float 0–100, seed khởi điểm 88–100):
+`Agent.healthScore` (Float 0–100, seed khởi điểm 88–100) — **cập nhật động sau mỗi AgentRun** (implement trong `src/lib/health.ts`):
 
-- **Trừ điểm:** `AgentRun` FAILED (`error` khác null), timeout, `lastRunAt` quá stale so với chu kỳ mong đợi, AgentMessage sentiment trái chiều liên tiếp với kết quả thị trường (đo lường định kỳ).
-- **Cộng điểm:** chu kỳ COMPLETED thành công, `durationMs` thấp hơn P50 lịch sử.
-- Hiển thị dạng progress bar trên multi-agent panel; agent dưới ngưỡng (VD < 60) được highlight để trader biết cần kiểm tra config hoặc tạm `PAUSED`.
+- **Trừ điểm:** `AgentRun` FAILED → −12.
+- **Cộng điểm:** chu kỳ COMPLETED thành công → +2; `durationMs` thấp hơn P50 của ≤ 10 run COMPLETED gần nhất → thêm +1.
+- Clamp [0, 100]; hiển thị dạng progress bar trên multi-agent panel; agent dưới ngưỡng (< 60) được **highlight viền amber** để trader biết cần kiểm tra config hoặc tạm `PAUSED`.
 
 ---
 
@@ -182,7 +183,7 @@ Bước 1–6 là **contract của orchestrator**: mọi lời gọi LLM đều 
 
 | Lĩnh vực | Chính sách |
 |---|---|
-| **PII** | Field đánh dấu PII theo [DB_SCHEMA.md §4.1](./DB_SCHEMA.md): `email`, `phone`, `passwordHash`, `accountNumber`. API không trả `passwordHash`; `phone`/`accountNumber` mask khi render. PII không log ra console/LLM prompt. |
+| **PII** | Field đánh dấu PII theo [DB_SCHEMA.md §4.1](./DB_SCHEMA.md): `email`, `phone`, `passwordHash`, `accountNumber`. API không trả `passwordHash`; **`accountNumber` được mask tại API boundary** (`VD00••••1828`) trước khi xuống client; `phone` không nằm trong response nào. PII không log ra console/LLM prompt. |
 | **Credential storage** | Mật khẩu chỉ lưu **hash** (`passwordHash`) — giá trị seed là placeholder demo, production dùng bcrypt/argon2 + salt riêng. Broker credential & khóa dịch vụ đặt trong `.env` phía server (`DATABASE_URL`, khóa `z-ai-web-dev-sdk`), không commit, không đưa vào client bundle. |
 | **API-only backend** | **Không dùng Server Actions** — mọi đọc/ghi qua Route Handlers: một cửa duy nhất để validate payload, kiểm soát rate, và ghi `AuditLog`. |
 | **Relative-path API calls** | Client chỉ `fetch('/api/...')` — không hard-code origin, tránh leak cross-origin và SSRF-style redirect; deploy được dưới bất kỳ reverse-proxy/domain nào. |
@@ -200,7 +201,7 @@ Bước 1–6 là **contract của orchestrator**: mọi lời gọi LLM đều 
 | **Query strategy** | Dùng đúng composite indexes đã định nghĩa trong schema: `Bar @@index([instrumentId, date(sort: Desc)])` phục vụ cửa sổ 90 ngày; `Quote @@index([instrumentId, tradedAt])` cho quote mới nhất; `Signal/Order/AgentRun/AgentMessage` đều có index `(fk, createdAt desc)` cho feed "mới nhất trước" — mỗi truy vấn dashboard là index seek, không scan. Chi tiết: [DB_SCHEMA.md §6](./DB_SCHEMA.md). |
 | **90-day bar window** | Route bars mặc định & cap `days=90` — payload giới hạn (~90 dòng/mã), đủ cho SMA20/SMA50/RSI14/MACD/BOLL và chart; dữ liệu cũ hơn chỉ dùng khi có mục đích backtest (roadmap). |
 | **JSON serialization** | `BigInt` (VND) chuyển `Number` tại API boundary — mọi giá trị demo < 2^53 nên lossless; client không cần BigInt polyfill. |
-| **Client caching** | TanStack Query `staleTime` phân tầng: quote 15–30s, bars 5 phút, portfolio 1 phút; `refetchInterval` chỉ bật khi tab visible; skeleton ngay lập tức từ cache cũ (stale-while-revalidate). |
+| **Client caching** | TanStack Query `staleTime` phân tầng: quote/watchlist 30s, portfolio/orders/signals/risk/agents 30–60s, bars 5 phút; skeleton ngay lập tức từ cache cũ (stale-while-revalidate). |
 | **Loading UX** | shadcn `Skeleton` cho mọi section trong lần fetch đầu; sonner toast cho mutation `POST /api/agents/run` (không block UI). |
 | **DB footprint** | SQLite single-file đủ cho 1 trader × paper trading (≈ 2,700 bar + vài nghìn row agent telemetry sau seed); Prisma giữ đường migrate PostgreSQL khi đa người dùng. |
 
@@ -230,3 +231,4 @@ Bước 1–6 là **contract của orchestrator**: mọi lời gọi LLM đều 
 | Ngày | Thay đổi |
 |---|---|
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; khớp stack thực tế `package.json`/`bun.lock` và schema `prisma/schema.prisma` |
+| 2026-10-05 | **v0.2 — hoàn thiện blueprint:** (1) chu kỳ đa agent đầy đủ §5.2 (4 LLM call, Signal + Order giấy + AuditLog); (2) đồng bộ bảng API §4 với routes thực tế (thêm `/api/orders`, `/api/signals/[id]/convert`, `/api/market/watchlist`); (3) health scoring động §5.3 (`src/lib/health.ts`) + highlight agent < 60; (4) mask `accountNumber` tại API; (5) Zustand store `src/lib/store.ts` + staleTime phân tầng; (6) Watchlist API + Switch chế độ bảng giá; (7) footer trạng thái nguồn dữ liệu + last-updated; (8) nút Chạy agent ở Header (hook dùng chung `useRunAgents`) |

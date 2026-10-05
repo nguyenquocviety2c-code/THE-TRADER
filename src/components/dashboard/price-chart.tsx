@@ -27,24 +27,23 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { apiGet } from "@/lib/api";
+import { useUiStore } from "@/lib/store";
 import { changeColor, formatPct, formatPrice, formatVndCompact, formatVolume } from "@/lib/format";
 import type { BarPoint, BarsResponse, QuotesResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const TIMEFRAMES = [30, 60, 90] as const;
 
-export function PriceChart({
-  symbol,
-  onSymbolChange,
-}: {
-  symbol: string;
-  onSymbolChange: (symbol: string) => void;
-}) {
-  const [days, setDays] = React.useState<(typeof TIMEFRAMES)[number]>(90);
+export function PriceChart() {
+  const symbol = useUiStore((s) => s.selectedSymbol);
+  const setSymbol = useUiStore((s) => s.setSelectedSymbol);
+  const days = useUiStore((s) => s.chartDays);
+  const setDays = useUiStore((s) => s.setChartDays);
 
   const { data: quotesData } = useQuery({
     queryKey: ["quotes"],
     queryFn: () => apiGet<QuotesResponse>("/api/market/quotes"),
+    staleTime: 30_000,
   });
 
   const { data, isLoading, isError, error } = useQuery({
@@ -53,6 +52,7 @@ export function PriceChart({
       apiGet<BarsResponse>(
         `/api/instruments/bars?symbol=${encodeURIComponent(symbol)}&days=${days}`
       ),
+    staleTime: 5 * 60_000,
   });
 
   const bars = React.useMemo(() => data?.bars ?? [], [data]);
@@ -127,7 +127,7 @@ export function PriceChart({
               {(quotesData?.quotes ?? []).map((q) => (
                 <DropdownMenuItem
                   key={q.symbol}
-                  onSelect={() => onSymbolChange(q.symbol)}
+                  onSelect={() => setSymbol(q.symbol)}
                   className={cn("gap-2", q.symbol === symbol && "bg-accent")}
                 >
                   <span className="w-12 font-mono font-medium">{q.symbol}</span>
@@ -140,7 +140,7 @@ export function PriceChart({
           </DropdownMenu>
           <Tabs
             value={String(days)}
-            onValueChange={(v) => setDays(Number(v) as (typeof TIMEFRAMES)[number])}
+            onValueChange={(v) => setDays(Number(v))}
           >
             <TabsList className="h-9">
               {TIMEFRAMES.map((d) => (

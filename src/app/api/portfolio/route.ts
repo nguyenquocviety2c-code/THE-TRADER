@@ -2,6 +2,15 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 
+/** Mask a broker account number for API responses (PII policy, blueprint §6). */
+function maskAccount(accountNumber: string): string {
+  if (accountNumber.length <= 8) return accountNumber.replace(/.(?=.{2})/g, "•");
+  const head = accountNumber.slice(0, 4);
+  const tail = accountNumber.slice(-4);
+  const masked = "•".repeat(Math.max(0, accountNumber.length - 8));
+  return `${head}${masked}${tail}`;
+}
+
 export const dynamic = "force-dynamic";
 
 /**
@@ -76,7 +85,7 @@ export async function GET() {
       toPlain({
         account: {
           broker: account.broker,
-          accountNumber: account.accountNumber,
+          accountNumber: maskAccount(account.accountNumber),
           accountType: account.accountType,
           cashBalance: account.cashBalance,
           equity: account.equity,

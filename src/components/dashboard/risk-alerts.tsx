@@ -42,6 +42,7 @@ export function RiskAlerts() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["risk-alerts"],
     queryFn: () => apiGet<{ alerts: RiskAlertRow[] }>("/api/risk/alerts"),
+    staleTime: 60_000,
   });
 
   const alerts = data?.alerts ?? [];

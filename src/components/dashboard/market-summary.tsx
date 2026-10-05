@@ -26,6 +26,7 @@ export function MarketSummary() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["quotes"],
     queryFn: () => apiGet<QuotesResponse>("/api/market/quotes"),
+    staleTime: 30_000,
   });
 
   if (isLoading) {

@@ -188,9 +188,45 @@ export interface AgentRunResult {
   error: string | null;
 }
 
-export interface RunAgentResponse {
-  message: AgentMessageRow | null;
-  run: AgentRunResult | null;
+/** Response of the full multi-agent cycle — POST /api/agents/run (blueprint §5.2). */
+export interface RunCycleResponse {
+  runId: string | null;
+  messages: AgentMessageRow[];
+  signals: {
+    id: string;
+    symbol: string;
+    direction: "BUY" | "SELL" | "HOLD";
+    score: number;
+    confidence: string;
+    rationale: string;
+    targetPrice: number | null;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    expiresAt: string | null;
+  }[];
+  order: {
+    id: string;
+    symbol: string;
+    side: "BUY" | "SELL";
+    quantity: number;
+    price: number | null;
+    status: string;
+  } | null;
+  failures: string[];
+  durationMs: number;
+}
+
+/** Back-compat alias (older single-agent response shape). */
+export type RunAgentResponse = RunCycleResponse;
+
+export interface WatchlistResponse {
+  watchlist: {
+    id: string;
+    name: string;
+    isDefault: boolean;
+    count: number;
+    quotes: QuoteRow[];
+  };
 }
 
 export interface SignalRow {

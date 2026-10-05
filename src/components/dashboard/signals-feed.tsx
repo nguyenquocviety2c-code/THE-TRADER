@@ -55,6 +55,7 @@ export function SignalsFeed() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["signals"],
     queryFn: () => apiGet<{ signals: SignalRow[] }>("/api/signals"),
+    staleTime: 60_000,
   });
 
   const convertMutation = useMutation({

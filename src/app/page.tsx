@@ -1,6 +1,5 @@
 "use client";
 
-import * as React from "react";
 import { Header } from "@/components/dashboard/header";
 import { MarketSummary } from "@/components/dashboard/market-summary";
 import { QuotesTable } from "@/components/dashboard/quotes-table";
@@ -12,8 +11,7 @@ import { RiskAlerts } from "@/components/dashboard/risk-alerts";
 import { Footer } from "@/components/dashboard/footer";
 
 export default function Page() {
-  const [selectedSymbol, setSelectedSymbol] = React.useState("VCB");
-
+  // UI selections live in the Zustand store (blueprint §3) — no prop drilling.
   return (
     <div className="flex min-h-screen flex-col">
       <Header />
@@ -29,16 +27,10 @@ export default function Page() {
           {/* 2. Watchlist + price chart */}
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
             <div className="xl:col-span-2">
-              <QuotesTable
-                selectedSymbol={selectedSymbol}
-                onSelect={setSelectedSymbol}
-              />
+              <QuotesTable />
             </div>
             <div className="xl:col-span-3">
-              <PriceChart
-                symbol={selectedSymbol}
-                onSymbolChange={setSelectedSymbol}
-              />
+              <PriceChart />
             </div>
           </div>
 

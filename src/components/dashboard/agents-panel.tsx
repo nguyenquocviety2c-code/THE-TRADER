@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { vi } from "date-fns/locale";
 import {
@@ -17,16 +17,16 @@ import {
   ShieldAlert,
   Zap,
 } from "lucide-react";
-import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet } from "@/lib/api";
+import { useRunAgents } from "@/hooks/use-run-agents";
 import { cn } from "@/lib/utils";
-import type { AgentMessageRow, AgentsResponse, RunAgentResponse } from "@/lib/types";
+import type { AgentMessageRow, AgentsResponse } from "@/lib/types";
 
 const ROLE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   MARKET_ANALYST: ChartCandlestick,
@@ -44,35 +44,21 @@ const STATUS_DOT: Record<string, { className: string; label: string }> = {
 };
 
 export function AgentsPanel() {
-  const queryClient = useQueryClient();
+  const runAgents = useRunAgents();
 
   const agentsQuery = useQuery({
     queryKey: ["agents"],
     queryFn: () => apiGet<AgentsResponse>("/api/agents"),
+    staleTime: 30_000,
   });
   const messagesQuery = useQuery({
     queryKey: ["agent-messages"],
     queryFn: () =>
       apiGet<{ messages: AgentMessageRow[] }>("/api/agents/messages"),
+    staleTime: 30_000,
   });
 
-  const runMutation = useMutation({
-    mutationFn: () => apiPost<RunAgentResponse>("/api/agents/run"),
-    onSuccess: (res) => {
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
-      void queryClient.invalidateQueries({ queryKey: ["agent-messages"] });
-      const secs = res.run?.durationMs
-        ? (res.run.durationMs / 1000).toFixed(1)
-        : null;
-      toast.success("Agent đã hoàn tất phân tích", {
-        description: secs ? `Chu kỳ kéo dài ${secs}s · ${res.run?.tokensOut ?? 0} tokens đầu ra.` : undefined,
-      });
-    },
-    onError: (err: Error) => {
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
-      toast.error(err.message || "Chu kỳ phân tích thất bại.");
-    },
-  });
+  const isRunning = runAgents.isPending;
 
   const agents = agentsQuery.data?.agents ?? [];
   const tasks = agentsQuery.data?.tasks ?? [];
@@ -119,12 +105,12 @@ export function AgentsPanel() {
               <span className="font-mono">glm-4.6</span>
             </div>
             <Button
-              onClick={() => runMutation.mutate()}
-              disabled={runMutation.isPending}
+              onClick={() => runAgents.mutate()}
+              disabled={isRunning}
               className="min-h-11 gap-2"
               size="lg"
             >
-              {runMutation.isPending ? (
+              {isRunning ? (
                 <>
                   <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                   Đang phân tích…
@@ -206,23 +192,23 @@ export function AgentsPanel() {
               </p>
             ) : (
               <ul className="max-h-[28rem] divide-y overflow-y-auto custom-scrollbar">
-                {runMutation.isPending && (
+                {isRunning && (
                   <li className="flex items-center gap-3 py-3">
                     <span className="relative flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10">
                       <Loader2 className="size-4 animate-spin text-primary" aria-hidden="true" />
                     </span>
                     <p className="animate-pulse text-sm text-muted-foreground">
                       <span className="font-medium text-foreground">
-                        Portfolio Strategist
+                        Chu kỳ đa tác tử
                       </span>{" "}
-                      đang chạy chu kỳ phân tích…
+                      đang chạy: 3 agent phân tích → chiến lược → thực thi…
                     </p>
                   </li>
                 )}
                 {messages.map((m) => (
                   <MessageItem key={m.id} message={m} />
                 ))}
-                {messages.length === 0 && !runMutation.isPending && (
+                {messages.length === 0 && !isRunning && (
                   <li className="py-6 text-sm text-muted-foreground">
                     Chưa có tin nhắn. Hãy chạy chu kỳ phân tích đầu tiên.
                   </li>
@@ -252,7 +238,12 @@ function AgentCardView({
         : "[&_[data-slot=progress-indicator]]:bg-down";
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 text-card-foreground shadow-sm transition-shadow hover:shadow-md">
+    <div
+      className={cn(
+        "flex flex-col gap-3 rounded-xl border bg-card p-4 text-card-foreground shadow-sm transition-shadow hover:shadow-md",
+        health < 60 && "border-amber-500/50 ring-1 ring-amber-500/30"
+      )}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2.5">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">

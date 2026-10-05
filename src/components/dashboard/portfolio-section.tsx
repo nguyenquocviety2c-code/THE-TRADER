@@ -17,6 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { apiGet } from "@/lib/api";
+import { useUiStore } from "@/lib/store";
 import {
   changeColor,
   formatDateTime,
@@ -45,13 +46,18 @@ const ORDER_STATUS: Record<string, { label: string; className: string }> = {
 };
 
 export function PortfolioSection() {
+  const portfolioTab = useUiStore((s) => s.portfolioTab);
+  const setPortfolioTab = useUiStore((s) => s.setPortfolioTab);
+
   const portfolioQuery = useQuery({
     queryKey: ["portfolio"],
     queryFn: () => apiGet<PortfolioResponse>("/api/portfolio"),
+    staleTime: 60_000,
   });
   const ordersQuery = useQuery({
     queryKey: ["orders"],
     queryFn: () => apiGet<OrdersResponse>("/api/orders"),
+    staleTime: 60_000,
   });
 
   const p = portfolioQuery.data;
@@ -111,7 +117,7 @@ export function PortfolioSection() {
           </div>
         ) : null}
 
-        <Tabs defaultValue="positions">
+        <Tabs value={portfolioTab} onValueChange={setPortfolioTab}>
           <TabsList className="h-9">
             <TabsTrigger value="positions" className="text-xs sm:text-sm">
               Vị thế
