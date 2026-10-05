@@ -183,3 +183,36 @@ Stage Summary:
 - 3 tài liệu giờ khớp 1-1 với code Giai đoạn 2: 19 models, 17 route API, mini-service market-engine LIVE, S3 scaffold/S4 simulated/S5 RSS live/S6 simulated deterministic, stale marking + escalate đã implement
 - Không sửa bất kỳ file code nào; không ghi secret vào docs; mermaid đã verify render
 - Next: khi có gateway VNDIRECT thật hoặc feed HOSE/HNX, cập nhật lại §4 DATA_SOURCES + roadmap §9 TECHNICAL_BLUEPRINT
+
+---
+Task ID: 13
+Agent: main-orchestrator (Z.ai Code)
+Task: Verify E2E Giai đoạn 2 bằng agent-browser + lint + dev.log
+
+Work Log:
+- Backend API test: POST /api/news nạp 50 tin RSS thật từ 5 nguồn (VnEconomy/CafeF/VNExpress/Tuổi Trẻ/VietnamNet); POST /api/market/tick; GET /api/market/flows; GET /api/system/status — tất cả 200
+- Khởi động mini-service market-engine (port 3003): tick 10s + broadcast socket.io + health endpoint
+- Chẩn đoán WebSocket: phát hiện agent-browser phải mở qua GATEWAY thật (cổng 81) chứ không phải :3000 trực tiếp; xác minh gateway định tuyến MỌI path có query XTransformPort (probe /socket.io/?EIO=4&transport=polling&XTransformPort=3003 trả handshake engine.io chuẩn `0{"sid":...}`)
+- Fix warning React "Cannot update Footer while rendering MarketPulseBar": defer setState từ socket event (setTimeout 0) + rewrite Footer bằng useSyncExternalStore (cache timestamp + đồng hồ 15s) — console sạch hoàn toàn sau 25s ticks
+- Fix tick drift: thêm mean-reversion 3% về refPrice để giá không dồn biên trần/sàn khi simulator chạy lâu
+- E2E qua gateway :81: Live badge + "tick Xs trước"; giá/KL cập nhật realtime không cần refetch (KL SHB 12,0tr → 12,1tr; tổng KL 182,4tr → 183,7tr cp); sao watchlist toggle 2 chiều (VPB thêm→gỡ); chu kỳ agent đầy đủ: 5/5 agent OK, news-sentiment tiêu thụ flowsBlock ("khối ngoại bán ròng 28.9 tỷ"), strategist sinh SELL VCB score 75 + execution-manager đặt lệnh paper 700cp @91.400 PENDING — persist đầy đủ
+- VLM audit desktop 6/6 OK (pulse bar khối ngoại, cột sao, news card + badge nguồn, footer chips nguồn + Realtime, Live badge, không vỡ layout); mobile OK, không overflow ngang (pageScrollW=390=viewport)
+- bun run lint exit 0; bunx tsc --noEmit sạch; dev.log không lỗi
+
+Stage Summary:
+- Toàn bộ Giai đoạn 2 hoạt động end-to-end QUA GATEWAY THẬT (như Preview Panel của người dùng), console sạch, browser-verified + VLM-verified
+
+---
+Task ID: 14
+Agent: main-orchestrator (Z.ai Code)
+Task: Commit + push GitHub vietnq130593-code/THE-TRADER
+
+Work Log:
+- Untrack .env + download/README.md khỏi git; .gitignore thêm /examples, /tool-results, *.log, node_modules/ (unanchored cho mini-services), !.env.example; tạo .env.example (DATABASE_URL + LIVE_TRADING + MARKET_STRICT_SESSION + mini-service vars)
+- Commit ef6e48d "feat: Giai đoạn 2 — realtime engine, tin tức RSS, dòng khối ngoại, LIVE_TRADING flag" (36 file: 6 API route mới, 6 lib mới, hooks/use-realtime, news-card, mini-services/market-engine, docs v0.3 đồng bộ, README 161 dòng)
+- Merge unrelated histories với remote (giữ LICENSE người dùng tạo) → 0fab059; fix .env.example bị ignore do khối .env* trùng lặp trong .gitignore → commit 8910067
+- PUSH THẤT BẠI: token ghp_fQNS… người dùng cung cấp trả 401 "Bad credentials" từ GitHub API /user (đã thử scheme token + Bearer + x-access-token, 2 lần). Repo là PUBLIC nên ls-remote/fetch trước đó hoạt động ẨN DANH — token chưa từng được xác thực cho đến thao tác push. Không có credential thay thế nào trong sandbox.
+
+Stage Summary:
+- Code hoàn chỉnh, commit sẵn tại main local (8910067, đã chứa ff12a91 của remote qua merge → push sẽ là fast-forward sạch, không cần force)
+- CHỜ token PAT hợp lệ (scope repo) từ người dùng để push, hoặc người dùng tự push bằng 1 lệnh git
