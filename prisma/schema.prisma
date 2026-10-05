@@ -1,0 +1,461 @@
+// The Trader — Multi-Agent Trading System (VNDIRECT)
+// Financial-grade schema: audit fields, soft delete, PII markers, indexes
+// DB: SQLite via Prisma (portable dev), schema mirrors docs/DB_SCHEMA.md
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ENUMS (SQLite: stored as TEXT by Prisma)
+// ─────────────────────────────────────────────────────────────────
+
+enum Market {
+  HOSE // Sở Giao dịch Chứng khoán TP.HCM
+  HNX // Sở Giao dịch Chứng khoán Hà Nội
+  UPCOM // Thị trường OTC niêm yết
+}
+
+enum InstrumentType {
+  STOCK
+  ETF
+  FUND
+  BOND
+  INDEX
+}
+
+enum AgentRole {
+  MARKET_ANALYST // phân tích kỹ thuật & macro
+  NEWS_SENTIMENT // tin tức & cảm xúc thị trường
+  RISK_MANAGER // quản trị rủi ro
+  PORTFOLIO_STRATEGIST // chiến lược danh mục
+  EXECUTION_MANAGER // thực thi lệnh
+}
+
+enum AgentStatus {
+  IDLE
+  RUNNING
+  ERROR
+  PAUSED
+}
+
+enum SignalDirection {
+  BUY
+  SELL
+  HOLD
+}
+
+enum SignalConfidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP
+  STOP_LIMIT
+}
+
+enum OrderStatus {
+  PENDING
+  SUBMITTED
+  PARTIALLY_FILLED
+  FILLED
+  CANCELLED
+  REJECTED
+  EXPIRED
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSED
+}
+
+enum RiskSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum TaskStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 1. USERS & ACCOUNTS
+// ─────────────────────────────────────────────────────────────────
+
+model User {
+  id String @id @default(cuid())
+  // PII
+  email String @unique
+  name String
+  passwordHash String // PII (credential)
+  phone String? // PII
+  avatarUrl String?
+  role String @default("trader") // trader | admin
+  isActive Boolean @default(true)
+  deletedAt DateTime? // soft delete
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brokerAccounts BrokerAccount[]
+  watchlists Watchlist[]
+  auditLogs AuditLog[]
+  orders Order[]
+}
+
+model BrokerAccount {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broker String @default("VNDIRECT") // target broker
+  accountNumber String // PII
+  accountType String @default("basic") // basic | margin
+  cashBalance BigInt @default(0) // VND, integer minor units (x1 VND)
+  equity BigInt @default(0) // VND
+  marginUsed BigInt @default(0) // VND
+  currency String @default("VND")
+  status String @default("ACTIVE")
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  positions Position[]
+  orders Order[]
+
+  @@unique([broker, accountNumber])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 2. MARKET DATA
+// ─────────────────────────────────────────────────────────────────
+
+model Instrument {
+  id String @id @default(cuid())
+  symbol String @unique // VCB, FPT, VHM...
+  name String
+  market Market
+  type InstrumentType @default(STOCK)
+  sector String? // banking, real-estate, technology...
+  listingDate DateTime?
+  outstandingShares BigInt? // số cổ phiếu lưu hành
+  isActive Boolean @default(true)
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  quotes Quote[]
+  bars Bar[]
+  signals Signal[]
+  watchlistItems WatchlistItem[]
+  positions Position[]
+  orders Order[]
+  trades Trade[]
+
+  @@index([market])
+  @@index([sector])
+}
+
+model Quote {
+  id String @id @default(cuid())
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  // prices in VND (integers, multiples of 100)
+  open Int
+  high Int
+  low Int
+  last Int // giá khớp gần nhất
+  close Int?
+  volume Int @default(0) // khối lượng khớp (cổ phiếu)
+  bidPrice Int?
+  bidVolume Int?
+  askPrice Int?
+  askVolume Int?
+  change Int @default(0) // thay đổi so với close hôm trước
+  changePct Float @default(0) // %
+  refPrice Int? // giá tham chiếu
+  ceilingPrice Int? // trần
+  floorPrice Int? // sàn
+  tradedAt DateTime // thời điểm báo giá
+  createdAt DateTime @default(now())
+
+  @@index([instrumentId, tradedAt])
+}
+
+model Bar {
+  id String @id @default(cuid())
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  date DateTime // trading day
+  open Int
+  high Int
+  low Int
+  close Int
+  volume Int
+  value BigInt? // giá trị giao dịch (VND)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([instrumentId, date])
+  @@index([instrumentId, date(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 3. MULTI-AGENT SYSTEM
+// ─────────────────────────────────────────────────────────────────
+
+model Agent {
+  id String @id @default(cuid())
+  code String @unique // e.g. "market-analyst"
+  name String
+  role AgentRole
+  description String
+  model String @default("glm-4.6") // LLM backbone
+  status AgentStatus @default(IDLE)
+  config String @default("{}") // JSON: thresholds, weights
+  lastRunAt DateTime?
+  healthScore Float @default(100) // 0-100
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  runs AgentRun[]
+  messagesFrom AgentMessage[] @relation("FromAgent")
+  messagesTo AgentMessage[] @relation("ToAgent")
+  tasks AgentTask[]
+  signals Signal[]
+}
+
+model AgentRun {
+  id String @id @default(cuid())
+  agentId String
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  taskStatus TaskStatus @default(RUNNING)
+  startedAt DateTime @default(now())
+  finishedAt DateTime?
+  durationMs Int?
+  tokensIn Int @default(0)
+  tokensOut Int @default(0)
+  costUsd Float @default(0)
+  output String? // JSON summary
+  error String?
+  createdAt DateTime @default(now())
+
+  @@index([agentId, startedAt(sort: Desc)])
+}
+
+model AgentTask {
+  id String @id @default(cuid())
+  agentId String
+  agent Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  title String
+  description String?
+  status TaskStatus @default(PENDING)
+  priority String @default("medium") // low | medium | high
+  result String? // JSON
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+
+  @@index([agentId, status])
+}
+
+model AgentMessage {
+  id String @id @default(cuid())
+  fromAgentId String
+  fromAgent Agent @relation("FromAgent", fields: [fromAgentId], references: [id], onDelete: Cascade)
+  toAgentId String?
+  toAgent Agent? @relation("ToAgent", fields: [toAgentId], references: [id], onDelete: SetNull)
+  broadcast Boolean @default(true) // true = orchestrator broadcast
+  content String
+  reasoning String?
+  sentiment String? // bullish | bearish | neutral (for news agent)
+  createdAt DateTime @default(now())
+
+  @@index([fromAgentId, createdAt(sort: Desc)])
+  @@index([toAgentId, createdAt(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 4. SIGNALS & ORDERS
+// ─────────────────────────────────────────────────────────────────
+
+model Signal {
+  id String @id @default(cuid())
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  direction SignalDirection
+  confidence SignalConfidence @default(MEDIUM)
+  score Float @default(0) // 0-100 composite
+  rationale String
+  targetPrice Int? // VND
+  stopLoss Int? // VND
+  takeProfit Int? // VND
+  agentId String? // originating agent
+  agent Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  expiresAt DateTime?
+  actedAt DateTime? // khi được chuyển thành lệnh
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([instrumentId, createdAt(sort: Desc)])
+  @@index([direction, createdAt(sort: Desc)])
+}
+
+model Order {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brokerAccountId String?
+  brokerAccount BrokerAccount? @relation(fields: [brokerAccountId], references: [id], onDelete: SetNull)
+  signalId String?
+  signal Signal? @relation(fields: [signalId], references: [id], onDelete: SetNull)
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  side OrderSide
+  type OrderType @default(LIMIT)
+  quantity Int // số cổ phiếu
+  price Int? // giá đặt (VND), null cho MARKET
+  filledQuantity Int @default(0)
+  avgFillPrice Int?
+  status OrderStatus @default(PENDING)
+  fee BigInt @default(0) // phí môi giới (VND)
+  note String?
+  submittedAt DateTime?
+  filledAt DateTime?
+  cancelledAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trades Trade[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([instrumentId, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 5. POSITIONS & TRADES
+// ─────────────────────────────────────────────────────────────────
+
+model Position {
+  id String @id @default(cuid())
+  brokerAccountId String
+  brokerAccount BrokerAccount @relation(fields: [brokerAccountId], references: [id], onDelete: Cascade)
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  quantity Int @default(0) // số cổ phiếu đang nắm giữ
+  avgPrice Int @default(0) // giá vốn bình quân (VND)
+  realizedPnl BigInt @default(0) // VND
+  status PositionStatus @default(OPEN)
+  openedAt DateTime @default(now())
+  closedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trades Trade[]
+
+  @@unique([brokerAccountId, instrumentId])
+  @@index([status])
+}
+
+model Trade {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  positionId String?
+  position Position? @relation(fields: [positionId], references: [id], onDelete: SetNull)
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  side OrderSide
+  quantity Int
+  price Int // giá khớp (VND)
+  fee BigInt @default(0)
+  tax BigInt @default(0) // thuế TNCN 0.1% khi bán
+  executedAt DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([instrumentId, executedAt(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 6. RISK & COMPLIANCE
+// ─────────────────────────────────────────────────────────────────
+
+model RiskAlert {
+  id String @id @default(cuid())
+  severity RiskSeverity
+  code String // e.g. RISK_MAX_DRAWDOWN
+  message String
+  metricKey String? // e.g. portfolio.drawdown
+  metricValue Float?
+  threshold Float?
+  acknowledgedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([severity, createdAt(sort: Desc)])
+}
+
+model AuditLog {
+  id String @id @default(cuid())
+  userId String?
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action String // e.g. ORDER_CREATED
+  entity String // e.g. "Order"
+  entityId String?
+  before String? // JSON
+  after String? // JSON
+  ip String?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 7. WATCHLIST
+// ─────────────────────────────────────────────────────────────────
+
+model Watchlist {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name String @default("Danh mục theo dõi")
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items WatchlistItem[]
+
+  @@index([userId])
+}
+
+model WatchlistItem {
+  id String @id @default(cuid())
+  watchlistId String
+  watchlist Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  instrumentId String
+  instrument Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  addedAt DateTime @default(now())
+
+  @@unique([watchlistId, instrumentId])
+}

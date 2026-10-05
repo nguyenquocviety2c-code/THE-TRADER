@@ -1,0 +1,393 @@
+"use client";
+
+import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Wallet } from "lucide-react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { apiGet } from "@/lib/api";
+import {
+  changeColor,
+  formatDateTime,
+  formatPct,
+  formatPrice,
+  formatSigned,
+  formatVnd,
+  formatVolume,
+} from "@/lib/format";
+import type { OrderRow, PortfolioResponse, TradeRow } from "@/lib/types";
+import { cn } from "@/lib/utils";
+
+interface OrdersResponse {
+  orders: OrderRow[];
+  trades: TradeRow[];
+}
+
+const ORDER_STATUS: Record<string, { label: string; className: string }> = {
+  PENDING: { label: "Chờ khớp", className: "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400" },
+  SUBMITTED: { label: "Đã gửi", className: "border-border bg-secondary text-secondary-foreground" },
+  PARTIALLY_FILLED: { label: "Khớp một phần", className: "border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400" },
+  FILLED: { label: "Đã khớp", className: "border-up/40 bg-up/10 text-up" },
+  CANCELLED: { label: "Đã hủy", className: "border-border bg-muted text-muted-foreground" },
+  REJECTED: { label: "Bị từ chối", className: "border-down/40 bg-down/10 text-down" },
+  EXPIRED: { label: "Hết hiệu lực", className: "border-border bg-muted text-muted-foreground" },
+};
+
+export function PortfolioSection() {
+  const portfolioQuery = useQuery({
+    queryKey: ["portfolio"],
+    queryFn: () => apiGet<PortfolioResponse>("/api/portfolio"),
+  });
+  const ordersQuery = useQuery({
+    queryKey: ["orders"],
+    queryFn: () => apiGet<OrdersResponse>("/api/orders"),
+  });
+
+  const p = portfolioQuery.data;
+  const loading = portfolioQuery.isLoading || ordersQuery.isLoading;
+
+  return (
+    <Card className="gap-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Wallet className="size-4 text-muted-foreground" aria-hidden="true" />
+          Danh mục đầu tư
+        </CardTitle>
+        <CardDescription>
+          {p
+            ? `Tài khoản ${p.account.broker} · ${p.account.accountNumber} · ${
+                p.account.accountType === "margin" ? "Ký quỹ (margin)" : "Thường"
+              }`
+            : "Tài khoản VNDIRECT"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {loading ? (
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-16 w-full rounded-lg" />
+            ))}
+          </div>
+        ) : portfolioQuery.isError ? (
+          <p className="text-sm text-down">
+            {portfolioQuery.error?.message ?? "Không tải được danh mục."}
+          </p>
+        ) : p ? (
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <Tile label="Tiền mặt" value={formatVnd(p.account.cashBalance)} />
+            <Tile label="Giá trị vị thế" value={formatVnd(p.totals.totalMarketValue)} />
+            <Tile
+              label="Lãi/lỗ chưa thực hiện"
+              value={
+                <span className={changeColor(p.totals.totalUnrealizedPnl)}>
+                  {formatSigned(p.totals.totalUnrealizedPnl)} ₫
+                  <span className="ml-1 text-xs">
+                    ({formatPct(p.totals.totalUnrealizedPnlPct)})
+                  </span>
+                </span>
+              }
+            />
+            <Tile label="Tổng tài sản" value={formatVnd(p.totals.totalEquity)} />
+            <Tile
+              label="Biến động ngày"
+              value={
+                <span className={changeColor(p.totals.dayChangePct)}>
+                  {formatPct(p.totals.dayChangePct)}
+                </span>
+              }
+            />
+            <Tile label="Margin đang dùng" value={formatVnd(p.account.marginUsed)} />
+          </div>
+        ) : null}
+
+        <Tabs defaultValue="positions">
+          <TabsList className="h-9">
+            <TabsTrigger value="positions" className="text-xs sm:text-sm">
+              Vị thế
+            </TabsTrigger>
+            <TabsTrigger value="orders" className="text-xs sm:text-sm">
+              Lệnh
+            </TabsTrigger>
+            <TabsTrigger value="trades" className="text-xs sm:text-sm">
+              Giao dịch
+            </TabsTrigger>
+          </TabsList>
+
+          {/* Positions */}
+          <TabsContent value="positions" className="mt-3">
+            {portfolioQuery.isLoading ? (
+              <Skeleton className="h-56 w-full" />
+            ) : portfolioQuery.isError ? (
+              <p className="text-sm text-down">
+                {portfolioQuery.error?.message ?? "Không tải được vị thế."}
+              </p>
+            ) : p && p.positions.length > 0 ? (
+              <div className="overflow-x-auto custom-scrollbar">
+                <Table className="min-w-[720px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Mã</TableHead>
+                      <TableHead className="text-right">KL</TableHead>
+                      <TableHead className="text-right">Giá vốn</TableHead>
+                      <TableHead className="text-right">Giá HT</TableHead>
+                      <TableHead className="text-right">Giá trị</TableHead>
+                      <TableHead className="text-right">Lãi/lỗ</TableHead>
+                      <TableHead className="text-right">%</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {p.positions.map((pos) => (
+                      <TableRow key={pos.symbol} className="min-h-11">
+                        <TableCell>
+                          <p className="font-semibold">{pos.symbol}</p>
+                          <p className="max-w-[180px] truncate text-[11px] text-muted-foreground">
+                            {pos.sector || pos.name}
+                          </p>
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right">
+                          {formatVolume(pos.quantity)}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right">
+                          {formatPrice(pos.avgPrice)}
+                        </TableCell>
+                        <TableCell
+                          className={cn("tabular-nums text-right", changeColor(pos.changePct))}
+                        >
+                          {formatPrice(pos.last)}
+                          <span className="ml-1 text-[11px]">
+                            {formatPct(pos.changePct)}
+                          </span>
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right">
+                          {formatVnd(pos.marketValue)}
+                        </TableCell>
+                        <TableCell
+                          className={cn("tabular-nums text-right", changeColor(pos.unrealizedPnl))}
+                        >
+                          {formatSigned(pos.unrealizedPnl)}
+                        </TableCell>
+                        <TableCell
+                          className={cn(
+                            "tabular-nums text-right font-medium",
+                            changeColor(pos.unrealizedPnlPct)
+                          )}
+                        >
+                          {formatPct(pos.unrealizedPnlPct)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                  <TableFooter>
+                    <TableRow>
+                      <TableCell className="font-medium">Tổng cộng</TableCell>
+                      <TableCell className="tabular-nums text-right">
+                        {formatVolume(
+                          p.positions.reduce((s, x) => s + x.quantity, 0)
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">—</TableCell>
+                      <TableCell className="text-right">—</TableCell>
+                      <TableCell className="tabular-nums text-right font-semibold">
+                        {formatVnd(p.totals.totalMarketValue)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "tabular-nums text-right font-semibold",
+                          changeColor(p.totals.totalUnrealizedPnl)
+                        )}
+                      >
+                        {formatSigned(p.totals.totalUnrealizedPnl)}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "tabular-nums text-right font-semibold",
+                          changeColor(p.totals.totalUnrealizedPnlPct)
+                        )}
+                      >
+                        {formatPct(p.totals.totalUnrealizedPnlPct)}
+                      </TableCell>
+                    </TableRow>
+                  </TableFooter>
+                </Table>
+              </div>
+            ) : (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Chưa có vị thế mở.
+              </p>
+            )}
+          </TabsContent>
+
+          {/* Orders */}
+          <TabsContent value="orders" className="mt-3">
+            {ordersQuery.isLoading ? (
+              <Skeleton className="h-56 w-full" />
+            ) : ordersQuery.isError ? (
+              <p className="text-sm text-down">
+                {ordersQuery.error?.message ?? "Không tải được lệnh."}
+              </p>
+            ) : ordersQuery.data && ordersQuery.data.orders.length > 0 ? (
+              <div className="overflow-x-auto custom-scrollbar">
+                <Table className="min-w-[820px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Thời gian</TableHead>
+                      <TableHead>Mã</TableHead>
+                      <TableHead>Bên</TableHead>
+                      <TableHead>Loại</TableHead>
+                      <TableHead className="text-right">KL</TableHead>
+                      <TableHead className="text-right">Giá</TableHead>
+                      <TableHead className="text-right">KL khớp</TableHead>
+                      <TableHead>Trạng thái</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ordersQuery.data.orders.map((o) => (
+                      <OrderRowView key={o.id} order={o} />
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Chưa có lệnh nào.
+              </p>
+            )}
+          </TabsContent>
+
+          {/* Trades */}
+          <TabsContent value="trades" className="mt-3">
+            {ordersQuery.isLoading ? (
+              <Skeleton className="h-56 w-full" />
+            ) : ordersQuery.data && ordersQuery.data.trades.length > 0 ? (
+              <div className="overflow-x-auto custom-scrollbar">
+                <Table className="min-w-[720px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Thời gian</TableHead>
+                      <TableHead>Mã</TableHead>
+                      <TableHead>Bên</TableHead>
+                      <TableHead className="text-right">KL</TableHead>
+                      <TableHead className="text-right">Giá khớp</TableHead>
+                      <TableHead className="text-right">Giá trị</TableHead>
+                      <TableHead className="text-right">Phí + thuế</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ordersQuery.data.trades.map((t) => (
+                      <TableRow key={t.id} className="min-h-11">
+                        <TableCell className="tabular-nums whitespace-nowrap text-muted-foreground">
+                          {formatDateTime(t.executedAt)}
+                        </TableCell>
+                        <TableCell className="font-semibold">{t.symbol}</TableCell>
+                        <TableCell>
+                          <SideBadge side={t.side} />
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right">
+                          {formatVolume(t.quantity)}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right">
+                          {formatPrice(t.price)}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right">
+                          {formatVnd(t.value)}
+                        </TableCell>
+                        <TableCell className="tabular-nums text-right text-muted-foreground">
+                          {formatVnd(Number(t.fee) + Number(t.tax))}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Chưa có giao dịch khớp nào.
+              </p>
+            )}
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
+
+function OrderRowView({ order }: { order: OrderRow }) {
+  const status = ORDER_STATUS[order.status] ?? {
+    label: order.status,
+    className: "border-border bg-muted text-muted-foreground",
+  };
+  return (
+    <TableRow className="min-h-11">
+      <TableCell className="tabular-nums whitespace-nowrap text-muted-foreground">
+        {formatDateTime(order.createdAt)}
+      </TableCell>
+      <TableCell>
+        <p className="font-semibold">{order.symbol}</p>
+        {order.note ? (
+          <p className="max-w-[220px] truncate text-[11px] text-muted-foreground" title={order.note}>
+            {order.note}
+          </p>
+        ) : null}
+      </TableCell>
+      <TableCell>
+        <SideBadge side={order.side} />
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {order.type === "LIMIT" ? "LO" : order.type === "MARKET" ? "MP" : order.type}
+      </TableCell>
+      <TableCell className="tabular-nums text-right">
+        {formatVolume(order.quantity)}
+      </TableCell>
+      <TableCell className="tabular-nums text-right">
+        {formatPrice(order.price)}
+      </TableCell>
+      <TableCell className="tabular-nums text-right">
+        {order.filledQuantity > 0 ? (
+          <>
+            {formatVolume(order.filledQuantity)}
+            {order.avgFillPrice ? (
+              <span className="ml-1 text-[11px] text-muted-foreground">
+                @{formatPrice(order.avgFillPrice)}
+              </span>
+            ) : null}
+          </>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </TableCell>
+      <TableCell>
+        <Badge variant="outline" className={cn("whitespace-nowrap", status.className)}>
+          {status.label}
+        </Badge>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function SideBadge({ side }: { side: "BUY" | "SELL" }) {
+  return side === "BUY" ? (
+    <Badge className="bg-up/15 text-up hover:bg-up/15">Mua</Badge>
+  ) : (
+    <Badge className="bg-down/15 text-down hover:bg-down/15">Bán</Badge>
+  );
+}
+
+function Tile({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border bg-muted/30 px-3 py-2">
+      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+      <p className="tabular-nums mt-0.5 truncate text-sm font-semibold">{value}</p>
+    </div>
+  );
+}
