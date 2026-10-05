@@ -101,3 +101,15 @@ Stage Summary:
 - ROOT CAUSE (blank Preview Panel) fully resolved: sandbox had been reset — no app existed; entire project rebuilt from scratch
 - The Trader (renamed from Magnum Opus — Multi-Agent Trading VNDIRECT) is live, interactive, browser-verified
 - Deliverables: Next.js 16 app (9 dashboard components, 10 API routes), Prisma schema 17 models + seed (30 VN30 stocks, 90-day OHLCV, 5 agents), 3 core docs (DB_SCHEMA.md 726 lines, TECHNICAL_BLUEPRINT.md 232, DATA_SOURCES.md 186)
+
+---
+Task ID: 5
+Agent: main-orchestrator (Z.ai Code)
+Task: Compile all previous user request prompts into one .md file
+
+Work Log:
+- Collected every user prompt from all sessions (Giai đoạn 1: duyệt & thứ tự triển khai tài liệu; Giai đoạn 2: đổi tên "The Trader" + rà soát + báo cáo; Giai đoạn 3: chẩn đoán Preview Panel + yêu cầu tổng hợp)
+- Created docs/USER_PROMPTS.md: chronological prompt log with verbatim quotes, intent interpretation, actions taken, completion status per prompt + appendix of unimplemented roadmap items
+
+Stage Summary:
+- docs/USER_PROMPTS.md created as the single source of truth for the user's request history
