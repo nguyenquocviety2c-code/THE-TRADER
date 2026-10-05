@@ -1,0 +1,13 @@
+{
+  "name": "market-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Trader — realtime market engine: WebSocket broadcast + scheduler (tick giá, nạp tin RSS, chu kỳ agent tùy chọn)",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.4"
+  }
+}

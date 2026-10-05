@@ -17,3 +17,17 @@ export async function apiPost<T>(path: string): Promise<T> {
   }
   return body as T;
 }
+
+/** POST với JSON body (watchlist toggle, news ingest, …). */
+export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
+  if (!res.ok || data == null) {
+    throw new Error(data?.error ?? `Yêu cầu thất bại (${res.status})`);
+  }
+  return data;
+}

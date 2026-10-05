@@ -1,7 +1,7 @@
 # The Trader — Data Dictionary & Database Schema
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.1.0 · **Updated:** 2026-10-05
+> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.2.0 · **Updated:** 2026-10-06
 > **Source of truth:** [`prisma/schema.prisma`](../prisma/schema.prisma) — tài liệu này mô tả đúng schema đã implement. Mọi thay đổi schema phải được phản ánh lại đây.
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface) · [DATA_SOURCES.md](./DATA_SOURCES.md) (field mapping theo nguồn dữ liệu)
 
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi 5 AI agent: dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, và tầng rủi ro – tuân thủ (risk alert / audit log).
+The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi 5 AI agent: dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Tổng cộng **19 model**.
 
 Schema được thiết kế theo chuẩn **financial-grade**:
 
@@ -33,7 +33,7 @@ Schema được thiết kế theo chuẩn **financial-grade**:
 | Timestamps | `DateTime` lưu **UTC** (Prisma/SQLite ISO-8601); hiển thị theo `Asia/Ho_Chi_Minh` (xem [DATA_SOURCES.md §5](./DATA_SOURCES.md)) |
 | Enum | Định nghĩa bằng `enum` Prisma; trên SQLite được lưu dạng **TEXT** và validate ở application layer qua Prisma Client |
 | JSON-in-String | `config`, `output`, `result`, `before`, `after`, `sentiment`-style payload dùng `String` chứa JSON — SQLite không có kiểu JSON native |
-| Section comments | Schema chia 7 nhóm có đánh số: Users & Accounts, Market Data, Multi-Agent, Signals & Orders, Positions & Trades, Risk & Compliance, Watchlist |
+| Section comments | Schema chia 8 nhóm có đánh số: Users & Accounts, Market Data, Multi-Agent, Signals & Orders, Positions & Trades, Risk & Compliance, Watchlist, News & Data-Source Status |
 
 ---
 
@@ -50,7 +50,7 @@ VND **không có đơn vị phụ** (no minor units, khác USD với cent). Do �
 | **Khối lượng** (volume, quantity, filledQuantity) | `Int` | Khối lượng tính bằng cổ phiếu — đơn vị nguyên |
 | **Tỷ lệ phần trăm / điểm** (changePct, score, healthScore, costUsd, metricValue, threshold) | `Float` | Đây là giá trị phân tích, không phải số tiền kế toán — sai số float không ảnh hưởng sổ sách |
 
-> **Nguyên tắc:** phép tính tiền luôn thực hiện trên integer (`qty × price` → BigInt); format hiển thị chỉ thêm dấu phân cách hàng nghìn (`vi-VN`) — không bao giờ chia nhỏ đơn vị. Ở API boundary, `BigInt` được serialize về `Number` (an toàn vì mọi giá trị demo < 2^53) — xem [TECHNICAL_BLUEPRINT.md §7](./TECHNICAL_BLUEPRINT.md).
+> **Nguyên tắc:** phép tính tiền luôn thực hiện trên integer (`qty × price` → BigInt); format hiển thị chỉ thêm dấu phân cách hàng nghìn (`vi-VN`) — không bao giờ chia nhỏ đơn vị. Ở API boundary, `BigInt` được serialize về `Number` (an toàn vì mọi giá trị demo < 2^53) — xem [TECHNICAL_BLUEPRINT.md §8](./TECHNICAL_BLUEPRINT.md).
 
 ### 3.2 Bảng phân loại kiểu tổng quát
 
@@ -80,7 +80,7 @@ Các field được đánh dấu `// PII` trực tiếp trong `prisma/schema.pri
 | `passwordHash` | `User` | PII — credential | **Chỉ lưu hash**, không bao giờ lưu plaintext; giá trị seed là placeholder demo |
 | `accountNumber` | `BrokerAccount` | PII — tài chính | Unique theo `(broker, accountNumber)`; chỉ hiển thị 4 số cuối trên UI |
 
-`User.name`, `User.avatarUrl` là quasi-identifier — áp cùng kiểm soát truy cập nhưng không bắt buộc mask. Chi tiết chính sách xem [TECHNICAL_BLUEPRINT.md §6](./TECHNICAL_BLUEPRINT.md).
+`User.name`, `User.avatarUrl` là quasi-identifier — áp cùng kiểm soát truy cập nhưng không bắt buộc mask. Chi tiết chính sách xem [TECHNICAL_BLUEPRINT.md §7](./TECHNICAL_BLUEPRINT.md).
 
 ### 4.2 Soft delete
 
@@ -94,9 +94,9 @@ Query mặc định **không** lọc soft-deleted (Prisma không có global filt
 ### 4.3 Audit fields
 
 - `createdAt DateTime @default(now())` — có trên **mọi** model (append-only semantics).
-- `updatedAt DateTime @updatedAt` — có trên các model mutable: `User`, `BrokerAccount`, `Instrument`, `Bar`, `Agent`, `AgentTask`, `Signal`, `Order`, `Position`, `Watchlist`.
-- Models append-only **không** có `updatedAt`: `Quote`, `AgentRun`, `AgentMessage`, `Trade`, `RiskAlert`, `AuditLog`, `WatchlistItem` (chỉ có `createdAt`, `tradedAt`/`executedAt`/`addedAt`).
-- `AuditLog` (§6.16) là audit trail nghiệp vụ tách bạch: ghi `before`/`after` JSON cho mỗi hành động nhạy cảm.
+- `updatedAt DateTime @updatedAt` — có trên các model mutable: `User`, `BrokerAccount`, `Instrument`, `Bar`, `Agent`, `AgentTask`, `Signal`, `Order`, `Position`, `Watchlist`, `DataSourceStatus`.
+- Models append-only **không** có `updatedAt`: `Quote`, `AgentRun`, `AgentMessage`, `Trade`, `RiskAlert`, `AuditLog`, `WatchlistItem`, `NewsItem` (chỉ có `createdAt`, kèm `tradedAt`/`executedAt`/`addedAt`/`fetchedAt` theo ngữ cảnh).
+- `AuditLog` (§6.16) là audit trail nghiệp vụ tách bạch: ghi `before`/`after` JSON cho mỗi hành động nhạy cảm. Riêng `DataSourceStatus` là bảng trạng thái ghi đè liên tục (upsert theo `key`) — nó **chính là** audit cho tình trạng nguồn dữ liệu (§6.19).
 
 ---
 
@@ -280,9 +280,29 @@ erDiagram
         string instrumentId FK
         datetime addedAt
     }
+    NEWS_ITEM {
+        string id PK
+        string title
+        string url UK "khoa dedupe"
+        string source "VnEconomy CafeF VNExpress"
+        string category "market macro"
+        datetime publishedAt
+        datetime fetchedAt
+    }
+    DATA_SOURCE_STATUS {
+        string id PK
+        string key UK "market-quotes news foreign-flows trading"
+        string label
+        string mode "live simulated fallback paper"
+        datetime lastSuccessAt "nullable"
+        string lastError "nullable"
+        string meta "JSON"
+    }
 ```
 
 > Bảng đầy đủ của từng model (mọi field) nằm ở §6; ERD trên chỉ nêu field chủ chốt.
+>
+> **`NewsItem` và `DataSourceStatus` là 2 model standalone** — không có FK tới model khác: tin tức RSS chỉ mang `url` + nguồn (không gắn `instrumentId` vì một bài tin thường chạm nhiều mã); trạng thái nguồn là registry singleton-theo-`key` cho stale marking.
 
 ---
 
@@ -361,7 +381,7 @@ Quy ước cột: **Constraints/Default** ghi ràng buộc Prisma; **Mô tả** 
 
 ### 6.4 `Quote` — Báo giá realtime (level-1)
 
-Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/snapshot từ nguồn thị trường (hiện tại do seed sinh, lộ trình nối VNDIRECT/VPS — xem [DATA_SOURCES.md §4](./DATA_SOURCES.md)).
+Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/snapshot từ nguồn thị trường. Hiện tại quote mới nhất được cập nhật bởi **tick engine mô phỏng** `POST /api/market/tick` (S4 — random-walk có mean-reversion, tuân thủ Q1–Q5, đánh dấu `mode="simulated"`); lộ trình nối feed VNDIRECT/VPS — xem [DATA_SOURCES.md §4.2](./DATA_SOURCES.md)).
 
 | Field | Type | Constraints / Default | Mô tả |
 |---|---|---|---|
@@ -626,7 +646,7 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 |---|---|---|---|
 | `id` | String | PK, `cuid()` | Định danh duy nhất |
 | `userId` | String | nullable, FK → `User.id`, **SetNull** | Người thực hiện (null = hệ thống) |
-| `action` | String | — | Hành động chuẩn hóa: `ORDER_CREATED`, `ORDER_FILLED`, `ORDER_CANCELLED`, `SIGNAL_APPROVED`, `RISK_ALERT_RAISED`, `AGENT_RUN_COMPLETED`… |
+| `action` | String | — | Hành động chuẩn hóa: `ORDER_CREATED`, `ORDER_FILLED`, `ORDER_CANCELLED`, `SIGNAL_APPROVED`, `RISK_ALERT_RAISED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`… |
 | `entity` | String | — | Loại entity (VD: `"Order"`) |
 | `entityId` | String | nullable | ID entity bị ảnh hưởng |
 | `before` | String | nullable | Trạng thái trước (JSON) |
@@ -650,6 +670,58 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 | `addedAt` | DateTime | default `now()` | Thời điểm thêm vào |
 
 **Indexes/constraints:** `@@unique([watchlistId, instrumentId])` — không thêm trùng mã trong cùng watchlist.
+
+### 6.18 `NewsItem` — Tin tức tài chính crawl từ RSS (S5)
+
+Tin tức nạp từ 5 feed RSS đã kiểm chứng (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet) qua crawler `src/lib/news.ts` — được UI thẻ "Tin tức thị trường" hiển thị và pack vào prompt của chu kỳ agent (xem [DATA_SOURCES.md §4.3](./DATA_SOURCES.md)).
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `title` | String | — | Tiêu đề bài viết (đã strip HTML, tối đa 200 ký tự) |
+| `summary` | String | nullable | Trích dẫn ngắn từ `description` của feed — đã strip HTML, tối đa 320 ký tự |
+| `url` | String | **Unique** | URL bài viết — **khóa dedupe** (upsert theo url: crawl lại không nhân bản tin) |
+| `source` | String | — | Tên nguồn: `VnEconomy` \| `CafeF` \| `VNExpress` \| `Tuổi Trẻ` \| `VietnamNet` (\| `Seed` nếu nạp mẫu) |
+| `sourceUrl` | String | nullable | URL của feed RSS gốc (traceability — feed nào sinh ra tin này) |
+| `category` | String | nullable | Phân loại: `market` (thị trường/chứng khoán) \| `macro` (vĩ mô/kinh doanh) \| `company` |
+| `publishedAt` | DateTime | — | Thời gian công bố của bài viết (từ `pubDate`/`published`/`updated`/`dc:date`) |
+| `fetchedAt` | DateTime | default `now()` | Lần crawl gần nhất (update lại khi `summary` thay đổi) |
+| `createdAt` | DateTime | default `now()` | Audit (append-only) |
+
+**Relations:** không có — standalone, không FK tới model khác.
+
+**Indexes/constraints:**
+- `@@unique([url])` — **dedupe theo URL** (Q4 DATA_SOURCES mở rộng cho tin tức): crawler dùng upsert nên nạp lại idempotent;
+- `@@index([publishedAt(sort: Desc)])` — lấy N tin mới nhất cho UI + prompt agent;
+- `@@index([source, publishedAt(sort: Desc)])` — tra cứu theo nguồn.
+
+**Chính sách sentiment:** `NewsItem` **không lưu sentiment** — việc chấm bullish/bearish/neutral là trách nhiệm của agent `news-sentiment` và được lưu ở `AgentMessage.sentiment` (§6.9). Bảng này chỉ lưu dữ liệu thô để có traceability từng bài tin.
+
+**Retention:** cửa sổ tin tức hoạt động vài nghìn bản; dọn tin quá 60–90 ngày theo lịch (roadmap).
+
+### 6.19 `DataSourceStatus` — Trạng thái nguồn dữ liệu (S4 stale marking)
+
+Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống có đúng một dòng, được upsert liên tục qua `src/lib/sources.ts` (`markSource`) để phục vụ stale marking — xem [DATA_SOURCES.md §6](./DATA_SOURCES.md).
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `key` | String | **Unique** | Khóa nguồn: `market-quotes` \| `news` \| `foreign-flows` \| `trading` |
+| `label` | String | — | Nhãn hiển thị tiếng Việt trên footer dashboard (VD: "Bảng giá VN30") |
+| `mode` | String | — | Chế độ nguồn hiện tại: `live` (nguồn ngoài thật) \| `simulated` (mô phỏng có khai báo) \| `fallback` (đang phục vụ cache) \| `paper` (lệnh giấy) |
+| `lastSuccessAt` | DateTime | nullable | Lần thành công cuối — tính tuổi dữ liệu (`ageMinutes`) và cờ `stale` |
+| `lastError` | String | nullable | Thông báo lỗi gần nhất của nguồn (hiển thị khi stale) |
+| `meta` | String | nullable | JSON mở rộng: `providers`, `counts`, chi tiết engine (SQLite không có JSON native) |
+| `createdAt` | DateTime | default `now()` | Audit |
+| `updatedAt` | DateTime | `@updatedAt` | Thời điểm upsert trạng thái cuối |
+
+**Relations:** không có — standalone, không FK tới model khác.
+
+**Indexes/constraints:** `@@unique([key])` — một dòng duy nhất cho mỗi nguồn (singleton theo key).
+
+**Quy tắc stale (encode ở `src/lib/sources.ts`, không phải DB):** `mode="fallback"` → luôn stale; `mode="live"` mà `lastSuccessAt` quá 30 phút → stale; `simulated`/`paper` → không stale (đã khai báo mô phỏng). Nguồn stale quá 4 tiếng → `escalateStaleSources()` tạo `RiskAlert` WARNING `DATA_SOURCE_STALE` (dedupe 24h).
+
+**Retention:** ghi đè liên tục — bảng luôn ổn định ở số dòng bằng số nguồn (4 dòng hiện tại).
 
 ---
 
@@ -724,3 +796,4 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 | Ngày | Thay đổi |
 |---|---|
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; đồng bộ 1-1 với `prisma/schema.prisma` (17 model, 12 enum) |
+| 2026-10-06 | **v0.2 — Giai đoạn 2:** thêm 2 model `NewsItem` (S5 RSS, dedupe theo `url`) + `DataSourceStatus` (S4 stale marking, singleton-theo-`key`) → tổng **19 model**; cập nhật ERD + dictionary §6.18/§6.19; ghi nhận quote được cập nhật bởi tick engine `POST /api/market/tick`; bổ sung action audit mới |

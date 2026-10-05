@@ -3,12 +3,13 @@
 import * as React from "react";
 import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
-import { Loader2, Moon, Play, RefreshCw, Sun, TrendingUp } from "lucide-react";
+import { Loader2, Moon, Play, Radio, RefreshCw, Sun, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet } from "@/lib/api";
 import { useRunAgents } from "@/hooks/use-run-agents";
+import { useUiStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { formatVnd, isMarketOpen, vnClock, vnDate } from "@/lib/format";
 import type { PortfolioResponse } from "@/lib/types";
@@ -46,6 +47,7 @@ export function Header() {
   const now = useNow();
   const queryClient = useQueryClient();
   const runAgents = useRunAgents();
+  const realtimeConnected = useUiStore((s) => s.realtimeConnected);
 
   const { data: portfolio } = useQuery({
     queryKey: ["portfolio"],
@@ -120,6 +122,26 @@ export function Header() {
               />
             </span>
             {open ? "Mở cửa" : "Đóng cửa"}
+          </Badge>
+
+          {/* Realtime badge — WebSocket market-engine (cổng 3003) */}
+          <Badge
+            variant="outline"
+            className={cn(
+              "hidden gap-1.5 px-2.5 py-1 text-xs sm:inline-flex",
+              realtimeConnected ? "border-up/40 text-up" : "text-muted-foreground"
+            )}
+            title={
+              realtimeConnected
+                ? "market-engine (WebSocket) đang phát tick bảng giá mỗi 10 giây"
+                : "WebSocket chưa kết nối — làm mới bằng polling"
+            }
+          >
+            <Radio
+              className={cn("size-3", realtimeConnected && "animate-pulse")}
+              aria-hidden="true"
+            />
+            Live
           </Badge>
 
           {/* Account chip */}

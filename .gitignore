@@ -29,11 +29,20 @@
 /download
 /upload
 /dev.log
+/examples
+/tool-results
+/agent-ctx
 *.db
 *.db-journal
+*.log
+logs/
 
-# agent ctx
-/agent-ctx
+# dependencies (cả mini-services)
+node_modules/
+
+# env files (giữ .env.example làm mẫu)
+.env*
+!.env.example
 
 # debug
 npm-debug.log*

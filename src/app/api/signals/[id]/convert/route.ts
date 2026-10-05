@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
+import { getTradingMode, liveTradingGate } from "@/lib/trading-mode";
+import { markSource } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +52,42 @@ export async function POST(
       return NextResponse.json(
         { error: "Tín hiệu GIỮ KHÔNG thể chuyển thành lệnh." },
         { status: 400 }
+      );
+    }
+
+    // ── S3: cổng giao dịch thật (LIVE_TRADING flag — DATA_SOURCES.md §4.1) ──
+    // Paper mode (mặc định): tiếp tục tạo lệnh giấy nội bộ bên dưới.
+    // Live mode chưa cấu hình đủ: từ chối + audit, không tự ý gửi lệnh thật.
+    const gate = liveTradingGate();
+    if (gate.mode === "live-unconfigured") {
+      const [user] = await Promise.all([
+        db.user.findFirst({ where: { isActive: true }, select: { id: true } }),
+      ]);
+      await db.auditLog.create({
+        data: {
+          userId: user?.id ?? null,
+          action: "LIVE_TRADING_BLOCKED",
+          entity: "Signal",
+          entityId: signal.id,
+          after: JSON.stringify({ symbol: signal.instrument.symbol, reason: gate.error }),
+        },
+      });
+      return NextResponse.json({ error: gate.error }, { status: 503 });
+    }
+    if (gate.mode === "live") {
+      // Đường gửi lệnh thật cần gateway VNDIRECT mini-service (roadmap §8) —
+      // hiện chặn với thông báo rõ ràng + audit để không có side-effect mù.
+      await db.auditLog.create({
+        data: {
+          action: "LIVE_ORDER_GATEWAY_UNAVAILABLE",
+          entity: "Signal",
+          entityId: signal.id,
+          after: JSON.stringify({ symbol: signal.instrument.symbol, side: signal.direction }),
+        },
+      });
+      return NextResponse.json(
+        { error: "Gateway VNDIRECT chưa kết nối trong môi trường này — lệnh thật tạm bị chặn (audit đã ghi)." },
+        { status: 501 }
       );
     }
 
@@ -140,8 +178,15 @@ export async function POST(
           quantity,
           price,
           signalId: signal.id,
+          mode: getTradingMode().mode,
         }),
       },
+    });
+
+    await markSource("trading", {
+      mode: "paper",
+      success: true,
+      meta: { lastOrder: order.id, symbol: signal.instrument.symbol },
     });
 
     return NextResponse.json(

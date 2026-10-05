@@ -35,6 +35,8 @@ export interface MarketSummary {
 export interface QuotesResponse {
   quotes: QuoteRow[];
   summary: MarketSummary;
+  /** S4 stale marking — có từ Giai đoạn 2 */
+  meta?: { mode: string; asOf: string };
 }
 
 export interface BarPoint {
@@ -256,4 +258,96 @@ export interface RiskAlertRow {
   metricValue: number | null;
   threshold: number | null;
   createdAt: string;
+}
+
+/* ═══════════════ Giai đoạn 2 (S4/S5/S6 + realtime) ═══════════════ */
+
+export interface NewsItemRow {
+  id: string;
+  title: string;
+  summary: string | null;
+  url: string;
+  source: string;
+  category: string | null;
+  publishedAt: string;
+  fetchedAt: string;
+}
+
+export interface NewsResponse {
+  items: NewsItemRow[];
+  meta: {
+    total: number;
+    mode: string;
+    lastSuccessAt: string | null;
+    stale: boolean;
+    ageMinutes: number | null;
+    providers: string[];
+  };
+}
+
+export interface NewsIngestResponse {
+  added: number;
+  updated: number;
+  total: number;
+  mode: string;
+  feeds: { name: string; ok: boolean; items: number; error?: string }[];
+  ingestedAt: string;
+}
+
+export interface FlowsItem {
+  symbol: string;
+  netValue: number;
+}
+
+export interface FlowsResponse {
+  mode: string;
+  asOf: string;
+  totalNet: number;
+  totalBuy: number;
+  totalSell: number;
+  topNet: FlowsItem[];
+  topSell: FlowsItem[];
+  note: string;
+}
+
+export interface SourceStatusUI {
+  key: string;
+  label: string;
+  mode: string;
+  stale: boolean;
+  ageMinutes: number | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  providers: string[];
+  updatedAt: string;
+}
+
+export interface SystemStatusResponse {
+  sources: SourceStatusUI[];
+  trading: {
+    live: boolean;
+    configured: boolean;
+    mode: string;
+    label: string;
+  };
+  market: {
+    phase: string;
+    phaseLabel: string;
+    inSession: boolean;
+    strictSession: boolean;
+  };
+  counts: {
+    news: number;
+    signals: number;
+    orders: number;
+    agentMessages: number;
+  };
+  escalatedAlerts: number;
+  serverTime: string;
+}
+
+export interface WatchlistToggleResponse {
+  symbol: string;
+  inWatchlist: boolean;
+  count: number;
 }

@@ -1,36 +1,161 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# The Trader
 
-## Getting Started
+> **Dashboard multi-agent paper-trading cho VNDIRECT** — hội đồng 5 agent AI (glm-4.6) phân tích realtime, bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
 
-First, run the development server:
+**Next.js 16** · **TypeScript** · **Prisma + SQLite** · **shadcn/ui** · **glm-4.6** (z-ai-web-dev-sdk) · **socket.io**
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+> **Miễn trừ trách nhiệm:** đây là dự án minh họa (demo). Dữ liệu giá trên dashboard là **mô phỏng** (random-walk + mean-reversion, gắn nhãn `simulated`); toàn bộ lệnh là **paper trading** — lệnh giấy nội bộ, không gửi ra môi giới; tin tức RSS là dữ liệu thật nhưng chỉ làm ngữ cảnh phân tích. Dự án **không** dùng để giao dịch tiền thật.
+
+---
+
+## Tính năng chính
+
+- **Bảng giá VN30 realtime** — 30 mã HOSE, tick mô phỏng mỗi 10 giây qua mini-service `market-engine` (WebSocket), tuân thủ quy tắc sàn: bội 100 VND, dải trần/sàn ±7%.
+- **5 AI agent** — Market Analyst · News & Sentiment · Risk Manager · Portfolio Strategist · Execution Manager — chạy chu kỳ phân tích bằng glm-4.6, broadcast kết luận kèm sentiment, health score động.
+- **Tin tức RSS thật** — crawler 5 nguồn Việt Nam (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet), dedupe theo URL, nạp tay hoặc tự động mỗi 15 phút.
+- **Dòng khối ngoại (S6)** — mô phỏng deterministic theo thanh khoản thật + cảnh báo `FOREIGN_FLOW_OUTFLOW` khi bán ròng mạnh.
+- **Tín hiệu → lệnh giấy** — Signal từ strategist, chuyển lệnh PENDING (phí 0.15%, thuế TNCN 0.1% khi bán), danh mục vị thế + PnL runtime.
+- **Watchlist cá nhân** — thêm/gỡ mã bằng cột sao, chuyển đổi nhanh VN30 ⇄ danh mục theo dõi.
+- **Minh bạch nguồn dữ liệu** — mỗi nguồn gắn nhãn `live`/`simulated`/`fallback`/`paper` + stale marking, hiển thị trực tiếp trên footer.
+- **Audit trail đầy đủ** — `AgentRun` (token/chi phí/thời lượng), `AgentMessage`, `AuditLog` mọi hành động nhạy cảm.
+- **Dark terminal UI tiếng Việt** — quy ước màu xanh tăng/đỏ giảm (chuẩn thị trường VN), số liệu thẳng cột (tabular-nums).
+
+---
+
+## Kiến trúc
+
+```mermaid
+flowchart TB
+    Browser["Trình duyệt\nReact 19 · TanStack Query · socket.io-client"]
+
+    subgraph App["Next.js — cổng 3000"]
+        API["Route Handlers /api/*\nquotes · news · flows · agents/run\nsignals · portfolio · system/status…"]
+        LLM["z-ai-web-dev-sdk — glm-4.6\n(backend-only)"]
+    end
+
+    DB[("SQLite — db/custom.db\nPrisma · 19 models")]
+
+    subgraph Engine["mini-service market-engine — cổng 3003"]
+        IO["socket.io server\nbroadcast: quotes · news · cycle"]
+        SCHED["Scheduler\nTICK_MS · NEWS_MS · AGENT_CYCLE_MINUTES"]
+    end
+
+    RSS["5 feed RSS VN\nVnEconomy · CafeF · VNExpress\nTuổi Trẻ · VietnamNet"]
+
+    Browser -- "fetch /api/…" --> API
+    Browser -- "WebSocket (qua gateway, XTransformPort=3003)" --> IO
+    API --> DB
+    SCHED -- "server-to-server (APP_URL)" --> API
+    API --> LLM
+    API -- "crawler RSS" --> RSS
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+LLM **chỉ** gọi ở server (Route Handlers) — client không bao giờ thấy API key. Mini-service không chạm DB trực tiếp: mọi dữ liệu lấy qua API của app rồi broadcast cho client. Chi tiết: [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Yêu cầu môi trường
 
-## Learn More
+- **Bun 1.3+** — runtime chính (dev, seed, mini-service)
+- **Node 20+** — nếu chạy bằng npm/node thay Bun
+- Kết nối mạng ra ngoài (RSS + LLM backend)
 
-To learn more about Next.js, take a look at the following resources:
+---
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Cài đặt
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+# 1. Cài dependencies
+bun install
 
-## Deploy on Vercel
+# 2. Tạo .env từ mẫu (chỉnh DATABASE_URL nếu cần)
+cp .env.example .env
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+# 3. Đẩy schema Prisma vào SQLite
+bun run db:push
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+# 4. Nạp dữ liệu demo (30 mã VN30 · 90 ngày OHLCV · 5 agent · danh mục mẫu)
+bun prisma/seed.ts
+
+# 5. Chạy app
+bun run dev
+# mở http://localhost:3000
+```
+
+**Tuỳ chọn — realtime** (tick bảng giá + nạp tin RSS + chu kỳ agent tự động):
+
+```bash
+cd mini-services/market-engine
+bun install
+bun run dev
+```
+
+Mini-service lắng nghe **cổng 3003** và gọi thẳng app Next.js (server-to-server). Trình duyệt kết nối **qua gateway** bằng query `XTransformPort=3003` (`io("/?XTransformPort=3003")`) — nếu deploy sau reverse-proxy thì giữ nguyên pattern này, không cần mở thêm cổng.
+
+---
+
+## Scripts
+
+| Lệnh | Mục đích |
+|---|---|
+| `bun run dev` | Dev server Next.js (cổng 3000) |
+| `bun run lint` | Kiểm tra ESLint |
+| `bun run build` / `bun run start` | Build & chạy production |
+| `bun run db:push` | Đẩy schema Prisma vào SQLite |
+| `bun run db:generate` | Sinh lại Prisma Client |
+| `bun run db:studio` | Mở Prisma Studio |
+| `bun prisma/seed.ts` | Nạp lại dữ liệu demo (**xóa sạch dữ liệu cũ**) |
+
+---
+
+## Biến môi trường (`.env`)
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `DATABASE_URL` | `file:/home/z/my-project/db/custom.db` | CSDL SQLite (Prisma) |
+| `LIVE_TRADING` | `false` | S3 — bật giao dịch thật VNDIRECT; bật mà thiếu cấu hình bên dưới → API từ chối + audit log |
+| `VNDIRECT_API_BASE` | — | Endpoint VNDIRECT open API (chỉ cần khi `LIVE_TRADING=true`) |
+| `VNDIRECT_API_TOKEN` | — | Token khách hàng VNDIRECT — giữ phía server, không commit |
+| `MARKET_STRICT_SESSION` | `false` | `true`: tick engine chỉ sinh giá trong phiên HOSE (T2–T6, 09:15–11:30 & 13:00–14:45, đã trừ nghỉ lễ VN) |
+
+Biến cho mini-service `market-engine` (đặt trong môi trường shell hoặc env riêng của mini-service):
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `TICK_MS` | `10000` | Nhịp tick bảng giá (ms) |
+| `NEWS_MS` | `900000` | Chu kỳ nạp tin RSS (15 phút) |
+| `AGENT_CYCLE_MINUTES` | `0` | Chu kỳ agent tự động (0 = TẮT, tiết kiệm chi phí LLM) |
+| `APP_URL` | `http://localhost:3000` | Địa chỉ app Next.js cho các cuộc gọi server-to-server |
+
+---
+
+## Cấu trúc thư mục
+
+```
+src/app/                      # App Router: page.tsx (dashboard) + api/ (route handlers)
+src/components/dashboard/     # Header, bảng giá, chart, portfolio, agents panel,
+                              # signals, risk alerts, news card, footer…
+src/lib/                      # db, news (crawler RSS), flows, sources (stale marking),
+                              # market-session, trading-mode, market-quotes,
+                              # indicators, health, store (zustand)…
+src/hooks/                    # use-realtime (WebSocket), use-run-agents
+prisma/                       # schema.prisma (19 models) + seed.ts
+mini-services/market-engine/  # socket.io server + scheduler (cổng 3003)
+docs/                         # Tài liệu chi tiết (xem dưới)
+```
+
+---
+
+## Tài liệu chi tiết
+
+- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (17 route), thiết kế 5 agent, realtime & mini-service market-engine
+- [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) — data dictionary 19 model, chính sách kiểu dữ liệu / PII / audit
+- [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) — kho kiểm kê nguồn dữ liệu S1–S6, field mapping, chiến lược fallback
+
+---
+
+## Ghi chú
+
+- **LLM backend-only** — 5 agent chạy glm-4.6 qua `z-ai-web-dev-sdk`, khởi tạo trong Route Handlers; cần cấu hình SDK ở phía server (khóa không nằm trong repo hay client bundle).
+- **Scheduler chu kỳ agent mặc định TẮT** (`AGENT_CYCLE_MINUTES=0`) để tiết kiệm chi phí LLM — chạy chu kỳ thủ công bằng nút "Chạy chu kỳ phân tích" trên dashboard.
+- Giá và dòng tiền trên dashboard là **mô phỏng có khai báo** (mode `simulated` hiển thị trên footer); tin tức RSS là dữ liệu thật.

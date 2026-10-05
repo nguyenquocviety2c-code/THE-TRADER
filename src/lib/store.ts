@@ -24,6 +24,12 @@ interface UiState {
   /** Quotes table mode: watchlist-only vs full VN30 board. */
   watchlistOnly: boolean;
   setWatchlistOnly: (value: boolean) => void;
+
+  /** Realtime (WebSocket market-engine) — connection state + tick mới nhất. */
+  realtimeConnected: boolean;
+  setRealtimeConnected: (value: boolean) => void;
+  lastTickAt: number | null;
+  setLastTickAt: (ts: number | null) => void;
 }
 
 export const useUiStore = create<UiState>()((set) => ({
@@ -38,4 +44,9 @@ export const useUiStore = create<UiState>()((set) => ({
 
   watchlistOnly: false,
   setWatchlistOnly: (value) => set({ watchlistOnly: value }),
+
+  realtimeConnected: false,
+  setRealtimeConnected: (value) => set({ realtimeConnected: value }),
+  lastTickAt: null,
+  setLastTickAt: (ts) => set({ lastTickAt: ts }),
 }));

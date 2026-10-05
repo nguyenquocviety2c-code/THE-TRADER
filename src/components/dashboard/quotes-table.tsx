@@ -1,8 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Search, Star } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Search, Star, StarOff } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,10 +18,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPostJson } from "@/lib/api";
 import { useUiStore } from "@/lib/store";
 import { changeColor, formatPrice, formatPct, formatSigned, formatVolume } from "@/lib/format";
-import type { QuoteRow, QuotesResponse, WatchlistResponse } from "@/lib/types";
+import type { QuoteRow, QuotesResponse, WatchlistResponse, WatchlistToggleResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export function QuotesTable() {
@@ -37,7 +39,33 @@ export function QuotesTable() {
     queryKey: ["watchlist"],
     queryFn: () => apiGet<WatchlistResponse>("/api/market/watchlist"),
     staleTime: 30_000,
-    enabled: watchlistOnly,
+    // Luôn bật để biết mã nào đang có sao (kể cả khi không ở chế độ theo dõi)
+  });
+
+  // Danh sách mã đang theo dõi (để tô sao)
+  const watchedSymbols = React.useMemo(
+    () => new Set(watchlistQuery.data?.watchlist.quotes.map((q) => q.symbol) ?? []),
+    [watchlistQuery.data]
+  );
+
+  const queryClient = useQueryClient();
+  const toggleWatch = useMutation({
+    mutationFn: (symbol: string) =>
+      apiPostJson<WatchlistToggleResponse>("/api/watchlist/toggle", { symbol }),
+    onSuccess: (res) => {
+      void queryClient.invalidateQueries({ queryKey: ["watchlist"] });
+      void queryClient.invalidateQueries({ queryKey: ["system-status"] });
+      toast.success(
+        res.inWatchlist
+          ? `Đã thêm ${res.symbol} vào danh mục theo dõi (${res.count} mã)`
+          : `Đã gỡ ${res.symbol} khỏi danh mục theo dõi (${res.count} mã)`
+      );
+    },
+    onError: (err: Error) => {
+      toast.error("Không cập nhật được danh mục theo dõi", {
+        description: err.message,
+      });
+    },
   });
 
   const [search, setSearch] = React.useState("");
@@ -64,9 +92,9 @@ export function QuotesTable() {
     );
   }, [source, search]);
 
-  const isLoading = watchlistOnly ? watchlistQuery.isLoading : quotesQuery.isLoading;
-  const isError = watchlistOnly ? watchlistQuery.isError : quotesQuery.isError;
-  const error = watchlistOnly ? watchlistQuery.error : quotesQuery.error;
+  const isLoading = watchlistOnly && !watchlistQuery.data ? watchlistQuery.isLoading : quotesQuery.isLoading;
+  const isError = watchlistOnly && !watchlistQuery.data ? watchlistQuery.isError : quotesQuery.isError;
+  const error = watchlistOnly && !watchlistQuery.data ? watchlistQuery.error : quotesQuery.error;
 
   return (
     <Card className="gap-4">
@@ -127,10 +155,13 @@ export function QuotesTable() {
         ) : (
           <>
             <div className="max-h-96 overflow-y-auto custom-scrollbar">
-              <Table className="min-w-[560px]">
+              <Table className="min-w-[600px]">
                 <TableHeader className="sticky top-0 z-10 bg-card">
                   <TableRow className="hover:bg-transparent">
-                    <TableHead className="pl-6">Mã</TableHead>
+                    <TableHead className="w-10 pl-6">
+                      <span className="sr-only">Theo dõi</span>
+                    </TableHead>
+                    <TableHead>Mã</TableHead>
                     <TableHead className="text-right">Giá</TableHead>
                     <TableHead className="text-right">+/-</TableHead>
                     <TableHead className="text-right">%</TableHead>
@@ -157,7 +188,33 @@ export function QuotesTable() {
                         q.symbol === selectedSymbol ? "bg-accent" : "hover:bg-accent/50"
                       )}
                     >
-                      <TableCell className="py-2.5 pl-6">
+                      <TableCell className="w-10 py-2.5 pl-6">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className={cn(
+                            "size-7 text-muted-foreground transition-colors hover:text-amber-500",
+                            watchedSymbols.has(q.symbol) && "text-amber-500"
+                          )}
+                          aria-label={
+                            watchedSymbols.has(q.symbol)
+                              ? `Gỡ ${q.symbol} khỏi danh mục theo dõi`
+                              : `Thêm ${q.symbol} vào danh mục theo dõi`
+                          }
+                          aria-pressed={watchedSymbols.has(q.symbol)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleWatch.mutate(q.symbol);
+                          }}
+                        >
+                          {watchedSymbols.has(q.symbol) ? (
+                            <Star className="size-4 fill-current" aria-hidden="true" />
+                          ) : (
+                            <StarOff className="size-4" aria-hidden="true" />
+                          )}
+                        </Button>
+                      </TableCell>
+                      <TableCell className="py-2.5">
                         <p className="font-semibold">{q.symbol}</p>
                         <p className="max-w-[160px] truncate text-[11px] text-muted-foreground">
                           {q.sector || q.name}
@@ -187,7 +244,7 @@ export function QuotesTable() {
                   {quotes.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={6}
+                        colSpan={7}
                         className="py-8 text-center text-sm text-muted-foreground"
                       >
                         Không tìm thấy mã phù hợp.

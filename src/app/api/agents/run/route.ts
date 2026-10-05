@@ -4,6 +4,8 @@ import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { pctChange, rsi, sma, latestVsMean } from "@/lib/indicators";
 import { updateAgentHealth } from "@/lib/health";
+import { latestNewsForContext } from "@/lib/news";
+import { getForeignFlows, flowsPromptBlock } from "@/lib/flows";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -245,6 +247,12 @@ export async function POST() {
       }),
     ]);
 
+    // ── S5/S6 context — news RSS + foreign flows (DATA_SOURCES.md §4.3/§4.4) ──
+    const [newsItems, flows] = await Promise.all([
+      latestNewsForContext(10),
+      getForeignFlows().catch(() => null),
+    ]);
+
     const quoteRows = instruments
       .map((i) => {
         const q = i.quotes[0];
@@ -350,6 +358,24 @@ export async function POST() {
       alerts.length ? alerts.map((a) => `- [${a.severity}] ${a.message}`).join("\n") : "- (không có)",
     ].join("\n");
 
+    // ── S5 news block + S6 flows block (đưa vào prompt đúng agent) ──
+    const newsAge = (d: Date) => {
+      const h = Math.max(0, Math.round((Date.now() - d.getTime()) / 3_600_000));
+      return h <= 0 ? "vừa xong" : h < 24 ? `${h}h trước` : `${Math.round(h / 24)} ngày trước`;
+    };
+    const newsBlock = newsItems.length
+      ? [
+          `TIN TỨC THỊ TRƯỜNG MỚI NHẤT (S5 · RSS ${[...new Set(newsItems.map((n) => n.source))].join(", ")}):`,
+          ...newsItems.map(
+            (n) =>
+              `- [${n.source} · ${newsAge(n.publishedAt)}] ${n.title}${n.summary ? ` — ${n.summary.slice(0, 140)}` : ""}`
+          ),
+        ].join("\n")
+      : "TIN TỨC THỊ TRƯỜNG: (chưa nạp được tin mới — nếu dùng, khai báo rõ 'no new data' và không bịa tin)";
+    const flowsBlock = flows
+      ? flowsPromptBlock(flows)
+      : "DÒNG KHỐI NGOẠI: (nguồn không khả dụng — bỏ metric này khỏi phân tích)";
+
     // ── 2. Role prompts (from Agent.config) ───────────────────────
     const cfg = (code: string): Record<string, unknown> => {
       try {
@@ -372,27 +398,27 @@ export async function POST() {
 Nhiệm vụ: phân tích kỹ thuật bảng chỉ báo OHLCV VN30 (${lookback} phiên, chỉ báo: ${indicatorsList}).
 Yêu cầu: trả lời bằng TIẾNG VIỆT, 2–4 câu đúng trọng tâm; đánh giá xu hướng tổng thể và nêu 2–3 mã nổi bật nhất kèm số liệu cụ thể; KHÔNG bịa số liệu ngoài bảng.
 Trả về duy nhất một khối JSON hợp lệ: {"content": "<phân tích 2-4 câu>", "reasoning": "<1 câu cơ sở kỹ thuật>"}`,
-        user: marketBlock,
+        user: [marketBlock, flowsBlock].join("\n\n"),
       },
       "news-sentiment": {
         system: `Bạn là agent "News & Sentiment" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
-QUAN TRỌNG: nguồn tin tức ngoài (RSS CafeF/VnEconomy/Reuters) CHƯA được tích hợp — bạn phải suy luận cảm xúc CHỈ TỪ số liệu nội tại thị trường được cung cấp (bề rộng tăng/giảm, thanh khoản, đột biến giá) và KHẮNG ĐỊNH rõ giới hạn này trong câu trả lời ("chưa có nguồn tin ngoài, cảm xúc suy ra từ nội tại thị trường"). Tuyệt đối không bịa tin tức.
+QUAN TRỌNG: nguồn tin tức ngoài (RSS VnEconomy/CafeF/VNExpress/Tuổi Trẻ/VietnamNet) ĐÃ được tích hợp — khối TIN TỨC THỊ TRƯỜNG MỚI NHẤT nằm ở cuối prompt người dùng; hãy chấm cảm xúc chung của dòng tin (bullish/bearish/neutral) và nêu 1–2 tin ảnh hưởng lớn nhất tới VN30. Nếu khối tin ghi "chưa nạp được" → khai báo rõ "no new data" và chỉ suy luận hạn chế từ số liệu nội tại. Tuyệt đối không bịa tin tức.
 Trả lời TIẾNG VIỆT, 2–3 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "...", "sentiment": "bullish" | "bearish" | "neutral"}`,
-        user: marketBlock,
+        user: [marketBlock, newsBlock, flowsBlock].join("\n\n"),
       },
       "risk-manager": {
         system: `Bạn là agent "Risk Manager" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 Nhiệm vụ: đối chiếu danh mục với giới hạn rủi ro: drawdown tối đa ${riskCfg.maxDrawdownPct ?? 15}%, tỷ trọng ngành tối đa ${riskCfg.maxSectorWeightPct ?? 40}%, vị thế đơn tối đa ${riskCfg.maxPositionPct ?? 25}% NAV, lỗ ngày tối đa ${((riskCfg.dailyLossLimitVnd as number) ?? 50000000).toLocaleString("vi-VN")} ₫.
 Kiểm tra từng giới hạn, nêu rõ vi phạm (nếu có), và kết luận mức rủi ro tổng thể của danh mục.
 Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<cơ sở tính toán>"}`,
-        user: marketBlock,
+        user: [marketBlock, flowsBlock].join("\n\n"),
       },
       "portfolio-strategist": {
         system: `Bạn là agent "Portfolio Strategist" (điểm hợp lưu) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 Nhiệm vụ: tổng hợp 3 bản phân tích của Market Analyst, News & Sentiment, và Risk Manager ở trên để (a) đưa ra nhận định danh mục ngắn gọn, (b) sinh MỘT tín hiệu giao dịch cụ thể.
 Quy tắc tín hiệu: chỉ chọn mã có trong bảng chỉ báo; direction BUY chỉ khi xu hướng + cảm xúc + rủi ro đều thuận, SELL khi cần cắt tỷ trọng vi phạm giới hạn, còn lại HOLD; score 0–100; giá là số nguyên VND bội số 100; BUY: stopLoss < giá hiện tại < targetPrice < takeProfit; SELL: targetPrice < giá hiện tại < stopLoss.
 Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendation": "<một khuyến nghị cụ thể>", "confidence": "LOW"|"MEDIUM"|"HIGH", "signal": {"symbol": "VCB", "direction": "BUY"|"SELL"|"HOLD", "score": 0-100, "rationale": "...", "targetPrice": <int VND|null>, "stopLoss": <int VND|null>, "takeProfit": <int VND|null>} | null}`,
-        user: marketBlock,
+        user: [marketBlock, newsBlock, flowsBlock].join("\n\n"),
       },
     };
 
@@ -485,6 +511,9 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
     const strategistAgent = byCode.get(STRATEGIST_CODE)!;
     const strategistUserPrompt = [
       marketBlock,
+      "",
+      newsBlock,
+      flowsBlock,
       "",
       "KẾT QUẢ TỪ 3 AGENT PHÂN TÍCH (để tổng hợp):",
       `- Market Analyst: ${analyses["market-analyst"]?.content ?? "(agent lỗi — bỏ qua)"}`,

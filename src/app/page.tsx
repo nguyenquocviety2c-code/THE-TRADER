@@ -8,9 +8,15 @@ import { PortfolioSection } from "@/components/dashboard/portfolio-section";
 import { AgentsPanel } from "@/components/dashboard/agents-panel";
 import { SignalsFeed } from "@/components/dashboard/signals-feed";
 import { RiskAlerts } from "@/components/dashboard/risk-alerts";
+import { NewsCard } from "@/components/dashboard/news-card";
 import { Footer } from "@/components/dashboard/footer";
+import { useRealtimeMarket } from "@/hooks/use-realtime";
 
 export default function Page() {
+  // WebSocket realtime (market-engine) — gắn MỘT lần ở cấp trang,
+  // trạng thái kết nối chia sẻ qua Zustand store.
+  useRealtimeMarket();
+
   // UI selections live in the Zustand store (blueprint §3) — no prop drilling.
   return (
     <div className="flex min-h-screen flex-col">
@@ -40,12 +46,15 @@ export default function Page() {
           {/* 4. Multi-agent system */}
           <AgentsPanel />
 
-          {/* 5. Signals + risk alerts */}
+          {/* 5. Signals + risk alerts + news */}
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
             <div className="xl:col-span-2">
               <SignalsFeed />
             </div>
-            <RiskAlerts />
+            <div className="flex flex-col gap-6">
+              <RiskAlerts />
+              <NewsCard />
+            </div>
           </div>
         </div>
       </main>

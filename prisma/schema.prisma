@@ -459,3 +459,41 @@ model WatchlistItem {
 
   @@unique([watchlistId, instrumentId])
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 8. NEWS & DATA-SOURCE STATUS (S5 news RSS + S4 stale marking)
+//    — DATA_SOURCES.md §4.3/§4.2
+// ─────────────────────────────────────────────────────────────────
+
+// S5 — tin tức tài chính crawl từ RSS (VnEconomy/CafeF/VNExpress/Tuổi Trẻ).
+// Dedupe theo `url` (Q4 DATA_SOURCES). Sentiment KHÔNG lưu ở đây — đó là
+// việc của agent news-sentiment (AgentMessage.sentiment).
+model NewsItem {
+  id String @id @default(cuid())
+  title String
+  summary String? // trích dẫn ngắn, đã strip HTML
+  url String @unique // khóa dedupe
+  source String // VnEconomy | CafeF | VNExpress | Tuổi Trẻ | Seed
+  sourceUrl String? // URL của feed gốc
+  category String? // market | macro | company
+  publishedAt DateTime // thời gian bài viết
+  fetchedAt DateTime @default(now()) // lần crawl
+  createdAt DateTime @default(now())
+
+  @@index([publishedAt(sort: Desc)])
+  @@index([source, publishedAt(sort: Desc)])
+}
+
+// S4/S6 — trạng thái mỗi nguồn dữ liệu để đánh dấu live/simulated/stale
+// (fallback strategy §6 DATA_SOURCES.md: serve last cache + mark stale).
+model DataSourceStatus {
+  id String @id @default(cuid())
+  key String @unique // market-quotes | news | foreign-flows | trading
+  label String // nhãn hiển thị tiếng Việt
+  mode String // live | simulated | fallback | paper
+  lastSuccessAt DateTime?
+  lastError String?
+  meta String? // JSON: provider, counts, chi tiết
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -9,10 +9,14 @@ import {
   Coins,
   Flame,
   Gauge,
+  ArrowLeftRight,
+  Radio,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
+import { useUiStore } from "@/lib/store";
+import { cn } from "@/lib/utils";
 import {
   changeColor,
   formatPct,
@@ -20,7 +24,7 @@ import {
   formatVndCompact,
   formatVolume,
 } from "@/lib/format";
-import type { QuotesResponse } from "@/lib/types";
+import type { FlowsResponse, NewsResponse, QuotesResponse } from "@/lib/types";
 
 export function MarketSummary() {
   const { data, isLoading, isError, error } = useQuery({
@@ -69,6 +73,7 @@ export function MarketSummary() {
   const downPct = (s.declining / breadthTotal) * 100;
 
   return (
+    <>
     <section
       aria-label="Tổng quan thị trường"
       className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
@@ -162,6 +167,119 @@ export function MarketSummary() {
         }
       />
     </section>
+    <MarketPulseBar />
+    </>
+  );
+}
+
+/**
+ * Thanh pulse Giai đoạn 2: dòng khối ngoại (S6) + tin mới nhất (S5) +
+ * trạng thái tick realtime (WebSocket market-engine).
+ */
+
+/** Đồng hồ 5s (hydration-safe, thuần khi render) để tính tuổi tick. */
+function useNowMs(): number {
+  return React.useSyncExternalStore(
+    (onChange) => {
+      const timer = setInterval(onChange, 5_000);
+      return () => clearInterval(timer);
+    },
+    () => Math.floor(Date.now() / 5_000) * 5_000,
+    () => 0
+  );
+}
+
+function MarketPulseBar() {
+  const realtimeConnected = useUiStore((s) => s.realtimeConnected);
+  const lastTickAt = useUiStore((s) => s.lastTickAt);
+  const nowMs = useNowMs();
+
+  const { data: flows } = useQuery({
+    queryKey: ["flows"],
+    queryFn: () => apiGet<FlowsResponse>("/api/market/flows"),
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+  });
+  const { data: news } = useQuery({
+    queryKey: ["news"],
+    queryFn: () => apiGet<NewsResponse>("/api/news?limit=1"),
+    staleTime: 5 * 60_000,
+  });
+
+  const latest = news?.items[0];
+  const tickAgeSec = lastTickAt && nowMs > 0
+    ? Math.max(0, Math.round((nowMs - lastTickAt) / 1000))
+    : null;
+
+  return (
+    <Card className="gap-0 py-3" aria-label="Xung thị trường">
+      <CardContent className="flex flex-col gap-2 px-4 text-xs sm:flex-row sm:items-center sm:gap-6">
+        {/* S6 — dòng khối ngoại ròng */}
+        <div className="flex shrink-0 items-center gap-2" title={flows?.note}>
+          <ArrowLeftRight className="size-4 text-muted-foreground" aria-hidden="true" />
+          <span className="text-muted-foreground">Khối ngoại ròng:</span>
+          {flows ? (
+            <span className={cn("font-semibold tabular-nums", changeColor(flows.totalNet))}>
+              {flows.totalNet >= 0 ? "+" : "−"}
+              {formatVndCompact(Math.abs(flows.totalNet))}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+          {flows && (
+            <span
+              className="hidden text-[10px] text-muted-foreground md:inline"
+              suppressHydrationWarning
+            >
+              {flows.mode === "live" ? "nguồn ngoài" : "mô phỏng"} · mua{" "}
+              {formatVndCompact(flows.totalBuy)} / bán {formatVndCompact(flows.totalSell)}
+            </span>
+          )}
+        </div>
+
+        <span className="hidden text-muted-foreground/50 sm:inline" aria-hidden="true">
+          ·
+        </span>
+
+        {/* S5 — tin mới nhất */}
+        {latest ? (
+          <a
+            href={latest.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="min-w-0 flex-1 truncate outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+            title={latest.title}
+          >
+            <span className="mr-1.5 rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-secondary-foreground">
+              {latest.source}
+            </span>
+            {latest.title}
+          </a>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            Chưa có tin mới — bấm “Nạp tin” ở thẻ Tin tức thị trường
+          </span>
+        )}
+
+        {/* Realtime tick */}
+        <span
+          className={cn(
+            "flex shrink-0 items-center gap-1.5 tabular-nums",
+            realtimeConnected ? "text-up" : "text-muted-foreground"
+          )}
+          title={
+            realtimeConnected
+              ? "market-engine đang phát sóng tick mỗi 10 giây"
+              : "WebSocket chưa kết nối — dữ liệu làm mới bằng polling"
+          }
+        >
+          <Radio className="size-3.5" aria-hidden="true" />
+          {realtimeConnected
+            ? `tick ${tickAgeSec != null ? `${tickAgeSec}s` : ""} trước`
+            : "offline"}
+        </span>
+      </CardContent>
+    </Card>
   );
 }
 
