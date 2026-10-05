@@ -113,3 +113,17 @@ Work Log:
 
 Stage Summary:
 - docs/USER_PROMPTS.md created as the single source of truth for the user's request history
+
+---
+Task ID: 6
+Agent: main-orchestrator (Z.ai Code)
+Task: Audit 3 core docs vs actual implementation; propose implementation order
+
+Work Log:
+- Read full TECHNICAL_BLUEPRINT.md (232 lines) + DATA_SOURCES.md (186) + section scan of DB_SCHEMA.md (726)
+- Cross-checked every documented claim against code: API routes tree, /api/agents/run implementation, signals/convert, portfolio route, header/footer components, zustand/staleTime usage
+- Findings: DB_SCHEMA ~fully implemented; TECHNICAL_BLUEPRINT has gaps (API surface mismatch: /api/market/summary|watchlist|instruments/[symbol]/bars documented but implemented differently as /api/market/quotes + /api/instruments/bars; /api/orders + /api/signals/[id]/convert implemented but undocumented; §5.2 run cycle only runs portfolio-strategist instead of full 6-step multi-agent cycle with Signal+Order generation; §5.3 dynamic health scoring static; §6 AGENT_RUN_COMPLETED audit log missing in run route; accountNumber not masked in header; Zustand documented but unused; flat staleTime 15s instead of tiers; footer lacks data-source status); Watchlist model seeded but unconsumed by any API
+- DATA_SOURCES.md self-declared checklist accurate (S1/S2 done; S3-S6 + stale marking + scheduler + WebSocket + holiday calendar pending)
+
+Stage Summary:
+- Audit complete; implementation order proposal prepared for user approval
