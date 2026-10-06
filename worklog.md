@@ -235,3 +235,21 @@ Work Log:
 Stage Summary:
 - Toàn bộ The Trader v0.3 (Giai đoạn 1 + 2: 19 models, 17 route API, mini-service market-engine realtime, RSS news 5 nguồn, flows khối ngoại, LIVE_TRADING scaffold, docs v0.3.0 đồng bộ, README 161 dòng) đã CÔNG KHAI trên GitHub branch main
 - Kết thúc chuỗi Task 1–15: app chạy verified E2E qua gateway + code đã lên remote
+
+---
+Task ID: 16
+Agent: main-orchestrator (Z.ai Code)
+Task: Lưu PAT để dùng về sau + rà soát tổng thể tiến độ công việc được giao
+
+Work Log:
+- Lưu PAT ghp_ALuO…VfHrD theo yêu cầu người dùng (sẽ tự quyết xóa sau khi app hoàn thành): (1) `.git/credentials` mode 600 — nằm trong `.git/` nên không bao giờ bị commit/push; (2) bật `git config credential.helper store` → `git push`/`ls-remote` tự xác thực (verify OK: ls-remote origin chạy không cần token trong URL); (3) biến `GITHUB_PAT` trong `.env` (đã gitignore bởi rule `.env*`) cho GitHub API calls khi cần; Next.js tự reload env
+- Rà soát tổng thể: đọc lại toàn bộ worklog Task 1–15 + DATA_SOURCES.md (219 dòng, checklist §7) + TECHNICAL_BLUEPRINT.md §9 roadmap + USER_PROMPTS.md + git log (10 commit) + cấu trúc code thực tế (19 models, 15 route file + /api/signals/[id]/convert = 17 endpoint, mini-services/market-engine, 14 lib, 11 dashboard component, 2 hook)
+- Kiểm tra sức khoẻ app: dev server chạy (GET / 200), market-engine đang tick 10s liên tục (POST /api/market/tick 200), /api/system/status trả 3 nguồn (market-quotes simulated 0 phút tuổi, news LIVE 5 provider, foreign-flows simulated), /api/news có tin RSS thật, /api/market/quotes meta đầy đủ
+- PHÁT HIỆN & SỬA khoảng trống tài liệu: docs/USER_PROMPTS.md (tạo 2026-10-05) thiếu các prompt Giai đoạn 4–6 (kiểm toán 3 tài liệu, duyệt lộ trình, Giai đoạn 2 + push, xác minh PAT, lưu PAT) và Phụ lục "Phần chưa triển khai" đã lỗi thời (ghi WebSocket/RSS/LIVE_TRADING ⬜ trong khi đã ✅/🟡 ở Giai đoạn 2) → cập nhật file lên 222 dòng: thêm 6 section prompt mới (4.1–6.2), viết lại Phụ lục 8 hạng mục theo trạng thái thực tế (token chỉ ghi dạng mask ghp_ALuO…VfHrD — KHÔNG ghi token thật vào docs)
+- Ghi nhận khoảng trống worklog nội bộ: Task ID 9–11 không có entry (code Giai đoạn 2 được commit ef6e48d + 4 commit UUID trung gian nhưng không log riêng; Task 12–13 đã verify retroactive nên không ảnh hưởng tính đầy đủ)
+- Commit + push docs/USER_PROMPTS.md bằng credential helper (không cần token trong URL)
+
+Stage Summary:
+- PAT lưu an toàn 2 chỗ (git credential store + .env), push sau này tự động
+- Trạng thái tổng hợp cho người dùng: Giai đoạn 1 (G1–G7) ✅ + Giai đoạn 2 (S4/S5/S6/scheduler/WebSocket/S3-scaffold) ✅ + docs v0.3.0 + GitHub push ✅; còn pending (cần nguồn ngoài thật): S3 gateway VNDIRECT, feed thị trường HOSE/HNX thật, khối ngoại/margin EOD thật, HNX/UPCOM + lịch Tết chính thức, Reuters (tuỳ chọn)
+- USER_PROMPTS.md giờ phản ánh đúng 6 giai đoạn prompt đầy đủ + phụ lục đồng bộ
