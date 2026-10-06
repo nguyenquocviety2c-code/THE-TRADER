@@ -1,18 +1,19 @@
 // The Trader — Multi-Agent Trading System (VNDIRECT)
 // Financial-grade schema: audit fields, soft delete, PII markers, indexes
-// DB: SQLite via Prisma (portable dev), schema mirrors docs/DB_SCHEMA.md
+// DB: Supabase Postgres (managed cloud, schema "trader") qua Prisma — kho dữ liệu
+// chính bền vững qua reset sandbox; schema mirrors docs/DB_SCHEMA.md
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgres"
   url      = env("DATABASE_URL")
 }
 
 // ─────────────────────────────────────────────────────────────────
-// ENUMS (SQLite: stored as TEXT by Prisma)
+// ENUMS (Postgres: native enum types trong schema "trader")
 // ─────────────────────────────────────────────────────────────────
 
 enum Market {

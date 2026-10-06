@@ -19,7 +19,7 @@ Schema được thiết kế theo chuẩn **financial-grade**:
 - **Integer money** — toàn bộ giá trị tiền tệ VND là số nguyên (xem §3), tránh sai số dấu chấm động vốn là yêu cầu bắt buộc trong hệ thống tài chính.
 - **Unique + composite indexes** phục vụ đúng truy vấn của dashboard và ràng buộc toàn vẹn dữ liệu thị trường (dedup OHLCV theo `(instrumentId, date)`).
 
-**Engine:** SQLite qua Prisma 6.19.3 (`DATABASE_URL=file:/home/z/my-project/db/custom.db` trong `.env`). Prisma giữ cửa ngõ migrate sang PostgreSQL cho production mà không đổi model.
+**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 19 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
 
 ---
 
@@ -30,9 +30,9 @@ Schema được thiết kế theo chuẩn **financial-grade**:
 | Entity/field naming | `PascalCase` cho model, `camelCase` cho field (chuẩn Prisma) |
 | Primary key | `id String @id @default(cuid())` — collision-safe, không phụ thuộc sequence |
 | Relations | Tên field quan hệ đặt theo nghĩa nghiệp vụ (`signalId`, `fromAgentId`), back-relation số nhiều (`quotes Quote[]`) |
-| Timestamps | `DateTime` lưu **UTC** (Prisma/SQLite ISO-8601); hiển thị theo `Asia/Ho_Chi_Minh` (xem [DATA_SOURCES.md §5](./DATA_SOURCES.md)) |
-| Enum | Định nghĩa bằng `enum` Prisma; trên SQLite được lưu dạng **TEXT** và validate ở application layer qua Prisma Client |
-| JSON-in-String | `config`, `output`, `result`, `before`, `after`, `sentiment`-style payload dùng `String` chứa JSON — SQLite không có kiểu JSON native |
+| Timestamps | `DateTime` lưu **UTC** (Prisma/Postgres `timestamp(3)`); hiển thị theo `Asia/Ho_Chi_Minh` (xem [DATA_SOURCES.md §5](./DATA_SOURCES.md)) |
+| Enum | Định nghĩa bằng `enum` Prisma; trên Postgres tạo **native enum type** trong schema `trader` |
+| JSON-in-String | `config`, `output`, `result`, `before`, `after`, `sentiment`-style payload dùng `String` chứa JSON — giữ trung lập provider |
 | Section comments | Schema chia 8 nhóm có đánh số: Users & Accounts, Market Data, Multi-Agent, Signals & Orders, Positions & Trades, Risk & Compliance, Watchlist, News & Data-Source Status |
 
 ---
@@ -722,7 +722,7 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 | `mode` | String | — | Chế độ nguồn hiện tại: `live` (nguồn ngoài thật) \| `simulated` (mô phỏng có khai báo) \| `fallback` (đang phục vụ cache) \| `paper` (lệnh giấy) |
 | `lastSuccessAt` | DateTime | nullable | Lần thành công cuối — tính tuổi dữ liệu (`ageMinutes`) và cờ `stale` |
 | `lastError` | String | nullable | Thông báo lỗi gần nhất của nguồn (hiển thị khi stale) |
-| `meta` | String | nullable | JSON mở rộng: `providers`, `counts`, chi tiết engine (SQLite không có JSON native) |
+| `meta` | String | nullable | JSON mở rộng: `providers`, `counts`, chi tiết engine |
 | `createdAt` | DateTime | default `now()` | Audit |
 | `updatedAt` | DateTime | `@updatedAt` | Thời điểm upsert trạng thái cuối |
 

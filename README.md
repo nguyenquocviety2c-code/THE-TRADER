@@ -2,7 +2,7 @@
 
 > **Dashboard multi-agent paper-trading cho VNDIRECT** — hội đồng 5 agent AI (glm-4.6) phân tích realtime, bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
 
-**Next.js 16** · **TypeScript** · **Prisma + SQLite** · **shadcn/ui** · **glm-4.6** (z-ai-web-dev-sdk) · **socket.io**
+**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **glm-4.6** (z-ai-web-dev-sdk) · **socket.io**
 
 > **Miễn trừ trách nhiệm:** đây là dự án minh họa (demo). Dữ liệu giá trên dashboard là **mô phỏng** (random-walk + mean-reversion, gắn nhãn `simulated`); toàn bộ lệnh là **paper trading** — lệnh giấy nội bộ, không gửi ra môi giới; tin tức RSS là dữ liệu thật nhưng chỉ làm ngữ cảnh phân tích. Dự án **không** dùng để giao dịch tiền thật.
 
@@ -37,7 +37,7 @@ flowchart TB
         LLM["z-ai-web-dev-sdk — glm-4.6\n(backend-only)"]
     end
 
-    DB[("SQLite — db/custom.db\nPrisma · 19 models")]
+    DB[("Supabase Postgres — schema trader\nPrisma · 19 models")]
 
     subgraph Engine["mini-service market-engine — cổng 3003"]
         IO["socket.io server\nbroadcast: quotes · news · cycle"]
@@ -75,7 +75,7 @@ bun install
 # 2. Tạo .env từ mẫu (chỉnh DATABASE_URL nếu cần)
 cp .env.example .env
 
-# 3. Đẩy schema Prisma vào SQLite
+# 3. Đẩy schema Prisma vào Supabase Postgres (schema "trader" — tạo sẵn: CREATE SCHEMA trader)
 bun run db:push
 
 # 4. Nạp dữ liệu demo (30 mã VN30 · 90 ngày OHLCV · 5 agent · danh mục mẫu)
@@ -105,7 +105,7 @@ Mini-service lắng nghe **cổng 3003** và gọi thẳng app Next.js (server-t
 | `bun run dev` | Dev server Next.js (cổng 3000) |
 | `bun run lint` | Kiểm tra ESLint |
 | `bun run build` / `bun run start` | Build & chạy production |
-| `bun run db:push` | Đẩy schema Prisma vào SQLite |
+| `bun run db:push` | Đẩy schema Prisma vào Supabase Postgres (schema `trader`) |
 | `bun run db:generate` | Sinh lại Prisma Client |
 | `bun run db:studio` | Mở Prisma Studio |
 | `bun prisma/seed.ts` | Nạp lại dữ liệu demo (**xóa sạch dữ liệu cũ**) |
@@ -116,7 +116,7 @@ Mini-service lắng nghe **cổng 3003** và gọi thẳng app Next.js (server-t
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `DATABASE_URL` | `file:/home/z/my-project/db/custom.db` | CSDL SQLite (Prisma) |
+| `DATABASE_URL` | `postgresql://postgres.<ref>:<pwd>@aws-0-<region>.pooler.supabase.com:5432/postgres?schema=trader` | Kho dữ liệu chính — Supabase Postgres qua Prisma (bền vững qua reset sandbox) |
 | `LIVE_TRADING` | `false` | S3 — bật giao dịch thật VNDIRECT; bật mà thiếu cấu hình bên dưới → API từ chối + audit log |
 | `VNDIRECT_API_BASE` | — | Endpoint VNDIRECT open API (chỉ cần khi `LIVE_TRADING=true`) |
 | `VNDIRECT_API_TOKEN` | — | Token khách hàng VNDIRECT — giữ phía server, không commit |

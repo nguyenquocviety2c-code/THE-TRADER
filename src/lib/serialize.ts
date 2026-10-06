@@ -1,5 +1,5 @@
 /**
- * BigInt values are not JSON-serializable (Prisma SQLite uses BigInt for
+ * BigInt values are not JSON-serializable (Prisma Postgres uses BigInt for
  * VND money columns). Recursively convert any BigInt to Number before
  * passing payloads to NextResponse.json().
  */

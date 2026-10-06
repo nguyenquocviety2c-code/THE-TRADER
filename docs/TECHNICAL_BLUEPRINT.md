@@ -26,7 +26,7 @@ The Trader là một **trading workspace một trang** (single-page dashboard): 
 | Ngôn ngữ | TypeScript | 5.9.3 |
 | Styling | Tailwind CSS + `tw-animate-css` | 4.3.3 |
 | Components | shadcn/ui (style **new-york**, theme **neutral**, primitives Radix) + `lucide-react` icons | — |
-| ORM / DB | Prisma + `@prisma/client` → SQLite (`db/custom.db` qua `DATABASE_URL`) | 6.19.3 |
+| ORM / DB | Prisma + `@prisma/client` → **Supabase Postgres** (schema `trader`, Supavisor session pooler `:5432` qua `DATABASE_URL`) — kho dữ liệu chính bền vững qua reset sandbox | 6.19.3 |
 | Server state | TanStack Query | 5.104.1 |
 | Local state | Zustand | 5.0.15 |
 | Theming | `next-themes` (dark default) | 0.4.6 |
@@ -69,7 +69,7 @@ flowchart TB
 
     RSS[("5 feed RSS VN (S5 — live)\nVnEconomy · CafeF · VNExpress\nTuổi Trẻ · VietnamNet")]
 
-    DB[("SQLite — db/custom.db\nPrisma 6.19.3 (19 models)")]
+    DB[("Supabase Postgres — schema trader\nPrisma 6.19.3 (19 models)\nđám mây — sống qua reset sandbox")]
 
     subgraph Future["Lộ trình (planned)"]
         GW["VNDIRECT Gateway mini-service\nOrder placement · Account balance\n(behind LIVE_TRADING flag)"]
@@ -95,7 +95,7 @@ flowchart TB
     GW -. planned .-> API
 ```
 
-**Luồng dữ liệu:** SQLite → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt chu kỳ phân tích đa agent, sinh `AgentMessage`/`Signal`/`Order` giấy), `POST /api/market/tick` (tick giá S4 + khớp lệnh giấy + EOD rollover), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
+**Luồng dữ liệu:** Supabase Postgres (schema `trader`) → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt chu kỳ phân tích đa agent, sinh `AgentMessage`/`Signal`/`Order` giấy), `POST /api/market/tick` (tick giá S4 + khớp lệnh giấy + EOD rollover), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
 
 ---
 
@@ -187,7 +187,7 @@ Tham chiếu field: mỗi response khớp định nghĩa model tại [DB_SCHEMA.
 sequenceDiagram
     participant U as Trader (UI)
     participant API as POST /api/agents/run
-    participant DB as Prisma / SQLite
+    participant DB as Prisma / Supabase Postgres
     participant LLM as glm-4.6 (z-ai-web-dev-sdk)
 
     U->>API: POST /api/agents/run
@@ -284,7 +284,7 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | **JSON serialization** | `BigInt` (VND) chuyển `Number` tại API boundary — mọi giá trị demo < 2^53 nên lossless; client không cần BigInt polyfill. |
 | **Client caching** | TanStack Query `staleTime` phân tầng: quote/watchlist 30s, portfolio/orders/signals/risk/agents 30–60s, bars 5 phút; skeleton ngay lập tức từ cache cũ (stale-while-revalidate). |
 | **Loading UX** | shadcn `Skeleton` cho mọi section trong lần fetch đầu; sonner toast cho mutation `POST /api/agents/run` (không block UI). |
-| **DB footprint** | SQLite single-file đủ cho 1 trader × paper trading (≈ 2,700 bar + vài nghìn row agent telemetry + vài nghìn tin RSS sau seed); Prisma giữ đường migrate PostgreSQL khi đa người dùng. |
+| **DB footprint** | Supabase Postgres (schema `trader`) — kho chính bền vững qua reset sandbox (dữ liệu phân tích/telemetry không mất khi môi trường local bị reset); song song cùng project còn schema `public` Gen-1 với **95.259 bar EOD thật 2013→2026** (nguồn dự phòng cho tích hợp dữ liệu thật VNDIRECT). Ops SQL qua `tools/db-console.mjs` (Management API). |
 
 ---
 

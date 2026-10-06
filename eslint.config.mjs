@@ -16,6 +16,8 @@ const eslintConfig = defineConfig([
     "skills/**",
     "download/**",
     "upload/**",
+    // Ops scripts (not app code — mirror Gen-1 convention):
+    "tools/**",
   ]),
 ]);
 
