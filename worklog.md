@@ -216,3 +216,22 @@ Work Log:
 Stage Summary:
 - Code hoàn chỉnh, commit sẵn tại main local (8910067, đã chứa ff12a91 của remote qua merge → push sẽ là fast-forward sạch, không cần force)
 - CHỜ token PAT hợp lệ (scope repo) từ người dùng để push, hoặc người dùng tự push bằng 1 lệnh git
+
+---
+Task ID: 15
+Agent: main-orchestrator (Z.ai Code)
+Task: Xác minh PAT mới (ghp_ALuO…) + push thành công GitHub vietnq130593-code/THE-TRADER
+
+Work Log:
+- Người dùng cung cấp PAT mới ghp_ALuO…VfHrD (token cũ ghp_fQNS… đã 401 Bad credentials ở Task 14)
+- Xác minh qua GitHub API /user: login "vietnq130593-code" (Mr. Architect, id 252357891) → ĐÚNG chủ sở hữu repo ✅
+- Kiểm tra scope header X-OAuth-Scopes: có "repo" (cùng nhiều scope khác) ✅
+- Kiểm tra quyền repo THE-TRADER qua API: push=true, default branch main, non-fork ✅
+- Kiểm tra an toàn trước push: git ls-files KHÔNG chứa .env / *.db / dev.log; working tree clean; remote main = ff12a91 là ancestor của HEAD local (đã merge ở 0fab059) → đảm bảo fast-forward
+- Push: git push -u origin main → ff12a91..8a1f59d main -> main (fast-forward sạch, KHÔNG force), upstream tracking origin/main thiết lập
+- Xác minh sau push qua API /branches/main: sha = 8a1f59d7ffbac88ce865dfb7f8b24cdf5d6d9466, message "docs: worklog Task 13-14 (E2E verification + push attempt)" ✅
+- Vệ sinh bảo mật: xóa PAT khỏi .git/config (git remote set-url origin về URL không token)
+
+Stage Summary:
+- Toàn bộ The Trader v0.3 (Giai đoạn 1 + 2: 19 models, 17 route API, mini-service market-engine realtime, RSS news 5 nguồn, flows khối ngoại, LIVE_TRADING scaffold, docs v0.3.0 đồng bộ, README 161 dòng) đã CÔNG KHAI trên GitHub branch main
+- Kết thúc chuỗi Task 1–15: app chạy verified E2E qua gateway + code đã lên remote
