@@ -270,3 +270,21 @@ Work Log:
 Stage Summary:
 - Báo cáo review theo persona CFO delivered; đề xuất lộ trình Giai đoạn 3 chờ phê duyệt
 - Ảnh review lưu tool-results/review-{top,mid,bot}.png; VLM audit tool-results/vlm-review.json
+
+---
+Task ID: 18
+Agent: main-orchestrator (Z.ai Code)
+Task: Viết PHASE3_BLUEPRINT.md (3 bước triển khai) + CODE_AUDIT.md (khung rà soát chi tiết) theo yêu cầu người dùng
+
+Work Log:
+- Đọc prisma/schema.prisma (19 model chính xác: Agent/AgentRun/AgentTask/AgentMessage/Signal/Order/Position/Trade/BrokerAccount/Quote/Bar) + api/agents route + run route + use-realtime để blueprint khớp hợp đồng dữ liệu thật
+- Fact-check 3 điểm nghi vấn: (1) tick route dùng quote.update TẠI CHỖ — mâu thuẫn doc Q4 "append-only" → ghi finding K2; (2) POST /api/agents/run KHÔNG rate-limit → finding K1 P1; (3) use-realtime có reconnect + cleanup đủ 4 event → OK
+- Tạo docs/PHASE3_BLUEPRINT.md (v0.1.0 draft, ~330 dòng): §1 mục tiêu 3 bước + ràng buộc (single route /, no-fabrication, LLM backend-only, ngân sách chi phí); §2 kiến trúc mermaid (app shell + 5 API mới); §3 B1 App shell (Zustand workspaceSlice + nav.tsx + tái cấu trúc page); §4 B2 Workspace Đội Agent — schema delta (AgentMessage.direction + Signal.status/rejectedAt/rejectNote + 2 index), hợp đồng JSON đầy đủ 5 route (roster stats, chi tiết, chạy riêng có rate-limit 60s + role-prompt map từng agent, chat 1-1 đo chi phí, decision APPROVE/REJECT với audit SIGNAL_REJECTED), 7 component UI mới, tiêu chí nghiệm thu; §5 B3 nâng cấp dashboard (nến recharts Customized + volume + RSI14 panel, cột trần/sàn/ref/high/low + toggle cột mở rộng, donut phân bổ ngành + % tỷ trọng + realized P&L, chip sức mua có nhãn ước tính MARGIN_ROOM_RATIO, chip chi phí AI); §6 kế hoạch file (12 mới + 9 đổi); §7 kiểm thử (audit trước — fix P0/P1 — E2E chủ chốt B2 — hồi quy); §8 thứ tự ~4 ngày công; §9 change log
+- Tạo docs/CODE_AUDIT.md (v0.1.0, ~300 dòng): phương pháp P0-P3 + bộ công cụ (tsc/lint/agent-browser/VLM/curl/sqlite3); bản đồ phạm vi 9 vùng; checklist chi tiết A-I: A schema/seed (4 nhóm), B API 17 endpoint (8 kiểm chung + B2 từng route cụ thể), C lib 14 file từng file một, D frontend 12 component + hydration/console/key/scrollbar/footer sticky, E realtime + market-engine (event contract, scheduler mặc định TẮT, single instance), F bảo mật (secret sweep, SDK backend-only, XSS RSS, audit coverage), G hiệu năng (N+1, prompt size, staleTime, khôi phục lỗi), H nghiệp vụ tài chính (phí 0.15%, thuế 0.1% chỉ BÁN, lot 100, Q1-Q9), I docs/vận hành; §4 8 rủi ro đã biết từ lịch sử K1-K8 (K1 rate-limit P1 là quan trọng nhất); §5 template bảng findings; §6 nghi thức hoàn tất (P0/P1 sửa trước Giai đoạn 3)
+- Validate mermaid blueprint bằng mmdc: exit 0, SVG 27KB render được
+- Commit + push 2 file docs bằng credential helper đã lưu
+
+Stage Summary:
+- docs/PHASE3_BLUEPRINT.md: bản hợp đồng triển khai 3 bước (App shell → Đội Agent → nâng cấp dashboard) — đủ chi tiết để code ngay sau phê duyệt: schema delta Prisma, hợp đồng request/response JSON từng route mới, role-prompt map, file plan, acceptance criteria từng bước
+- docs/CODE_AUDIT.md: khung rà soát 9 vùng × ~120 mục kiểm chi tiết + 8 rủi ro đã biết — sẽ nâng v0.2.0 kèm bảng findings khi chạy audit thật
+- Trình tự đề xuất cho người dùng: duyệt 2 tài liệu → chạy audit (sửa P0/P1) → triển khai Giai đoạn 3 theo blueprint
