@@ -129,24 +129,36 @@ function generateBars(def: StockDef, days = 90) {
     const high = Math.max(open, close) * (1 + rand() * def.vol * 0.6)
     const low = Math.min(open, close) * (1 - rand() * def.vol * 0.6)
     const volume = Math.round(def.volBase * (0.6 + rand() * 0.9))
+    // F-101 (audit 19-a): mọi giá OHLC nằm trong dải ±7% so close hôm trước (Q2 HOSE)
+    const bandHigh = round100(price * 1.07)
+    const bandLow = round100(price * 0.93)
+    const openC = Math.min(Math.max(round100(open), bandLow), bandHigh)
+    const closeC = Math.min(Math.max(round100(close), bandLow), bandHigh)
+    const highC = Math.min(bandHigh, Math.max(round100(high), openC, closeC))
+    const lowC = Math.max(bandLow, Math.min(round100(low), openC, closeC))
     bars.push({
       date,
-      open: round100(open),
-      high: round100(high),
-      low: round100(low),
-      close: round100(close),
+      open: openC,
+      high: highC,
+      low: lowC,
+      close: closeC,
       volume,
-      value: volume * round100(close),
+      value: volume * closeC,
     })
-    price = close
+    price = closeC
   }
   // Force last close to reference price for consistency with quotes
+  // (F-101 audit 19-a: kéo về sát def.price NHƯNG luôn trong dải ±7% so close hôm trước)
   const last = bars[bars.length - 1]
-  const adj = def.price
+  const prevClose = bars[bars.length - 2].close
+  const bandHigh = round100(prevClose * 1.07)
+  const bandLow = round100(prevClose * 0.93)
+  const clamp = (v: number) => Math.min(Math.max(v, bandLow), bandHigh)
+  const adj = clamp(round100(def.price))
   last.close = adj
-  last.open = round100(adj * (1 - (rand() - 0.5) * 0.006))
-  last.high = round100(Math.max(last.open, adj) * (1 + rand() * def.vol * 0.4))
-  last.low = round100(Math.min(last.open, adj) * (1 - rand() * def.vol * 0.4))
+  last.open = clamp(round100(adj * (1 - (rand() - 0.5) * 0.006)))
+  last.high = Math.min(bandHigh, round100(Math.max(last.open, adj) * (1 + rand() * def.vol * 0.4)))
+  last.low = Math.max(bandLow, round100(Math.min(last.open, adj) * (1 - rand() * def.vol * 0.4)))
   return bars
 }
 

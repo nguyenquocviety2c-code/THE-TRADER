@@ -29,7 +29,7 @@ export async function POST(
           select: {
             id: true,
             symbol: true,
-            quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true } },
+            quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true, floorPrice: true, ceilingPrice: true } },
           },
         },
         agent: { select: { code: true, name: true } },
@@ -45,6 +45,17 @@ export async function POST(
     if (signal.actedAt) {
       return NextResponse.json(
         { error: "Tín hiệu này đã được chuyển thành lệnh trước đó." },
+        { status: 409 }
+      );
+    }
+    // F-207 (audit 19-b): tín hiệu đã có lệnh trong sổ (dù actedAt thiếu) → chặn tạo trùng
+    const existingOrder = await db.order.findFirst({
+      where: { signalId: signal.id },
+      select: { id: true, status: true },
+    });
+    if (existingOrder) {
+      return NextResponse.json(
+        { error: "Tín hiệu này đã có lệnh liên quan trong sổ lệnh." },
         { status: 409 }
       );
     }
@@ -106,14 +117,19 @@ export async function POST(
     }
 
     const side = signal.direction; // BUY | SELL
-    const price =
-      signal.targetPrice ?? signal.instrument.quotes[0]?.last ?? 0;
-    if (price <= 0) {
+    const quote = signal.instrument.quotes[0];
+    const rawPrice = signal.targetPrice ?? quote?.last ?? 0;
+    if (rawPrice <= 0) {
       return NextResponse.json(
         { error: "Không xác định được giá đặt cho lệnh." },
         { status: 400 }
       );
     }
+    // F-202 (audit 19-b): giá lệnh luôn nằm trong dải trần/sàn ±7% (Q2), bội 100 ₫
+    const roundTo100 = (v: number) => Math.max(0, Math.round(v / 100) * 100);
+    const bandLow = quote?.floorPrice ?? roundTo100(rawPrice * 0.93);
+    const bandHigh = quote?.ceilingPrice ?? roundTo100(rawPrice * 1.07);
+    const price = Math.max(bandLow, Math.min(roundTo100(rawPrice), bandHigh));
 
     // Sizing: BUY → ~50tr VND budget; SELL → half of existing position
     let quantity: number;
@@ -154,6 +170,7 @@ export async function POST(
         type: "LIMIT",
         quantity,
         price,
+        fee: BigInt(Math.round(0.0015 * price * quantity)), // F-201 (audit 19-b): phí môi giới 0,15% notional
         status: "PENDING",
         note: `Từ tín hiệu ${side === "BUY" ? "MUA" : "BÁN"} ${signal.instrument.symbol}${
           signal.agent ? ` (agent ${signal.agent.name})` : ""

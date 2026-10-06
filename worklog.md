@@ -288,3 +288,99 @@ Stage Summary:
 - docs/PHASE3_BLUEPRINT.md: bản hợp đồng triển khai 3 bước (App shell → Đội Agent → nâng cấp dashboard) — đủ chi tiết để code ngay sau phê duyệt: schema delta Prisma, hợp đồng request/response JSON từng route mới, role-prompt map, file plan, acceptance criteria từng bước
 - docs/CODE_AUDIT.md: khung rà soát 9 vùng × ~120 mục kiểm chi tiết + 8 rủi ro đã biết — sẽ nâng v0.2.0 kèm bảng findings khi chạy audit thật
 - Trình tự đề xuất cho người dùng: duyệt 2 tài liệu → chạy audit (sửa P0/P1) → triển khai Giai đoạn 3 theo blueprint
+
+---
+Task ID: 19-b
+Agent: general-purpose (audit B+F)
+Task: Rà soát code theo CODE_AUDIT.md — vùng B (17 API endpoint) + F (bảo mật)
+
+Work Log:
+- Đọc worklog.md (Task 1–18) + docs/CODE_AUDIT.md §3.B/§3.F làm chuẩn đối chiếu; đọc toàn bộ 16 file route (17 endpoint) + lib liên quan (types/serialize/market-quotes/flows/sources/news/trading-mode) + prisma/schema.prisma (Order/Quote/Signal)
+- B1: curl 12 GET endpoint → 12/12 HTTP 200, JSON hợp lệ, tiếng Việt không mojibake ("Ngân hàng TMCP Sài Gòn - Hà Nội"), không rác BigInt, không passwordHash/phone; accountNumber chỉ xuất hiện ở /api/portfolio dạng mask VD00••••1828; grep xác nhận 16/16 file route có `export const dynamic = "force-dynamic"` + try/catch trả JSON lỗi VN
+- B1 edge cases (13 curl): bars FAKEXYZ→404 JSON VN; days=999→200 (days:250, 90 bar có sẵn); days=-5→clamp 10; days=abc→default 90; bỏ symbol→VCB mặc định; news limit 999/0/-1/abc→30/1/1/12 item (đều 200); convert cuid rác→404 JSON; convert tín hiệu HOLD→400; toggle body rỗng/ký tự lạ→400, mã lạ→404 — không có bất kỳ 500/HTML stack nào
+- B2.1 quotes: 30 mã, sort volume desc khớp DB (SHB top), breadth 10/18/2 khớp query sqlite cùng thời điểm, meta.mode= simulated + meta.asOf có, bid/ask ≥ 0; Q5 change=last−refPrice + changePct khớp ±0.01 trên 5 mã
+- B2.2 POST /api/market/tick: snapshot DB trước/sau (SHB) — Q1 last%100=0 ✓, Q2 trong dải ✓, Q3 volume chỉ tăng ✓, Q5 ✓, tradedAt tăng ✓, DataSourceStatus market-quotes.lastSuccessAt cập nhật ✓, latency 42ms; Quote ROW COUNT 30→30, cùng row id → **K2 XÁC NHẬN bằng chứng mới**: tick route.ts:102 `quote.update` tại chỗ vs DATA_SOURCES.md:168 Q4 ghi "Quote append-only theo tradedAt"
+- B2.3 flows: gọi 2 lần — giá trị netValue/totalNet/topNet/topSell IDENTICAL (FNV-1a deterministic ✓); asOf là timestamp từng call (khác nhau — ghi P3); topNet đúng 5 dương lớn nhất, topSell 5 âm sâu nhất, totalNet=buy−sell ✓, note + mode "simulated" ✓
+- B2.4 system/status: 4 nguồn (market-quotes/news/foreign-flows/trading) đủ mode/stale/ageMinutes/lastSuccessAt; trading.mode="paper" ✓; counts + escalatedAlerts + serverTime ISO UTC
+- B2.5 news: GET meta {stale,ageMinutes,providers[5]} ✓; POST #1→200 (5/5 feed OK), POST ngay sau→429 kèm thông điệp VN + ingestedAt; test bắn nhanh 3 lần liên tiếp xác nhận guard 60s hoạt động đúng; DB COUNT(*)==COUNT(DISTINCT url) (112→112, nạp lại chỉ +2 tin mới, 48/50 trùng url không nhân đôi); 0 row chứa HTML trong title/summary
+- B2.6 watchlist: chọn SHB (ngoài danh sách) → toggle ON 200 {inWatchlist:true,count:9}, GET watchlist thấy SHB; toggle OFF 200 {count:8}, GET không còn; AuditLog ghi WATCHLIST_ADDED → WATCHLIST_REMOVED đúng thứ tự; trạng thái gốc khôi phục
+- B2.7 convert (HPG BUY cmuv6i5rv...): 200, Order LIMIT PENDING qty 1600 (lô 100 ✓, budget ~50tr ✓), price 30100 (%100 ✓); gọi lại→409 đúng; NHƯNG **fee=0** (kỳ vọng 0.0015×30100×1600=72.240 ₫) và **price 30100 > trần 29600** (Q2 bị vi phạm — route không clamp targetPrice vào dải); 6/6 lệnh do API tạo trong DB đều fee=0 (chỉ seed tính phí); phát hiện thêm: seed để Signal.actedAt=null dù đã có Order FILLED trỏ tới → convert tạo lệnh trùng cho cùng tín hiệu
+- B2.8 portfolio: mask VD00••••1828 ✓; tính lại bằng DB: totalEquity==cash+ΣmarketValue ✓ (1.568.750.000), costBasis/unrealized/realized ✓, dayChangePct bình quân trọng số khớp tính tay (−0.1965) và |value| ≤ max changePct vị thế đơn; 7/7 vị thế công thức per-position đúng
+- B2.9: orders 20/trades 20, tasks 12, messages 30, signals 12, alerts 10 (đúng limit code); key names từng response khớp 1-1 với src/lib/types.ts (8/8 interface đối chiếu)
+- B2.10 agents/run (CHỈ ĐỌC CODE, không gọi): **K1 XÁC NHẬN** — grep 429/cooldown/throttle/lastRun trong route.ts chỉ ra retry LLM-side (dòng 117–129), không có guard route-level → spam chi phí LLM không giới hạn (P1); try/catch từng agent + failures[] ✓ (DB: 3 AgentRun FAILED recorded, chu kỳ vẫn hoàn tất, strategist 12 runs > analyst 10); AuditLog SIGNAL_APPROVED/ORDER_CREATED/AGENT_RUN_COMPLETED ✓; PHÁT HIỆN: nhánh 502 (3 analyst cùng lỗi, dòng 499–506) return sớm mà không reset status strategist+executor → kẹt "RUNNING" vĩnh viễn
+- F1: git ls-files | xargs rg secret patterns (ghp_/sk-/PRIVATE KEY/password) → RỖNG; F2: check-ignore .env/db/custom.db/dev.log → 3/3 ignored; F3: z-ai-web-dev-sdk chỉ src/app/api/agents/run/route.ts (0 hit components/hooks); F4 "use server" RỖNG; F5 $queryRawUnsafe RỖNG; F6 dangerouslySetInnerHTML RỖNG
+- F7: .env.example LIVE_TRADING=false, VNDIRECT_* chỉ placeholder comment; đủ 7 biến Giai đoạn 2 (TICK_MS/NEWS_MS/AGENT_CYCLE_MINUTES/APP_URL đang comment kèm default — ghi chú nhỏ)
+- F8 AuditLog coverage: runtime code ghi 8/11 action (ORDER_CREATED, SIGNAL_APPROVED, AGENT_RUN_COMPLETED, NEWS_INGESTED, WATCHLIST_ADDED/REMOVED, LIVE_TRADING_BLOCKED, LIVE_ORDER_GATEWAY_UNAVAILABLE); **ORDER_FILLED/ORDER_CANCELLED/RISK_ALERT_RAISED không có code path runtime nào ghi** (chỉ tồn tại từ seed.ts:500–512) — trong khi RiskAlert thật vẫn được tạo runtime (flows.ts FOREIGN_FLOW_OUTFLOW, sources.ts DATA_SOURCE_STALE) mà không có audit
+- F9 PII sweep: quét 12 response đã lưu theo raw accountNumber (12 ký tự)/phone/email/passwordHash/mẫu VD+digits → CLEAN, chỉ dạng mask
+- Không sửa bất kỳ file code nào; không gọi /api/agents/run; không db push/migrate/seed; các POST hợp lệ (tick, news, toggle, 1 convert) là một phần chỉ định của audit
+
+Stage Summary:
+- 12 findings: **3×P1** (F-201 fee=0 trên lệnh API tạo · F-202 giá lệnh ngoài dải ±7% ở convert · F-203 K1 không rate-limit /api/agents/run), **4×P2** (F-204 K2 doc "append-only" vs update-in-place · F-205 agent kẹt RUNNING nhánh 502 · F-206 thiếu 3 action audit runtime · F-207 seed actedAt lệch → lệnh trùng), **5×P3** (F-208 cap days 250 vs doc 90 · F-209 Quote.high/low seed ngoài dải 7/30 mã · F-210 429 thiếu Retry-After · F-211 flows asOf không deterministic · F-212 doc flows 0,5–6% vs code 3% cố định)
+- Verdict 17 endpoint: 15 PASS (trong đó tick/flows/bars/news có finding kèm), 2 PASS-WITH-FAIL (convert: 409/404/HOLD/lot ✓ nhưng fee+band ✗; agents/run: kiến trúc chu kỳ ✓ nhưng K1 + status-reset ✗) — không có endpoint nào crash/500/mojibake/lộ PII
+- ~135 mục kiểm: ~120 pass / 13 fail (map vào 12 findings, K1/K2 xác nhận lại bằng chứng tươi)
+- Khuyến nghị P1 sửa trước Giai đoạn 3 (theo §6 CODE_AUDIT): tính fee 0.15% khi tạo Order (convert + run), clamp giá lệnh vào [floor,ceiling], guard 60s cho /api/agents/run
+
+---
+Task ID: 19-a
+Agent: general-purpose (audit A+C+H)
+Task: Rà soát code theo CODE_AUDIT.md — vùng A (schema/seed), C (lib 14 file), H (nghiệp vụ tài chính)
+
+Work Log:
+- Đọc worklog.md toàn bộ (Task 1–18, chú trọng Task 17–18: K1 rate-limit, K2 quote append-only) + docs/CODE_AUDIT.md §3.A/§3.C/§3.H + docs/DB_SCHEMA.md §3–§10 + prisma/schema.prisma + prisma/seed.ts trọn file; READ-ONLY toàn bộ (không seed/db:push/migrate/git/POST run)
+- A1: đối chiếu field-by-field 19 model schema ↔ DB_SCHEMA.md §6.1–§6.19 + 12 enum ↔ §7 + onDelete (Signal.agent=SetNull, AgentTask.agent=Cascade) + updatedAt policy §4.3 → khớp 1:1, 0 lệch
+- A2: grep BigInt/Int schema — mọi trường tiền lớn (cashBalance/equity/marginUsed/realizedPnl/Order.fee/Trade.fee+tax/Bar.value/outstandingShares) đều BigInt; giá Int; % Float; không mảng primitive → PASS (tổng lớn như totalValue 391,188 tỷ chỉ là Number runtime < 2^53, không lưu Int)
+- A3: PRAGMA index_list trên 19 bảng — đủ mọi @@unique/@@index đúng tên & unique flag (Bar_instrumentId_date_key unique, NewsItem_url_key unique, BrokerAccount_broker_accountNumber_key, Position_brokerAccountId_instrumentId_key, WatchlistItem/DataSourceStatus/Agent_code/User_email…); EXPLAIN QUERY PLAN 10 truy vấn feed — 9/10 dùng index, AgentMessage feed toàn cục SCAN + TEMP B-TREE (P3, bảng nhỏ)
+- A4 (không chạy lại seed, chỉ query readonly + đọc code): 30 instrument / 2,700 bar / đúng 90 bar-mã / 30 quote; price%100: 0 vi phạm (Quote 9 cột + Bar 4 cột); trần/sàn = round100(ref×1.07/0.93): max deviation = 0 trên 30 quote; bar không T7/CN (strftime %w = 0 vi phạm); change = last − refPrice: 0 vi phạm (cả khi tick engine đang chạy); changePct ±0.01: 0 vi phạm; LCG code đúng seed 42, (state×1103515245+12345) mod 2^31; bar date chuẩn 15:00 UTC
+- A4 PHÁT HIỆN MỚI (P1 F-101): seed ép close bar cuối = def.price nhưng refPrice = close bar trước → 6/30 quote lúc seed có last NGOÀI dải ±7% (MBB −12.13%, VPB +9.95%, FPT +7.44%, SHB +8.41%, VIB −7.62%, VHM −7.30%); 7 bar có biến động ngày >±7% (vi phạm Q2/giới hạn HOSE); DB hiện tại vẫn còn 3 quote high>ceiling + 4 low<floor + 6 open ngoài dải (tái lập từ Bar chưa bị tick đụng tới)
+- C1–C14 đọc đủ 14 file src/lib + test thuần bằng bun /tmp: RSI14 Wilder khớp TUYỆT ĐỐI với tính tay python (51.771762850323256, simple-mean chỉ 55.01 → đúng smoothing); sma/rsi/latestVsMean trả null khi thiếu dữ liệu, empty array an toàn; health.ts clamp 0–100 đúng thứ tự, FAILED −12/COMPLETED +2, P50 chia 0 không xảy ra (gate ≥3 run) nhưng sample gồm cả run vừa xong (P3); news.ts 5 feed + timeout 8s (AbortSignal) + rate-limit 60s in-memory + dedupe url (112 tin, 112 url duy nhất) + strip HTML/CDATA test thật; flows.ts FNV-1a deterministic (VCB@2026-10-06 hai lần = 0.165) + clamp 2–80 tỷ đúng + alert −300 tỷ dedupe 24h qua DB query — nhưng scale cố định 3% (doc ghi 0.5–6%) và dateIso theo UTC (P3); sources.ts staleOf 30ph/live, escalate 4h dedupe 24h global theo code (P3); market-session.ts timezone ĐÚNG Asia/Ho_Chi_Minh (vnShift +7h rồi so getUTC* — test bẫy UTC-midnight đều đúng), T7/CN + lễ đóng cửa, biên phút: 11:30:xx vẫn morning, 14:45:xx vẫn afternoon, 15:00:xx vẫn atc (P3), lễ Giỗ Tổ 2026-04-10 sai ngày thực (P3, thực tế 26/04 là CN); trading-mode.ts 3 nhánh + convert route đủ 503/501 + env chỉ đọc server (grep import: 2 route server); market-quotes.ts/tick route: drift ±0.4% + mean-reversion 3% (K7 OK) + clamp [floor,ceiling] trước round100 (an toàn bội 100) + volume monotonic + quote.update tại chỗ (K2 xác nhận); format.ts dấu +/- đúng màu, hydration-safe, nhưng isMarketOpen bỏ qua lịch lễ (P3); api.ts 100% URL relative, throw có type; store.ts selector toàn atomic (không re-render thừa); types.ts khớp shape /api/agents + /api/portfolio + /api/market/quotes (curl verify); serialize.ts BigInt→Number/Date→ISO đúng, rủi ro circular ref chỉ P3; db.ts singleton globalThis chuẩn
+- H1–H6 query readonly + đọc route: H1 phí 5/5 trade = round(0.0015×price×qty) CHÍNH XÁC 0đ lệch (FPT 41.640 / VCB 136.350 / HPG 124.650 / SSI 100.500 / VHM 97.875); Order.fee 4/4 FILLED = round(0.0015×orderPrice×filledQty) (dùng giá đặt, doc ghi "ước tính" — nhất quán); H2 thuế: mọi BUY tax=0, SELL VHM tax=65.250 = round(0.001×43.500×1.500) chính xác; H3 lot 100: 0 vi phạm trên Order.quantity/filledQuantity/Trade.quantity/Position.quantity; H4 changePct: 0/30 vi phạm ±0.01; H5 PHÁT HIỆN (P1 F-102): account.equity lưu 1.284.300.000 (snapshot seed, không route nào cập nhật, bản thân seed đã sai công thức của doc — cash 486,5tr + GTTH ~1.09 tỷ = 1.578 tỷ lúc seed) trong khi /api/portfolio tái tính đúng totals.totalEquity = 1.567.000.000 = cash + Σ(qty×last), NHƯNG header.tsx:154 hiển thị account.equity cũ (lệch 282,7 triệu ≈ 18%) và run/route.ts:321 dùng equity cũ để size lệnh 5% NAV; H6 ĐẠT: unrealizedPnl = (last−avgPrice)×qty, realizedPnl tách bạch hoàn toàn (totals riêng 2 cột)
+- Xác minh K-items §4: K1 (run route không rate-limit — grep "429" chỉ là retry LLM) vẫn MỞ P1; K2 (doc Q4 append-only vs tick quote.update tại chỗ tick/route.ts:102) xác nhận P2; K7 (mean-reversion có, tick/route.ts:85) OK; K3/K4 ghi nhận lịch sử
+- Phát hiện thêm (P2 F-103): simulator không có EOD rollover — volume lũy kế không giới hạn sau nhiều giờ tick (270+ triệu cp/mã vs seed 0,3–9,2 triệu) → summary.totalValue = 391.188 tỷ ₫ (thực tế HOSE ~20 nghìn tỷ/phiên) + changePct neo refPrice ngày seed không roll
+
+Stage Summary:
+- Tổng ~130 mục kiểm: 119 ĐẠT / 11 phát hiện (0 P0 · 2 P1 · 4 P2 · 9 P3 tính cả 5 P3 phụ); không sửa file nào ngoài worklog
+- P1 phải sửa trước Giai đoạn 3: F-101 seed vi phạm dải ±7% (6/30 quote last + 7 bar biến động ngày vượt band — sửa seed.ts:143-149 clamp rồi re-seed) và F-102 header hiển thị equity cũ 1,2843 tỷ vs live 1,567 tỷ + sizing theo equity cũ (sửa header.tsx:154 dùng totals.totalEquity + cập nhật/tái tính equity)
+- P2: F-103 thiếu EOD rollover (volume/totalValue phình vô hạn, 391k tỷ); F-104 K2 doc Q4 append-only; F-105 BrokerAccount.equity snapshot không bao giờ ghi lại + giá trị seed tự mâu thuẫn định nghĩa doc; F-106 doc DATA_SOURCES §3.1 "ép close về giá tham chiếu" không đúng thực tế (refPrice quote = close bar trước, khác def.price)
+- Điểm ĐẠT nổi bật: schema 19 model khớp doc 1:1; mọi index/unique có thật trong DB; phí/thuế/lot/Q5 chính xác 100%; RSI Wilder đúng chuẩn; timezone ICT xử lý đúng; các file lib thuần test bằng bun đều deterministic đúng
+
+---
+Task ID: 19-c
+Agent: main-orchestrator (Z.ai Code)
+Task: Rà soát vùng D (browser E2E) + E (realtime/engine) + G (hiệu năng) + kiểm tĩnh — điều phối toàn bộ audit
+
+Work Log:
+- Kiểm tĩnh: bunx tsc --noEmit = 0 lỗi; bun run lint EXIT 0
+- Vùng E: engine health GET :3003 → ok (5225 ticks, 0 lỗi); grep src/ không hardcode localhost:3003 (chỉ comment); AGENT_CYCLE_MINUTES default 0 (scheduler TẮT — AgentRun không tự tăng); tick cadence ổn định ~37ms/ tick
+- Vùng G: staleTime phân tầng đúng (30s quotes/watchlist, 60s portfolio/orders, 5m bars/news); AgentRun tokensIn 1.7–3.0K << ngân sách 8K; tick route < 200ms
+- Vùng D (browser qua gateway :81): console 0 error/warning desktop 1440×900 + mobile 390×844; không tràn ngang (scrollW == viewportW); tương tác verify: click hàng VCB đổi biểu đồ, tab Giao dịch, theme toggle 2 chiều, watchlist sao; GOLDEN PATH: bấm "Chạy agent" → chu kỳ 5/5 COMPLETED (5 AgentRun mới, console sạch); footer đẩy xuống tự nhiên khi content dài (bottom 2801 > viewport 900) + sticky khi ngắn (verify Task 13)
+- Finding của riêng 19-c: F-301 (P3) ô tìm kiếm bảng giá thiếu aria-label (find role textbox không thấy accessible name)
+- Điều phối 2 subagent 19-a (A+C+H, ~130 mục) + 19-b (B+F, ~135 mục); tổng hợp findings; phát hiện MultiEdit tool áp dụng non-atomic khi edit lớn (trạng thái duplicate tạm thời — đã dọn, verify console sạch sau clear+reload)
+
+Stage Summary:
+- Tổng hợp 3 đợt: ~400 mục kiểm, 0 P0 · 5 P1 · 6 P2 · ~19 P3; bảo mật 100% sạch
+- Sẵn sàng sang bước sửa P1 (Task 20)
+
+---
+Task ID: 20
+Agent: main-orchestrator (Z.ai Code)
+Task: Sửa toàn bộ P1 + P2-nhanh + verify + tổng hợp CODE_AUDIT.md v0.2.0
+
+Work Log:
+- F-203 (P1): thêm guard 60s in-memory (CYCLE_COOLDOWN_MS) + 429 kèm retryAfterSeconds vào POST /api/agents/run
+- F-102 (P1): portfolio route trả equity = cash + totalMarketValue (bỏ snapshot); run route tính positionsMv từ vị thế × giá hiện tại để sizing 5% NAV; migration ghi lại DB equity
+- F-201 (P1): thêm fee = BigInt(round(0.0015 × price × qty)) vào order.create ở convert + run route
+- F-202 (P1): clamp giá lệnh vào [floorPrice, ceilingPrice] + bội 100 ở cả 2 route (convert: thêm floorPrice/ceilingPrice vào quote select; run: thêm floorById/ceilingById map)
+- F-101 (P1): seed.ts clamp toàn bộ OHLC vào dải round100(prev.close ±7%) trong vòng sinh bar + khối ép close cuối; tạo scripts/fix-audit-findings.ts migrate tại chỗ (KHÔNG re-seed, giữ nguyên news/audit): 7/30 quote clamp + tính lại change Q5, 7/2700 bar clamp, 2 signal set actedAt, equity 1.2843 tỷ → 1.5724 tỷ
+- F-205 (P2): nhánh 502 reset strategist/executor về IDLE trước khi return
+- F-207 (P2): convert route guard "đã có Order theo signalId → 409"
+- F-208 (P2): bars cap 250 → 90 (đồng bộ doc)
+- F-206 (P2 một phần): thêm audit RISK_ALERT_RAISED runtime vào flows.ts (FOREIGN_FLOW_OUTFLOW) + sources.ts (DATA_SOURCE_STALE); doc §7 chú rõ ORDER_FILLED/ORDER_CANCELLED pending fill/cancel engine Giai đoạn 3
+- Docs đồng bộ: DATA_SOURCES.md Q4 "Quote append-only" → "update-in-place" (F-204/K2) + §3.1 "ép đúng giá tham chiếu" → "kéo về sát trong dải ±7%" (F-106); TECHNICAL_BLUEPRINT.md §7 audit actions
+- VERIFY từng fix bằng đúng test phát hiện lỗi: V1 (F-101) 0/2700 bar + 0/30 quote ngoài dải round100(prev±7%); V2 (F-102) account.equity == totals.totalEquity = 1.572.010.000, header UI hiển thị 1.570.860.000 ₫ realtime; V3 (F-208) days=999 → days=90; V4 (F-201) lệnh convert VCB fee 60.840 = 0,15%×101.400×400 chính xác + lệnh run VCB fee 112.680 = 0,15%×93.900×800 chính xác; V5 (F-202) target 200.000 → lệnh @101.400 (đúng trần VCB) + run SELL @93.900 trong dải [88.200, 101.400]; V6 (F-203) chu kỳ 1 → 200 (5 messages, order mới, 13s), gọi lại ngay → 429 + retryAfterSeconds 47; V7 (F-207) convert lần 2 → 409
+- Tsc 0 lỗi + lint EXIT 0 sau toàn bộ sửa; browser reload console sạch (0 error sau clear — 54 dòng trước đó là tích luỹ transient khi edit); dev.log 0 lỗi
+- CODE_AUDIT.md nâng v0.2.0: §5 bảng findings đầy đủ (5 P1 ✅ đã sửa+verify kèm bằng chứng, 6 P2 — 4 ✅/2 🔜, ~19 P3 backlog), §5.4 K-items cập nhật trạng thái, §6 nghi thức hoàn tất tích hết, §7 Change Log
+- Commit + push toàn bộ (11 file code/doc + scripts/ mới)
+
+Stage Summary:
+- Audit 2026-10-06 hoàn tất khép kín: ~400 mục kiểm → 30 findings → 5 P1 + 4 P2 sửa ngay + verify bằng chứng từng lỗi → 0 lỗi tồn đọng chặn Giai đoạn 3
+- App qua cửa: đủ điều kiện triển khai PHASE3_BLUEPRINT.md (backlog P2/P3 đã ghi chú vào các bước tương ứng — F-103 EOD rollover là P2 quan trọng nhất còn lại)

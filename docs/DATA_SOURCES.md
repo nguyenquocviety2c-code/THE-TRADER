@@ -37,7 +37,7 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 
 - **PRNG kiểu LCG** với seed cố định `42`: `state = (state × 1103515245 + 12345) mod 2^31` → cùng seed cho cùng dữ liệu, test ổn định.
 - **30 mã VN30** (HOSE, `STOCK`), mỗi mã có: tên công ty tiếng Việt, ngành (Ngân hàng, Bất động sản, Công nghệ, Vật liệu, Tiêu dùng, Bán lẻ, Năng lượng, Hàng không, Y tế, Chứng khoán…), **giá tham chiếu thực tế** (VCB 91,500 · FPT 138,700 · VNM 65,700…), độ biến động ngày (`vol` 1.1%–2.4%), khối lượng nền (`volBase` 0.3–9.2 triệu cp).
-- **90 ngày giao dịch mỗi mã (2,700 bar):** bỏ thứ 7/CN; random-walk **có mean-reversion** về giá tham chiếu (drift 2%/ngày); `high`/`low` nở thêm ≤ 0.6 × vol; khối lượng 0.6–1.5 × `volBase`; **mọi giá làm tròn bội 100 VND** (`round100`); close phiên cuối **ép về đúng giá tham chiếu** để quote nhất quán.
+- **90 ngày giao dịch mỗi mã (2,700 bar):** bỏ thứ 7/CN; random-walk **có mean-reversion** về giá tham chiếu (drift 2%/ngày); `high`/`low` nở thêm ≤ 0.6 × vol; khối lượng 0.6–1.5 × `volBase`; **mọi giá làm tròn bội 100 VND** (`round100`) **và mọi OHLC nằm trong dải ±7% so close hôm trước** (Q2 — audit 2026-10-06 F-101); close phiên cuối **kéo về sát giá tham chiếu trong dải trần/sàn** để quote nhất quán.
 - **Quote mới nhất mỗi mã:** `refPrice` = close hôm trước; `ceilingPrice` = round100(ref × 1.07); `floorPrice` = round100(ref × 0.93); `change`/`changePct` so close trước; bid/ask lệch ±0.1% kèm depth ngẫu nhiên (5–60 lô × 100 cp).
 
 **Tần suất:** on-demand (re-seed khi cần). **Không phải nguồn production** — được thay bằng S4 khi tích hợp market data.
@@ -165,7 +165,7 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 | Q1 | **Bội số 100 VND** | Mọi giá HOSE phải `price % 100 == 0` (tick size). Vi phạm → reject (nguồn ngoài) / round + flag (nguồn chính thức) |
 | Q2 | **Dải giá ±7% (HOSE)** | `floorPrice ≤ price ≤ ceilingPrice`, với trần/sàn = round100(ref × 1.07 / × 0.93). HNX ±10%, UPCOM ±15% áp khi mở rộng thị trường |
 | Q3 | **Khối lượng không âm** | `volume ≥ 0`, `quantity > 0`, `value ≥ 0`; `value` nhất quán ≈ Σ(price × qty) |
-| Q4 | **Dedup OHLCV** | `Bar` ràng buộc `@@unique([instrumentId, date])` — ingest lại dùng upsert (idempotent); `Quote` append-only theo `tradedAt` |
+| Q4 | **Dedup OHLCV** | `Bar` ràng buộc `@@unique([instrumentId, date])` — ingest lại dùng upsert (idempotent); `Quote` **update-in-place** tại quote mới nhất mỗi mã (1 row/mã, `tradedAt` ghi mỗi tick; lưu lịch sử tick là roadmap — audit 2026-10-06 F-204) |
 | Q5 | **Đồng nhất change** | `change = last − refPrice`; `changePct = change / refPrice × 100` (làm tròn 2 chữ số) |
 | Q6 | **Timezone** | Lưu UTC trong DB; hiển thị `Asia/Ho_Chi_Minh` (UTC+7); ngày giao dịch closes 15:00 ICT; `Bar.date` chuẩn hóa EOD |
 | Q7 | **Lịch giao dịch** | Thứ 2–thứ 6 + **lịch nghỉ lễ VN 2026 ước lượng** (Tết Dương lịch, Tết Bính Ngọ, Giỗ Tổ, 30/4–1/5, Quốc khánh) đã cài trong `src/lib/market-session.ts`; lịch chính thức từng năm — roadmap; ngoài phiên → không sinh quote mới |

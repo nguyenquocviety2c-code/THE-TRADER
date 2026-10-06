@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
     const symbol = (searchParams.get("symbol") ?? "VCB").toUpperCase().trim();
     const daysRaw = Number(searchParams.get("days") ?? 90);
     const days = Number.isFinite(daysRaw)
-      ? Math.min(Math.max(Math.round(daysRaw), 10), 250)
+      ? Math.min(Math.max(Math.round(daysRaw), 10), 90) // F-208 (audit 19-b): đồng bộ với doc — cap 90 ngày
       : 90;
 
     const instrument = await db.instrument.findUnique({

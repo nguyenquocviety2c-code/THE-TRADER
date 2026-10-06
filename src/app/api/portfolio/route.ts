@@ -88,7 +88,7 @@ export async function GET() {
           accountNumber: maskAccount(account.accountNumber),
           accountType: account.accountType,
           cashBalance: account.cashBalance,
-          equity: account.equity,
+          equity: Number(account.cashBalance) + totalMarketValue, // F-102 (audit 19-a): tính lại thay vì snapshot seed
           marginUsed: account.marginUsed,
           currency: account.currency,
           status: account.status,

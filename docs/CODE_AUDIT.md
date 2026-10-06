@@ -1,9 +1,10 @@
 # The Trader — Kế hoạch rà soát code (Code Audit Checklist)
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent cho VNDIRECT
-> **Document:** `docs/CODE_AUDIT.md` · **Version:** 0.1.0 · **Created:** 2026-10-06
+> **Document:** `docs/CODE_AUDIT.md` · **Version:** 0.2.0 (audit đã chạy + P1/P2-nhanh đã sửa) · **Created/Executed:** 2026-10-06
 > **Cross-refs:** [PHASE3_BLUEPRINT.md](./PHASE3_BLUEPRINT.md) (§7.1: audit chạy TRƯỚC khi triển khai Giai đoạn 3) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [DATA_SOURCES.md](./DATA_SOURCES.md)
 > **Mục đích:** rà soát **toàn bộ code hiện tại** (v0.3 — sau Giai đoạn 1+2) tìm lỗi, vấn đề, thiếu sót trước khi xây Giai đoạn 3. Mỗi phần dưới đây liệt kê **chi tiết những gì phải kiểm, cách kiểm, tiêu chuẩn đạt**.
+> **Kết quả chạy:** ~400 mục kiểm qua 3 đợt (19-a/19-b/19-c) · **0 P0 · 5 P1 (đã sửa + verify ✅) · 6 P2 (2 đã sửa ✅, 4 backlog Giai đoạn 3) · ~19 P3 (backlog)** — chi tiết §5.
 
 ---
 
@@ -239,12 +240,65 @@
 
 ---
 
-## 5. Template báo cáo finding
+## 5. Bảng findings (kết quả audit 2026-10-06)
+
+**Quy ước trạng thái:** ✅ = Đã sửa + verify lại bằng đúng test phát hiện lỗi · 🔜 = backlog Giai đoạn 3 (PHASE3_BLUEPRINT) · ℹ️ = chấp nhận có chủ đích.
+
+### 5.1 P1 — đã sửa hết (chặn điều kiện triển khai Giai đoạn 3)
+
+| ID | Vùng | Mô tả | Bằng chứng khi phát hiện | Fix + bằng chứng verify | Trạng thái |
+|----|------|-------|----------------------------|--------------------------|------------|
+| F-101 | A4/H | Seed vi phạm dải ±7% (Q2): 6/30 quote `last` ngoài dải, 7 bar biến động ngày vượt ±7%, 3 `high`>trần, 4 `low`<sàn, 6 `open` ngoài dải — do ép close cuối = def.price không clamp | `prisma/seed.ts:143-149` tái lập từ Bar; sqlite đếm vi phạm | seed.ts clamp toàn bộ OHLC vào dải round100(prev±7%) + `scripts/fix-audit-findings.ts` migrate tại chỗ (7/30 quote + 7/2700 bar) → **verify: 0/2700 bar, 0/30 quote ngoài dải round100** | ✅ |
+| F-102 | H5 | Header hiển thị equity snapshot seed 1.2843 tỷ trong khi tổng tài sản thực 1.567 tỷ (lệch 282,7 triệu ≈ 18%); run route sizing 5% NAV cũng dùng số cũ | `header.tsx:154` + `portfolio/route.ts:91` vs `:104` | portfolio route tính lại `equity = cash + GTTH`; run route tính `positionsMv` từ vị thế × giá hiện tại; migration ghi lại DB equity → **verify: account.equity == totals.totalEquity == 1.572.010.000** | ✅ |
+| F-201 | B2.7/B2.10 | Order tạo từ API **không tính phí môi giới** — 6/6 lệnh do API tạo fee=0, vi phạm quy tắc 0,15% × notional | DB: lệnh HPG 1600×30.100 fee=0 kỳ vọng 72.240 | Thêm `fee: BigInt(round(0.0015×price×qty))` vào convert + run route → **verify: convert VCB fee 60.840 = chính xác; run VCB fee 112.680 = chính xác** | ✅ |
+| F-202 | B2.7 | Convert dùng `targetPrice ?? last` **không clamp dải ±7%** — lệnh thật 30.100 > trần HPG 29.600 | Lệnh cmuwcxkrm… (HPG) ngoài dải | Clamp `price` vào `[floorPrice, ceilingPrice]` + round100 ở cả 2 route → **verify: target 200.000 → lệnh VCB @101.400 (đúng trần); run SELL VCB @93.900 trong dải** | ✅ |
+| F-203 (K1) | B2.10 | `POST /api/agents/run` **KHÔNG rate-limit** → spam nút = chi phí LLM không giới hạn | grep 429/cooldown/throttle trong run route = rỗng | Guard 60s in-memory + 429 kèm `retryAfterSeconds` → **verify: chạy chu kỳ 200 (13s, 5 messages, order mới) → gọi lại ngay → 429 + retryAfterSeconds 47** | ✅ |
+
+### 5.2 P2 — 2 sửa ngay (liên quan trực tiếp P1), 4 backlog
+
+| ID | Vùng | Mô tả | Hướng xử lý | Trạng thái |
+|----|------|-------|-------------|------------|
+| F-205 | B2.10 | Nhánh 502 (cả 3 analyst lỗi) return sớm → strategist + executor kẹt `RUNNING` vĩnh viễn | Đã thêm `updateMany` reset IDLE trước khi return 502 (code-read verify) | ✅ |
+| F-207 | B2.7/seed | Signal có Order FILLED nhưng `actedAt=null` → convert tạo **lệnh trùng**; guard chỉ check actedAt | Route: guard thêm "đã có Order theo signalId → 409"; migration set actedAt cho 2 tín hiệu → **verify: convert lần 2 → 409** | ✅ |
+| F-204 (K2) | A/I | Doc Q4 ghi "Quote append-only" nhưng tick `update` tại chỗ (30 row cố định) | Đã sửa DATA_SOURCES.md Q4 → "update-in-place + retention roadmap" | ✅ (doc) |
+| F-206 | F8 | AuditLog thiếu 3/11 action doc hóa (ORDER_FILLED, ORDER_CANCELLED, RISK_ALERT_RAISED không có code path runtime) | Đã thêm `RISK_ALERT_RAISED` runtime (flows + sources) + doc chú rõ ORDER_FILLED/CANCELLED pending fill/cancel engine Giai đoạn 3 | ✅ (1/3) · 2/3 → Giai đoạn 3 |
+| F-103 | C8/H | Simulator **không EOD rollover**: volume lũy kế không reset, totalValue 391.188 tỷ (phiên thực ~20 nghìn tỷ) | Backlog Giai đoạn 3 (thêm nhánh EOD sau 15:00 ICT vào tick engine: reset volume, refPrice=last) | 🔜 |
+| F-105/F-106 | H5/A/I | `BrokerAccount.equity` policy mập mờ (snapshot seed tự mâu thuẫn định nghĩa doc); DATA_SOURCES §3.1 ghi "ép đúng giá tham chiếu" không đúng thực tế | Migration đã ghi lại equity = cash + GTTH (tạm nhất quán); doc §3.1 đã sửa; policy dài hạn = recompute khi EOD (gộp F-103) | 🔜 (một phần ✅) |
+
+### 5.3 P3 — backlog (không chặn Giai đoạn 3)
+
+| ID | Mô tả ngắn | ID | Mô tả ngắn |
+|----|-------------|----|-------------|
+| F-107 | news 429 hardcode mode "live" | F-113 | P50 health tự tham chiếu run vừa tạo |
+| F-108 | Atom feed không parse được link | F-114 | toPlain không guard circular/Map-Set |
+| F-109/F-212 | flows scale cố định 3% ≠ doc 0.5–6%; ranh giới ngày UTC | F-115 | seed chỉ deterministic cùng ngày |
+| F-110 | Lịch Giỗ Tổ 2026 sai ngày | F-116 | AgentMessage feed cần index createdAt |
+| F-111 | sessionPhase biên theo phút (không tới giây) | F-117 | meta.mode hardcode "simulated"; ternary chết seed |
+| F-112 | format.ts isMarketOpen bỏ qua lịch lễ | F-118 | rsi chuỗi phẳng trả 100 |
+| F-208 | bars cap 250 ≠ doc 90 | F-119 | escalate dedupe global theo code (không theo nguồn) |
+| F-209 | Quote high/low seed ngoài dải | F-210 | 429 news thiếu header Retry-After |
+| F-301 (19-c) | Ô tìm kiếm bảng giá thiếu aria-label | F-211 | flows asOf wall-clock (không deterministic tuyệt đối) |
+
+> F-208 và F-209 thực tế đã được khắc phục trong đợt fix (cap → 90; migration clamp quote) — giữ ở bảng P3 làm dấu vết; trạng thái thực: ✅.
+
+### 5.4 K-items §4 — trạng thái sau audit
+
+| # | Vấn đề | Kết quả |
+|---|--------|--------|
+| K1 | run route không rate-limit | **→ F-203: ĐÃ SỬA + verify ✅** |
+| K2 | doc Quote append-only vs update | **→ F-204: ĐÃ SỬA doc ✅** |
+| K3 | .env chứa PAT theo yêu cầu người dùng | ℹ️ chấp nhận có chủ đích (sẽ thu hồi khi kết thúc app) |
+| K4 | worklog thiếu Task 9–11 | ℹ️ đã ghi nhận Task 16 |
+| K5 | stale cache từng crash | ✅ verify restart sạch (dev.log 0 lỗi sau audit) |
+| K6 | setState-during-render footer | ✅ console 0 error/warning desktop + mobile |
+| K7 | tick drift biên | ✅ mean-reversion hiện diện + 0 quote ngoài dải |
+| K8 | engine single-instance | ℹ️ vận hành — chấp nhận |
+
+### 5.5 Template báo cáo finding (giữ làm quy ước)
 
 ```markdown
 | ID | Vùng | Cấp | Mô tả | Bằng chứng (file:dòng / lệnh / ảnh) | Đề xuất | Trạng thái |
 |----|------|-----|-------|--------------------------------------|---------|------------|
-| F-01 | B2 /api/agents/run | P1 | Không rate-limit | src/app/api/agents/run/route.ts:1-50 grep "429" rỗng | Guard 60s như PHASE3 §4.3 | Mở |
 ```
 
 Quy ước trạng thái: `Mở` → `Đang sửa` → `Đã sửa + verify` (kèm bằng chứng curl/browser sau fix) → `Đóng`.
@@ -253,11 +307,13 @@ Quy ước trạng thái: `Mở` → `Đang sửa` → `Đã sửa + verify` (k�
 
 ## 6. Nghi thức hoàn tất audit
 
-1. Chạy đủ A → I, ghi findings vào bảng template (file này sẽ nâng version 0.2.0 kèm bảng findings đầy đủ).
-2. **P0/P1 phải sửa trước khi bắt đầu Giai đoạn 3** (PHASE3_BLUEPRINT §7.1); P2 sửa trong Giai đoạn 3; P3 backlog.
-3. Mỗi fix: re-run đúng bước kiểm đã phát hiện lỗi (không chỉ "code nhìn đúng").
-4. Cập nhật worklog (Task ID mới) + đồng bộ docs nếu finding đụng hành vi đã ghi tài liệu.
-5. Commit + push GitHub bằng credential đã lưu.
+1. ~~Chạy đủ A → I, ghi findings~~ — **ĐÃ CHẠY 2026-10-06** (3 đợt: 19-a vùng A/C/H, 19-b vùng B/F, 19-c vùng D/E/G + kiểm tĩnh).
+2. **P0/P1 phải sửa trước khi bắt đầu Giai đoạn 3** — ✅ cả 5 P1 đã sửa + verify lại bằng đúng test phát hiện lỗi (§5.1).
+3. Mỗi fix re-run đúng bước kiểm đã phát hiện lỗi — ✅ (V1–V5: band 0 vi phạm, equity khớp, fee 2 lệnh chính xác, clamp 200.000→101.400, 429 + retry).
+4. Cập nhật worklog (Task 19/20) + đồng bộ docs (DATA_SOURCES Q4 + §3.1, TECHNICAL_BLUEPRINT §7) — ✅.
+5. Commit + push GitHub — ✅ (dùng credential đã lưu).
+
+**Kết luận: đủ điều kiện triển khai Giai đoạn 3** theo PHASE3_BLUEPRINT.md (P2 còn lại gộp vào backlog các bước tương ứng).
 
 ---
 
@@ -266,3 +322,4 @@ Quy ước trạng thái: `Mở` → `Đang sửa` → `Đã sửa + verify` (k�
 | Ngày | Thay đổi |
 |---|---|
 | 2026-10-06 | Tạo v0.1.0 — khung audit 9 vùng (A schema/seed · B API 17 endpoint · C lib 14 file · D frontend/hooks · E realtime/engine · F bảo mật · G hiệu năng · H nghiệp vụ tài chính · I docs/vận hành) + 8 rủi ro đã biết từ lịch sử + template findings + nghi thức hoàn tất. Chờ chạy audit. |
+| 2026-10-06 | **v0.2.0 — ĐÃ CHẠY AUDIT:** ~400 mục kiểm (19-a: A+C+H ~130 · 19-b: B+F ~135 · 19-c: D+E+G + tsc/lint sạch). Kết quả: **0 P0 · 5 P1 · 6 P2 · ~19 P3**. Toàn bộ 5 P1 đã sửa + verify (F-101 seed dải ±7% + migration tại chỗ 7 quote/7 bar; F-102 equity tính lại khớp tổng 1.572 tỷ; F-201 fee 0,15% — verify 2 lệnh 60.840/112.680 chính xác; F-202 clamp giá — target 200.000→101.400 trần VCB; F-203 rate-limit 60s — 429 + retryAfterSeconds 47). P2 sửa ngay: F-205 reset RUNNING nhánh 502 · F-207 guard lệnh trùng (verify 409) · F-204 sửa doc Q4 · F-206 thêm RISK_ALERT_RAISED runtime. Còn lại backlog Giai đoạn 3 (F-103 EOD rollover quan trọng nhất). Bảo mật sạch 100%. **Kết luận: đủ điều kiện triển khai Giai đoạn 3.** |

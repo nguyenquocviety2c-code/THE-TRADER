@@ -27,6 +27,10 @@ const STRATEGIST_CODE = "portfolio-strategist";
 const EXECUTOR_CODE = "execution-manager";
 const ALL_CODES = [...ANALYST_CODES, STRATEGIST_CODE, EXECUTOR_CODE] as const;
 
+/** F-203 (audit 19-b): rate-limit chu kỳ — chống spam chi phí LLM không giới hạn. */
+const CYCLE_COOLDOWN_MS = 60_000;
+let lastCycleStartedAt = 0;
+
 /** Position sizing for the paper execution step: 5% of equity, board lots of 100. */
 const POSITION_SIZE_PCT = 0.05;
 
@@ -186,6 +190,20 @@ async function persistMessage(
 }
 
 export async function POST() {
+  // F-203 (audit 19-b): guard 60s giữa 2 chu kỳ — trả 429 kèm thời gian chờ còn lại
+  const now = Date.now();
+  const sinceLast = now - lastCycleStartedAt;
+  if (sinceLast < CYCLE_COOLDOWN_MS) {
+    return NextResponse.json(
+      {
+        error: `Chu kỳ agent trước đó chạy cách đây ${Math.floor(sinceLast / 1000)}s. Vui lòng đợi thêm chút để tránh tốn chi phí LLM.`,
+        retryAfterSeconds: Math.ceil((CYCLE_COOLDOWN_MS - sinceLast) / 1000),
+      },
+      { status: 429 }
+    );
+  }
+  lastCycleStartedAt = now;
+
   const cycleStart = Date.now();
 
   // ── Load the 5 agents ────────────────────────────────────────────
@@ -220,7 +238,7 @@ export async function POST() {
           quotes: {
             orderBy: { tradedAt: "desc" },
             take: 1,
-            select: { last: true, change: true, changePct: true, volume: true },
+            select: { last: true, change: true, changePct: true, volume: true, floorPrice: true, ceilingPrice: true },
           },
         },
       }),
@@ -290,6 +308,8 @@ export async function POST() {
       entry.volumes.push(b.volume);
     }
     const lastById = new Map(quoteRows.map((r) => [r.id, r.last]));
+    const floorById = new Map(quoteRows.map((r) => [r.id, r.floorPrice ?? 0]));
+    const ceilingById = new Map(quoteRows.map((r) => [r.id, r.ceilingPrice ?? 0]));
     const indicatorLines = top10.map((t) => {
       const bars = barsByInstrument.get(t.id);
       const closes = bars?.closes ?? [];
@@ -318,7 +338,14 @@ export async function POST() {
       return `- ${p.instrument.symbol} (${p.instrument.sector ?? "—"}): ${p.quantity} cp @ ${p.avgPrice.toLocaleString("vi-VN")} → ${last.toLocaleString("vi-VN")} ₫ | Lãi/lỗ: ${Math.round(pnl).toLocaleString("vi-VN")} ₫ (${pnlPct.toFixed(2)}%)`;
     });
 
-    const equity = account ? Number(account.equity) : 0;
+    // F-102 (audit 19-a): tổng tài sản = tiền mặt + GTTH vị thế mở (equity trong DB chỉ là snapshot seed)
+    const positionsMv = positions.reduce(
+      (s, p) => s + (p.instrument.quotes[0]?.last ?? p.avgPrice) * p.quantity,
+      0
+    );
+    const equity = account
+      ? Number(account.cashBalance) + positionsMv
+      : 0;
     const sectorWeights = new Map<string, number>();
     for (const p of positions) {
       const last = p.instrument.quotes[0]?.last ?? p.avgPrice;
@@ -497,6 +524,13 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
 
     // All three analysts failed → the cycle cannot be consolidated
     if (failures.length === ANALYST_CODES.length) {
+      // F-205 (audit 19-b): không để strategist/executor kẹt RUNNING khi chu kỳ bỏ cuộc sớm
+      await db.agent
+        .updateMany({
+          where: { code: { in: [STRATEGIST_CODE, EXECUTOR_CODE] } },
+          data: { status: "IDLE" },
+        })
+        .catch(() => undefined);
       return NextResponse.json(
         {
           error:
@@ -696,11 +730,15 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
       if (sig.direction !== "HOLD" && lastPrice > 0 && equity > 0) {
         const rawQty = Math.floor((equity * POSITION_SIZE_PCT) / lastPrice);
         const quantity = Math.max(100, Math.floor(rawQty / 100) * 100);
-        const orderPrice = sig.targetPrice && sig.targetPrice > 0
+        // F-202 (audit 19-b): giá lệnh luôn nằm trong dải trần/sàn ±7% (Q2) + bội 100 ₫
+        const bandLow = floorById.get(validSymbol.id) || round100(lastPrice * 0.93);
+        const bandHigh = ceilingById.get(validSymbol.id) || round100(lastPrice * 1.07);
+        const basePrice = sig.targetPrice && sig.targetPrice > 0
           ? sig.direction === "BUY"
             ? Math.min(sig.targetPrice, round100(lastPrice * 1.01))
             : Math.max(sig.targetPrice, round100(lastPrice * 0.99))
           : round100(lastPrice);
+        const orderPrice = Math.max(bandLow, Math.min(basePrice, bandHigh));
 
         const [user] = await db.user.findMany({
           where: { isActive: true },
@@ -722,6 +760,7 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
             type: "LIMIT",
             quantity,
             price: orderPrice,
+            fee: BigInt(Math.round(0.0015 * orderPrice * quantity)), // F-201 (audit 19-b): phí môi giới 0,15% notional
             status: "PENDING",
             note: "Tự động từ chu kỳ agent",
           },

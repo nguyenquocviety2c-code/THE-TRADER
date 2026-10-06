@@ -125,7 +125,7 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
       select: { id: true },
     });
     if (!dup) {
-      await db.riskAlert.create({
+      const alert = await db.riskAlert.create({
         data: {
           severity: "WARNING",
           code: "FOREIGN_FLOW_OUTFLOW",
@@ -135,6 +135,17 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
           threshold: -300,
         },
       });
+      // F-206 (audit 19-b): phủ audit runtime cho mọi RiskAlert được tạo
+      await db.auditLog
+        .create({
+          data: {
+            action: "RISK_ALERT_RAISED",
+            entity: "RiskAlert",
+            entityId: alert.id,
+            after: JSON.stringify({ code: alert.code, metricValue: alert.metricValue, threshold: alert.threshold }),
+          },
+        })
+        .catch(() => undefined);
     }
   }
 

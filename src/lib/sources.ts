@@ -150,7 +150,7 @@ export async function escalateStaleSources(): Promise<number> {
       select: { id: true },
     });
     if (dup) continue;
-    await db.riskAlert.create({
+    const alert = await db.riskAlert.create({
       data: {
         severity: "WARNING",
         code: "DATA_SOURCE_STALE",
@@ -160,6 +160,17 @@ export async function escalateStaleSources(): Promise<number> {
         threshold: 240,
       },
     });
+    // F-206 (audit 19-b): phủ audit runtime cho mọi RiskAlert được tạo
+    await db.auditLog
+      .create({
+        data: {
+          action: "RISK_ALERT_RAISED",
+          entity: "RiskAlert",
+          entityId: alert.id,
+          after: JSON.stringify({ code: alert.code, source: s.key, ageMinutes }),
+        },
+      })
+      .catch(() => undefined);
     created++;
   }
   return created;

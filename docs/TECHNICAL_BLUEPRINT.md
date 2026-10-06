@@ -259,7 +259,7 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | **API-only backend** | **Không dùng Server Actions** — mọi đọc/ghi qua Route Handlers: một cửa duy nhất để validate payload, kiểm soát rate, và ghi `AuditLog`. |
 | **Relative-path API calls** | Client chỉ `fetch('/api/...')` — không hard-code origin, tránh leak cross-origin và SSRF-style redirect; deploy được dưới bất kỳ reverse-proxy/domain nào. |
 | **LLM backend-only** | `z-ai-web-dev-sdk` chỉ import trong Route Handlers (`/api/agents/run`); SDK không bao giờ nằm trong dependency graph của client components → API key không expose. |
-| **Audit logging** | `AuditLog` ghi mọi hành động nhạy cảm: `ORDER_CREATED`, `ORDER_FILLED`, `ORDER_CANCELLED`, `SIGNAL_APPROVED`, `RISK_ALERT_RAISED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE` (kèm `before`/`after` JSON, `ip`). |
+| **Audit logging** | `AuditLog` ghi mọi hành động nhạy cảm: `ORDER_CREATED`, `SIGNAL_APPROVED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`, `RISK_ALERT_RAISED` (runtime: flows khối ngoại + stale escalate — audit 2026-10-06 F-206), `SIGNAL_REJECTED` (Giai đoạn 3) (kèm `before`/`after` JSON, `ip`). `ORDER_FILLED`/`ORDER_CANCELLED` sẽ do fill/cancel engine ghi — **pending Giai đoạn 3** (hiện chưa có luồng khớp/hủy runtime). |
 | **Soft delete** | User/BrokerAccount/Instrument chỉ soft delete (`deletedAt`) — bảo toàn tính truy vết (xem [DB_SCHEMA.md §4.2](./DB_SCHEMA.md)). |
 | **SQL injection** | Toàn bộ truy vấn qua Prisma Client parameterized — không string-concat SQL. |
 
