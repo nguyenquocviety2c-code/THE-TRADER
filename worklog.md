@@ -558,3 +558,24 @@ Stage Summary:
 - Quyết định kiến trúc đáng ghi: (1) chu kỳ đầy đủ KHÔNG tự tạo lệnh nữa — signal ACTIVE chờ trader phê duyệt (human-in-the-loop, điều kiện nghiệm thu §4.9 chỉ khả thi khi signal ACTIVE tồn tại); (2) nến recharts 3 bằng Bar-shape probe + domain tường minh (Customized deprecated); (3) signal-execution.ts một nguồn duy nhất cho convert(budget50m)+decision(nav5pct); (4) fix E2E: SELL nav5pct guard vị thế
 - Chi phí LLM kiểm thử toàn Giai đoạn 3 ~$0.03 (chu kỳ×3 + single-run + chat + verify); tổng chi phí AI hệ thống lúc hoàn tất $5.11 / 86 runs
 - 2 subagent song song không xung đột file; worklog entry 24/25 do subagent tự append
+
+---
+Task ID: 29
+Agent: main-orchestrator (Z.ai Code)
+Task: Phiên #29 — user hỏi "app hiện tại trong sandbox có phải Phase 3 hoàn tất hay bị reset mất dữ liệu?" → chẩn đoán + khôi phục toàn bộ từ GitHub
+
+Work Log:
+- Chẩn đoán: sandbox ĐÃ BỊ RESET về snapshot auto-commit d082a19 (2026-10-05 08:34 — dòng cũ P0 Supabase + market-data :3010, dashboard 4 tab); worklog local dừng ở Task 10; thiếu PHASE3_BLUEPRINT/CODE_AUDIT/USER_PROMPTS; không remote, không PAT persist, .env chỉ còn DATABASE_URL scaffold; dev server chết OOM, market-data bootstrap FATAL thiếu env
+- Xác minh GitHub (PAT ghp_AL…F6rD còn hiệu lực, user vietnq130593-code): repo THE-TRADER main = f9c16ad "feat(phase-3): App shell + Workspace Đội Agent (chạy riêng/chat/phê duyệt) + Dashboard nâng cấp" (push 2026-10-06 11:06 UTC) — Phase 3 HOÀN TẤT + 2 vòng audit 33/33 findings (0614230, f2325ec) đều nằm trên remote; 157 file
+- Backup dòng cũ: .env Supabase (URL/service key/access token/DB password) trích từ git history d082a19 → ~/.old-lineage-supabase-env-backup.txt (600, ngoài repo)
+- Khôi phục: git remote add origin + credential.helper store (~/.git-credentials 600) + GITHUB_PAT vào .env → fetch → reset --hard origin/main → git clean -fd (xoá backups/ kèm bản backup .env đầu tiên — đã lưu lại ngoài repo); xoá mini-services/market-data sót lại dòng cũ (có trong git history d082a19 nếu cần)
+- dựng lại môi trường: bun install (253 pkg) · bun run db:push (SQLite db/custom.db mới) · bun prisma/seed.ts (30 mã VN30 · 2.700 bar · 30 quote · 1 user + tài khoản VNDIRECT demo · 5 agent · 30 run · 8 signal · 7 order/position) · market-engine bun install (21 pkg)
+- Khởi động: market-engine :3003 (PID 1927, boot OK "tick 10s · news 15phút · agent-cycle TẮT") + dev server :3000 (Ready 317ms) — engine tự POST /api/market/tick 200 ngay sau khi app dậy
+- Verify API: /api/agents 200 (5 agent + stats 6 trường + totals 871K tokens/$5.04) · /api/agents/[id] 200 · /api/signals · /api/portfolio · /api/market/quotes đều 200; GET / → 200 title "The Trader — Multi-Agent Trading System"
+- Verify E2E agent-browser: App shell 2 workspace (Tổng quan | Đội Agent) + chip "Sức mua (ước tính) 1.139.331.175 ₫" + switch "Cột mở rộng" + bảng 12 cột · workspace Đội Agent: 5 roster card (Chạy riêng từng agent, nút "Chạy chu kỳ đầy đủ 5 agent") · panel chi tiết Market Analyst 5 tab (Hồ sơ/Hoạt động/Nhiệm vụ/Phát thanh/Chat) · CHAT THẬT "VCB dạo này thế nào?" → LLM glm-4.6 trả lời bằng dữ liệu DB thật (VCB 91.600₫, SMA20 86.500, SMA50 87.000, "Chế độ dữ liệu: paper") — render trong DOM, AgentRun COMPLETED tokens 819/57 · Tổng quan: 180 phần tử nến + 2 ReferenceLine RSI 30/70 + 3 SVG chart + toggle Nến/Đường + chip "AI: $5.04 · 871K tokens" · mobile 390px: scrollW==clientW==390 (0 tràn ngang), footer visible · 0 console error / 0 page error · 2 screenshots verify-phase3-recovery-{overview,agents}.png
+
+Stage Summary:
+- KẾT LUẬN TRẢ LỜI USER: sandbox bị reset về snapshot dòng cũ (P0 Supabase, Oct 5 sáng) — KHÔNG phải Phase 3; toàn bộ code Phase 3 an toàn trên GitHub f9c16ad và ĐÃ khôi phục đầy đủ về local
+- MẤT THẬT SỰ (không thể khôi phục): dữ liệu runtime SQLite của phiên trước (124 tin RSS đã nạp, ~86 AgentRun thật + lịch sử chat + lệnh/tín hiệu phát sinh lúc dùng) — db/custom.db bị gitignore nên không có trên GitHub; đã tái sinh bằng seed deterministic (trạng thái nền chuẩn, trạng thái động reset về 0)
+- Còn nguyên: code Phase 3 + docs (6 file) + worklog Task 1–28 + PAT (đã persist lại cả 3 nơi: ~/.git-credentials, .env GITHUB_PAT, credential.helper store) + credentials Supabase dòng cũ (backup ngoài repo ~/.old-lineage-supabase-env-backup.txt — dự phòng nếu cần truy cập 95K bar EOD thật trên Supabase cloud)
+- Hệ thống đang chạy đồng bộ: dev :3000 + market-engine :3003 (tick 10s OK); chat LLM E2E xác nhận lần nữa sau khôi phục
