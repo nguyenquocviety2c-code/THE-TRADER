@@ -253,3 +253,20 @@ Stage Summary:
 - PAT lưu an toàn 2 chỗ (git credential store + .env), push sau này tự động
 - Trạng thái tổng hợp cho người dùng: Giai đoạn 1 (G1–G7) ✅ + Giai đoạn 2 (S4/S5/S6/scheduler/WebSocket/S3-scaffold) ✅ + docs v0.3.0 + GitHub push ✅; còn pending (cần nguồn ngoài thật): S3 gateway VNDIRECT, feed thị trường HOSE/HNX thật, khối ngoại/margin EOD thật, HNX/UPCOM + lịch Tết chính thức, Reuters (tuỳ chọn)
 - USER_PROMPTS.md giờ phản ánh đúng 6 giai đoạn prompt đầy đủ + phụ lục đồng bộ
+
+---
+Task ID: 17
+Agent: main-orchestrator (Z.ai Code)
+Task: Review giao diện theo vai CFO VNDIRECT / nhà đầu tư kỳ cựu — xác nhận thiếu module Agents riêng + giao diện chính sơ sài
+
+Work Log:
+- Người dùng góp ý: (1) thiếu module RIÊNG cho các Agents (xem danh sách ai, chức năng gì); (2) thiếu module LÀM VIỆC với agents (tương tác); (3) giao diện chính sơ sài — yêu cầu review theo vai CFO VNDIRECT/nhà đầu tư kỳ cựu
+- Chụp 3 screenshot đầy đủ trang (đầu/giữa/cuối, 1440x900) qua agent-browser gateway :81
+- VLM audit 3 ảnh với persona CFO 20 năm: mô tả đủ 10 module hiện có + đánh giá + thiếu sót từng module so với terminal chuyên nghiệp
+- Phát hiện chính xác của VLM khớp góp ý người dùng: Technical chart quá đơn giản (thiếu candlestick/indicator/volume/intraday); bảng giá thiếu OHL/DOM; portfolio thiếu %weight/realized P&L/holding period; agent feed thiếu nút Phê duyệt/Từ chối; task queue thiếu ETA; header thiếu buying power/margin call
+- Xác nhận hiện trạng Agents: chỉ có agents-panel nhúng trong dashboard (5 card + task list + message feed + nút chạy chu kỳ ở header) — KHÔNG có workspace riêng, KHÔNG chạy riêng từng agent, KHÔNG chat trực tiếp, KHÔNG xem lịch sử run/chi phí LLM từng agent
+- Soạn báo cáo review + đề xuất Giai đoạn 3 (app shell navigation đa workspace + Agents workspace đầy đủ + nâng cấp dashboard chính) trình người dùng duyệt
+
+Stage Summary:
+- Báo cáo review theo persona CFO delivered; đề xuất lộ trình Giai đoạn 3 chờ phê duyệt
+- Ảnh review lưu tool-results/review-{top,mid,bot}.png; VLM audit tool-results/vlm-review.json
