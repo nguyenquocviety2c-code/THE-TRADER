@@ -12,7 +12,7 @@ The Trader là một **trading workspace một trang** (single-page dashboard): 
 
 1. **Paper-trading first** — toàn bộ luồng lệnh chạy nội bộ, không chạm tiền thật; live trading VNDIRECT chỉ bật sau feature flag (§9) — hiện đã có scaffold flag + cổng kiểm tra (S3, gateway thật còn pending).
 2. **Mọi phân tích AI đều có audit trail** — mỗi lần chạy agent ghi `AgentRun` (token, chi phí, thời lượng) và mọi kết luận broadcast ghi `AgentMessage` (xem [DB_SCHEMA.md §6.6–6.9](./DB_SCHEMA.md)).
-3. **Backend-only LLM** — `z-ai-web-dev-sdk` (model `glm-4.6`) chỉ khởi tạo trong Route Handlers; client không bao giờ thấy API key.
+3. **Backend-only LLM qua lớp provider duy nhất** — `src/lib/llm.ts` chọn provider theo env (`LLM_PROVIDER=auto`): có `OPENCODE_ZEN_API_KEY` → **Opencode Zen** `space-bunny-free` (OpenAI-compatible REST, chạy được cả ngoài sandbox — môi trường local của trader); không key → `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox Z.ai). Client không bao giờ thấy API key.
 4. **Financial-grade conventions** — tiền VND integer, phí 0.15%, thuế TNCN 0.1% khi bán, dải trần/sàn ±7% HOSE ([DB_SCHEMA.md §8](./DB_SCHEMA.md)).
 5. **Minh bạch nguồn dữ liệu** — mọi nguồn được gắn nhãn `live`/`simulated`/`fallback`/`paper` trong `DataSourceStatus` và hiển thị trên footer; dữ liệu mô phỏng không bao giờ giả danh "live" (stale marking — [DATA_SOURCES.md §6](./DATA_SOURCES.md)).
 6. **Realtime-first (tuỳ chọn)** — mini-service `market-engine` broadcast tick bảng giá, tin tức mới và kết quả chu kỳ agent qua WebSocket (§6); TanStack Query vẫn là cache layer duy nhất.
@@ -33,7 +33,7 @@ The Trader là một **trading workspace một trang** (single-page dashboard): 
 | Charts | Recharts | 3.10.1 |
 | Toasts | Sonner | 2.0.8 |
 | Date utils | date-fns | 4.4.0 |
-| AI | `z-ai-web-dev-sdk` — model **glm-4.6**, backend-only | 0.0.18 |
+| AI | `src/lib/llm.ts` — provider abstraction: **Opencode Zen** `space-bunny-free` (OpenAI-compatible REST, key `OPENCODE_ZEN_API_KEY`) hoặc `z-ai-web-dev-sdk` GLM-4.6 (sandbox) — backend-only | 0.0.18 |
 | Realtime client | `socket.io-client` (nối mini-service market-engine, §6) | 4.8.4 |
 | RSS parser | `fast-xml-parser` (crawler tin tức S5) | 5.11.2 |
 | Runtime | Bun | 1.3.14 |
@@ -58,7 +58,7 @@ flowchart TB
         TICK["POST /api/market/tick\nS4 tick engine: random-walk\n+ mean-reversion 3% (Q1–Q5)"]
         NEWS["POST /api/news\nS5 crawler RSS (fast-xml-parser)\ndedupe theo url, rate-limit 60s"]
         FLOWS["GET /api/market/flows\nS6 dòng khối ngoại\n(simulated deterministic)"]
-        SDK["z-ai-web-dev-sdk\nglm-4.6 (backend-only)"]
+        SDK["src/lib/llm.ts — provider:\nOpencode Zen space-bunny-free (có key)\nz-ai glm-4.6 (sandbox)"]
         PRISMA["Prisma Client\n(src/lib/db.ts singleton)"]
     end
 
@@ -188,13 +188,13 @@ sequenceDiagram
     participant U as Trader (UI)
     participant API as POST /api/agents/run
     participant DB as Prisma / Supabase Postgres
-    participant LLM as glm-4.6 (z-ai-web-dev-sdk)
+    participant LLM as src/lib/llm.ts (Opencode Zen space-bunny-free | z-ai glm-4.6)
 
     U->>API: POST /api/agents/run
     API->>DB: 1. Snapshot: Quote, Bar(90d), Position, BrokerAccount, RiskAlert mở, NewsItem 10 tin mới (S5), dòng khối ngoại (S6)
     API->>API: 2. Build role-prompt cho từng agent (snapshot + config từ Agent.config)
     loop 3 agent phân tích (market / news / risk)
-        API->>LLM: Chat completion (role prompt, glm-4.6)
+        API->>LLM: Chat completion (role prompt, model runtime)
         LLM-->>API: Phân tích (content, reasoning, sentiment)
         API->>DB: 3. Ghi AgentMessage (broadcast) + AgentRun (tokens, cost, duration)
     end
@@ -264,10 +264,10 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | Lĩnh vực | Chính sách |
 |---|---|
 | **PII** | Field đánh dấu PII theo [DB_SCHEMA.md §4.1](./DB_SCHEMA.md): `email`, `phone`, `passwordHash`, `accountNumber`. API không trả `passwordHash`; **`accountNumber` được mask tại API boundary** (`VD00••••1828`) trước khi xuống client; `phone` không nằm trong response nào. PII không log ra console/LLM prompt. |
-| **Credential storage** | Mật khẩu chỉ lưu **hash** (`passwordHash`) — giá trị seed là placeholder demo, production dùng bcrypt/argon2 + salt riêng. Broker credential & khóa dịch vụ đặt trong `.env` phía server (`DATABASE_URL`, khóa `z-ai-web-dev-sdk`), không commit, không đưa vào client bundle. |
+| **Credential storage** | Mật khẩu chỉ lưu **hash** (`passwordHash`) — giá trị seed là placeholder demo, production dùng bcrypt/argon2 + salt riêng. Broker credential & khóa dịch vụ đặt trong `.env` phía server (`DATABASE_URL`, `OPENCODE_ZEN_API_KEY`, khóa `z-ai-web-dev-sdk`), không commit, không đưa vào client bundle. |
 | **API-only backend** | **Không dùng Server Actions** — mọi đọc/ghi qua Route Handlers: một cửa duy nhất để validate payload, kiểm soát rate, và ghi `AuditLog`. |
 | **Relative-path API calls** | Client chỉ `fetch('/api/...')` — không hard-code origin, tránh leak cross-origin và SSRF-style redirect; deploy được dưới bất kỳ reverse-proxy/domain nào. |
-| **LLM backend-only** | `z-ai-web-dev-sdk` chỉ import trong Route Handlers (`/api/agents/run`); SDK không bao giờ nằm trong dependency graph của client components → API key không expose. |
+| **LLM backend-only** | Mọi cuộc gọi agent đi qua `src/lib/llm.ts`, chỉ import trong Route Handlers (`/api/agents/run`, `[id]/run`, `[id]/chat`) — provider (Opencode Zen / z-ai) không bao giờ nằm trong dependency graph của client components → API key không expose; model runtime hiển thị trên UI qua `GET /api/agents` → `llm`. |
 | **Audit logging** | `AuditLog` ghi mọi hành động nhạy cảm: `ORDER_CREATED`, **`ORDER_FILLED`** (fill engine trong tick — khớp lệnh giấy, kèm phí/thuế), **`ORDER_CANCELLED`** (POST /api/orders/[id]/cancel), **`ORDER_REJECTED`** (fill engine từ chối lệnh SELL không đủ vị thế — F-303, audit 22-a), `SIGNAL_APPROVED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`, `RISK_ALERT_RAISED` (runtime: flows khối ngoại + stale escalate) — đủ 12/12 action runtime (fix F-206 + F-303); `SIGNAL_REJECTED` sẽ thêm ở Giai đoạn 3 (kèm `before`/`after` JSON, `ip`). |
 | **Soft delete** | User/BrokerAccount/Instrument chỉ soft delete (`deletedAt`) — bảo toàn tính truy vết (xem [DB_SCHEMA.md §4.2](./DB_SCHEMA.md)). |
 | **SQL injection** | Toàn bộ truy vấn qua Prisma Client parameterized — không string-concat SQL. |
@@ -316,3 +316,4 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | 2026-10-05 | **v0.2 — hoàn thiện blueprint:** (1) chu kỳ đa agent đầy đủ §5.2 (4 LLM call, Signal + Order giấy + AuditLog); (2) đồng bộ bảng API §4 với routes thực tế (thêm `/api/orders`, `/api/signals/[id]/convert`, `/api/market/watchlist`); (3) health scoring động §5.3 (`src/lib/health.ts`) + highlight agent < 60; (4) mask `accountNumber` tại API; (5) Zustand store `src/lib/store.ts` + staleTime phân tầng; (6) Watchlist API + Switch chế độ bảng giá; (7) footer trạng thái nguồn dữ liệu + last-updated; (8) nút Chạy agent ở Header (hook dùng chung `useRunAgents`) |
 | 2026-10-06 | **v0.3 — Giai đoạn 2 (S3–S6 + realtime):** (1) mini-service `market-engine` LIVE (port 3003): WebSocket broadcast + scheduler, section mới §6; (2) 6 API route mới (`/api/news` GET/POST, `/api/market/tick`, `/api/market/flows`, `/api/system/status`, `/api/watchlist/toggle`) + `meta` nguồn cho `/api/market/quotes`; (3) schema 19 model: `NewsItem` (S5, dedupe url) + `DataSourceStatus` (S4 stale marking); (4) crawler RSS 5 nguồn VN kiểm chứng + newsBlock/flowsBlock trong prompt chu kỳ agent; (5) S3 flag `LIVE_TRADING` + cổng kiểm tra + audit; (6) frontend: News card, Market pulse bar, cột sao watchlist, badge Live/Realtime, chips trạng thái nguồn động; roadmap cập nhật trạng thái |
 | 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B1–B3, 23 route):** (1) **App shell**: nav tab workspace (Zustand `activeWorkspace`, `?ws=` deep-link) — tổng quan ⇄ đội agent không reload, realtime giữ nguyên; (2) **4 API mới** (`GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision`) + `/api/agents` thêm stats/totals chi phí; rate-limit 60s/agent (DB-backed) + header Retry-After; (3) **Workspace Đội Agent**: roster 5 card (stats chi phí), panel chi tiết 5 tab (Hồ sơ/Hoạt động+sparkline/Nhiệm vụ/Phát thanh/Chat), chat 1-1 với AgentMessage.direction, phê duyệt/từ chối tín hiệu trong feed + panel; (4) **Dashboard**: nến Nhật + volume + RSI14 Wilder panel (custom Bar shape), toggle Nến/Đường, cột mở rộng bảng giá (trần/sàn/TC/cao/thấp + dấu ⌃⌄), donut phân bổ ngành + cột % tỷ trọng, ô Realized P&L, chip Sức mua ước tính (tooltip công thức), chip chi phí AI footer; (5) **hành vi mới**: chu kỳ sinh signal ACTIVE chờ duyệt (không auto-order — human-in-the-loop), audit `SIGNAL_CREATED`/`SIGNAL_APPROVED`/`SIGNAL_REJECTED`/`AGENT_CHAT`; `signal-execution.ts` một nguồn duy nhất cho toán tạo lệnh; SELL nav5pct guard vị thế |
+| 2026-10-06 | **v0.5 — LLM provider abstraction (`src/lib/llm.ts`):** (1) 2 provider chọn qua env `LLM_PROVIDER=auto`: **Opencode Zen** `space-bunny-free` (`https://opencode.ai/zen/v1/chat/completions`, Bearer `OPENCODE_ZEN_API_KEY`, free-tier $0, zero-retention — **chạy được ngoài sandbox**) hoặc `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox); (2) 3 route agent (run/single-run/chat) refactor dùng một cổng chung — bỏ 3 bản callLlm/callChatLlm trùng lặp; costUsd theo bảng giá provider (`LLM_PRICE_*_MTOK` ghi đè được); (3) `GET /api/agents` trả khối `llm` + `AgentCard.model` = model runtime — UI (workspace/panel/footer tooltip) hiển thị model đang chạy từ nguồn duy nhất; (4) `.env`/`.env.example` + README section "Chạy trên máy local" (chỉ cần API key opencode.ai/zen, KHÔNG cần Opencode CLI) |

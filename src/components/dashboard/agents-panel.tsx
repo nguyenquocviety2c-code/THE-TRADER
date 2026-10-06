@@ -128,7 +128,9 @@ export function AgentsPanel() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-muted-foreground">
               Tổng cộng {agents.length} agent · mô hình nền tảng{" "}
-              <span className="font-mono">glm-4.6</span>
+              <span className="font-mono" title={agentsQuery.data?.llm?.modelLabel}>
+                {agentsQuery.data?.llm?.model ?? "…"}
+              </span>
               {totals ? (
                 <>
                   {" · chi phí AI lũy kế "}

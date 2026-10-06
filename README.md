@@ -1,8 +1,8 @@
 # The Trader
 
-> **Dashboard multi-agent paper-trading cho VNDIRECT** — hội đồng 5 agent AI (glm-4.6) phân tích realtime, bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
+> **Dashboard multi-agent paper-trading cho VNDIRECT** — hội đồng 5 agent AI phân tích realtime, bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
 
-**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **glm-4.6** (z-ai-web-dev-sdk) · **socket.io**
+**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **Opencode Zen `space-bunny-free`** (chạy được cả ngoài sandbox) / **GLM-4.6** (trong sandbox) · **socket.io**
 
 > **Miễn trừ trách nhiệm:** đây là dự án minh họa (demo). Dữ liệu giá trên dashboard là **mô phỏng** (random-walk + mean-reversion, gắn nhãn `simulated`); toàn bộ lệnh là **paper trading** — lệnh giấy nội bộ, không gửi ra môi giới; tin tức RSS là dữ liệu thật nhưng chỉ làm ngữ cảnh phân tích. Dự án **không** dùng để giao dịch tiền thật.
 
@@ -34,7 +34,7 @@ flowchart TB
 
     subgraph App["Next.js — cổng 3000"]
         API["Route Handlers /api/*\nquotes · news · flows · agents/run\nsignals · portfolio · system/status…"]
-        LLM["z-ai-web-dev-sdk — glm-4.6\n(backend-only)"]
+        LLM["src/lib/llm.ts — provider abstraction:\nOpencode Zen space-bunny-free (có key, chạy được ngoài sandbox)\nhoặc z-ai-web-dev-sdk GLM-4.6 (sandbox)"]
     end
 
     DB[("Supabase Postgres — schema trader\nPrisma · 19 models")]
@@ -96,6 +96,20 @@ bun run dev
 
 Mini-service lắng nghe **cổng 3003** và gọi thẳng app Next.js (server-to-server). Trình duyệt kết nối **qua gateway** bằng query `XTransformPort=3003` (`io("/?XTransformPort=3003")`) — nếu deploy sau reverse-proxy thì giữ nguyên pattern này, không cần mở thêm cổng.
 
+### Chạy trên máy local (ngoài sandbox Z.ai)
+
+Sandbox dùng GLM-4.6 qua `z-ai-web-dev-sdk` (gateway nội bộ, không có ở ngoài). Trên máy local, đặt **API key Opencode Zen** để cả 5 agent chạy model **`space-bunny-free`** (free-tier, zero-retention):
+
+1. Lấy key: mở **https://opencode.ai/zen** → đăng nhập → copy **API key** (mục Developers/API keys).
+2. Đặt vào `.env`:
+
+   ```bash
+   LLM_PROVIDER=auto                      # có key → tự dùng Opencode Zen
+   OPENCODE_ZEN_API_KEY=<api-key-cua-ban>
+   ```
+
+3. `bun run dev` — mọi cuộc gọi LLM (chu kỳ đầy đủ, chạy riêng, chat 1-1) tự chuyển qua `https://opencode.ai/zen/v1/chat/completions` với model `space-bunny-free`; chi phí phát sinh **$0** (model free-tier). Model đang chạy hiển thị ngay trên UI (workspace Đội Agent + tooltip chip AI ở footer). KHÔNG cần cài Opencode CLI — app gọi thẳng gateway bằng REST OpenAI-compatible.
+
 ---
 
 ## Scripts
@@ -117,6 +131,11 @@ Mini-service lắng nghe **cổng 3003** và gọi thẳng app Next.js (server-t
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `DATABASE_URL` | `postgresql://postgres.<ref>:<pwd>@aws-0-<region>.pooler.supabase.com:5432/postgres?schema=trader` | Kho dữ liệu chính — Supabase Postgres qua Prisma (bền vững qua reset sandbox) |
+| `LLM_PROVIDER` | `auto` | Provider LLM cho 5 agent (`src/lib/llm.ts`): `auto` = có `OPENCODE_ZEN_API_KEY` → Opencode Zen, ngược lại → z-ai GLM-4.6 (sandbox) |
+| `OPENCODE_ZEN_API_KEY` | — | API key từ **opencode.ai/zen** (sign in → copy). Đặt biến này là toàn bộ 5 agent chuyển sang `space-bunny-free` (free-tier, zero-retention) — **chạy được trên máy local ngoài sandbox** |
+| `OPENCODE_ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Gateway OpenAI-compatible của Opencode Zen |
+| `OPENCODE_ZEN_MODEL` | `space-bunny-free` | Model id (cùng bảng model của opencode.ai/zen/docs) |
+| `LLM_PRICE_IN_MTOK` / `LLM_PRICE_OUT_MTOK` | theo model | Ghi đè bảng giá USD/1M token khi đổi model trả phí (model `-free` mặc định $0) |
 | `LIVE_TRADING` | `false` | S3 — bật giao dịch thật VNDIRECT; bật mà thiếu cấu hình bên dưới → API từ chối + audit log |
 | `VNDIRECT_API_BASE` | — | Endpoint VNDIRECT open API (chỉ cần khi `LIVE_TRADING=true`) |
 | `VNDIRECT_API_TOKEN` | — | Token khách hàng VNDIRECT — giữ phía server, không commit |
@@ -160,6 +179,6 @@ docs/                         # Tài liệu chi tiết (xem dưới)
 
 ## Ghi chú
 
-- **LLM backend-only** — 5 agent chạy glm-4.6 qua `z-ai-web-dev-sdk`, khởi tạo trong Route Handlers; cần cấu hình SDK ở phía server (khóa không nằm trong repo hay client bundle).
+- **LLM backend-only qua lớp provider duy nhất `src/lib/llm.ts`** — mọi cuộc gọi của 5 agent đi qua một cổng: đặt `OPENCODE_ZEN_API_KEY` (lấy tại **opencode.ai/zen**) là cả đội chuyển sang **`space-bunny-free`** free-tier và **chạy được trên máy local ngoài sandbox**; không có key thì tự dùng GLM-4.6 của sandbox Z.ai để phát triển. Khóa không nằm trong repo hay client bundle; model đang chạy hiển thị trực tiếp trên UI (chip Đội Agent + tooltip footer) qua `GET /api/agents` → `llm`.
 - **Scheduler chu kỳ agent mặc định TẮT** (`AGENT_CYCLE_MINUTES=0`) để tiết kiệm chi phí LLM — chạy chu kỳ thủ công bằng nút "Chạy chu kỳ phân tích" trên dashboard.
 - Giá và dòng tiền trên dashboard là **mô phỏng có khai báo** (mode `simulated` hiển thị trên footer); tin tức RSS là dữ liệu thật.

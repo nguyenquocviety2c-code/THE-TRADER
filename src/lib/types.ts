@@ -190,11 +190,24 @@ export interface AgentsTotals {
   totalCostUsd: number;
 }
 
+/** Provider LLM đang chạy — nguồn duy nhất cho chip/tooltip model trên UI. */
+export interface LlmInfo {
+  provider: "zai" | "opencode-zen";
+  model: string;
+  modelLabel: string;
+  free: boolean;
+  priceInMtOk: number;
+  priceOutMtOk: number;
+  runsOutsideSandbox: boolean;
+}
+
 export interface AgentsResponse {
   agents: AgentCard[];
   tasks: AgentTaskRow[];
   /** PHASE3 B2: tổng hợp chi phí AI toàn đội (§5.5 — chip chi phí AI). */
   totals: AgentsTotals;
+  /** Provider LLM runtime (Opencode Zen space-bunny-free khi có key, GLM-4.6 trong sandbox). */
+  llm: LlmInfo;
 }
 
 export interface AgentMessageRow {

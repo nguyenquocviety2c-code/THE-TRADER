@@ -150,7 +150,7 @@ export function Footer() {
             <Badge
               variant="outline"
               className="gap-1.5 px-2 py-0.5 text-[10px] text-muted-foreground"
-              title={`Tổng chi phí LLM glm-4.6 của 5 agent: ${aiCost.runCount} lượt chạy · ${aiCost.totalTokensIn.toLocaleString("vi-VN")} token vào · ${aiCost.totalTokensOut.toLocaleString("vi-VN")} token ra`}
+              title={`Tổng chi phí LLM ${agents?.llm?.model ?? "—"} (${agents?.llm?.modelLabel ?? "provider src/lib/llm.ts"}) của 5 agent: ${aiCost.runCount} lượt chạy · ${aiCost.totalTokensIn.toLocaleString("vi-VN")} token vào · ${aiCost.totalTokensOut.toLocaleString("vi-VN")} token ra${agents?.llm?.free ? " · model free-tier — chi phí phát sinh = $0" : ""}`}
             >
               <Sparkles className="size-3" aria-hidden="true" />
               AI: ${aiCost.totalCostUsd.toFixed(2)} ·{" "}

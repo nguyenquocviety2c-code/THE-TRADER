@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { updateAgentHealth } from "@/lib/health";
 import { ROLE_PROMPTS, buildChatUserPrompt } from "@/lib/agent-context";
 import { checkAgentRateLimit } from "@/lib/agent-ratelimit";
+import {
+  callChatLlmWithRetry,
+  estimateTokens,
+  llmCostUsd,
+  type LlmMessage,
+} from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -21,62 +26,7 @@ export const maxDuration = 120;
 const MAX_MESSAGE_LENGTH = 500;
 const HISTORY_TAKE = 10;
 
-function estimateTokens(s: string): number {
-  return Math.ceil(s.length / 4);
-}
-
-function usageOf(
-  completion: unknown
-): { tokensIn: number | null; tokensOut: number | null } {
-  const usage = (
-    completion as {
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    } | null
-  )?.usage;
-  return {
-    tokensIn: usage?.prompt_tokens ?? null,
-    tokensOut: usage?.completion_tokens ?? null,
-  };
-}
-
-interface ChatMessageParam {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-/** Gọi SDK với lịch sử thread — raw text là câu trả lời (KHÔNG parse JSON). */
-async function callChatLlm(
-  zai: Awaited<ReturnType<typeof ZAI.create>>,
-  messages: ChatMessageParam[]
-): Promise<{ raw: string; tokensIn: number; tokensOut: number }> {
-  const completion = await zai.chat.completions.create({ messages });
-  const raw: string =
-    (completion as { choices?: { message?: { content?: string } }[] })?.choices?.[0]
-      ?.message?.content ?? "";
-  if (!raw.trim()) throw new Error("Phản hồi trống từ mô hình AI.");
-  const usage = usageOf(completion);
-  const promptText = messages.map((m) => m.content).join("\n");
-  return {
-    raw: raw.trim(),
-    tokensIn: usage.tokensIn ?? estimateTokens(promptText),
-    tokensOut: usage.tokensOut ?? estimateTokens(raw),
-  };
-}
-
-/** Retry một lần khi 429 (pattern run route). */
-async function callChatLlmWithRetry(
-  zai: Awaited<ReturnType<typeof ZAI.create>>,
-  messages: ChatMessageParam[]
-): Promise<{ raw: string; tokensIn: number; tokensOut: number }> {
-  try {
-    return await callChatLlm(zai, messages);
-  } catch (err) {
-    const isRateLimit = err instanceof Error && err.message.includes("429");
-    if (!isRateLimit) throw err;
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    return callChatLlm(zai, messages);
-  }
-}
+type ChatMessageParam = LlmMessage;
 
 export async function POST(
   req: NextRequest,
@@ -172,8 +122,7 @@ export async function POST(
 
     const startedAt = Date.now();
     try {
-      const zai = await ZAI.create();
-      const { raw, tokensIn, tokensOut } = await callChatLlmWithRetry(zai, messages);
+      const { raw, tokensIn, tokensOut } = await callChatLlmWithRetry(messages);
       const reply = raw; // chat trả lời tự do — KHÔNG parse JSON
 
       // Lưu tin trả lời của agent
@@ -189,7 +138,7 @@ export async function POST(
       // AgentRun đo chi phí — KHÔNG đổi agent.status (chat không đặt RUNNING)
       const finishedAt = new Date();
       const durationMs = finishedAt.getTime() - startedAt;
-      const costUsd = Number(((tokensIn * 0.6 + tokensOut * 2.2) / 1_000_000).toFixed(6));
+      const costUsd = llmCostUsd(tokensIn, tokensOut);
       const run = await db.agentRun.create({
         data: {
           agentId: agent.id,
@@ -248,7 +197,7 @@ export async function POST(
       const finishedAt = new Date();
       const durationMs = finishedAt.getTime() - startedAt;
       const tokensInEstimate = estimateTokens(messages.map((m) => m.content).join("\n"));
-      const costUsd = Number(((tokensInEstimate * 0.6 + 0 * 2.2) / 1_000_000).toFixed(6));
+      const costUsd = llmCostUsd(tokensInEstimate, 0);
 
       // AgentRun FAILED — đo chi phí lần thử thất bại
       await db.agentRun

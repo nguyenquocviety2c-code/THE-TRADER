@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import ZAI from "z-ai-web-dev-sdk";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { updateAgentHealth } from "@/lib/health";
 import { buildSingleRunPrompt } from "@/lib/agent-context";
 import { checkAgentRateLimit } from "@/lib/agent-ratelimit";
+import {
+  callLlmWithRetry,
+  estimateTokens,
+  llmCostUsd,
+} from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -13,28 +17,11 @@ export const maxDuration = 120;
  * POST /api/agents/[id]/run — chạy riêng 1 agent (PHASE3_BLUEPRINT §4.3).
  *
  * Luồng: guard 404/409/400 → rate-limit 60s (DB là nguồn chân lý) →
- * buildSingleRunPrompt(code) → LLM glm-4.6 → parse JSON theo vai →
+ * buildSingleRunPrompt(code) → LLM (provider src/lib/llm.ts — Opencode Zen
+ * space-bunny-free khi có key, GLM-4.6 trong sandbox) → parse JSON theo vai →
  * AgentRun + AgentMessage (broadcast) + health + audit AGENT_RUN_COMPLETED
  * (mode "single"). Lỗi LLM → persistRun FAILED + 502 (pattern run route).
  */
-
-function estimateTokens(s: string): number {
-  return Math.ceil(s.length / 4);
-}
-
-function usageOf(
-  completion: unknown
-): { tokensIn: number | null; tokensOut: number | null } {
-  const usage = (
-    completion as {
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    } | null
-  )?.usage;
-  return {
-    tokensIn: usage?.prompt_tokens ?? null,
-    tokensOut: usage?.completion_tokens ?? null,
-  };
-}
 
 /** Robustly extract the first JSON object from an LLM response. */
 function parseJsonBlock<T extends Record<string, unknown>>(raw: string): Partial<T> | null {
@@ -50,45 +37,6 @@ function parseJsonBlock<T extends Record<string, unknown>>(raw: string): Partial
   }
 }
 
-async function callLlm(
-  zai: Awaited<ReturnType<typeof ZAI.create>>,
-  systemPrompt: string,
-  userPrompt: string
-): Promise<{ raw: string; tokensIn: number; tokensOut: number }> {
-  const completion = await zai.chat.completions.create({
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
-  const raw: string =
-    (completion as { choices?: { message?: { content?: string } }[] })?.choices?.[0]
-      ?.message?.content ?? "";
-  if (!raw) throw new Error("Phản hồi trống từ mô hình AI.");
-  const usage = usageOf(completion);
-  return {
-    raw,
-    tokensIn: usage.tokensIn ?? estimateTokens(systemPrompt + userPrompt),
-    tokensOut: usage.tokensOut ?? estimateTokens(raw),
-  };
-}
-
-/** LLM call with one retry on rate limit (429) — pattern run route. */
-async function callLlmWithRetry(
-  zai: Awaited<ReturnType<typeof ZAI.create>>,
-  systemPrompt: string,
-  userPrompt: string
-): Promise<{ raw: string; tokensIn: number; tokensOut: number }> {
-  try {
-    return await callLlm(zai, systemPrompt, userPrompt);
-  } catch (err) {
-    const isRateLimit = err instanceof Error && err.message.includes("429");
-    if (!isRateLimit) throw err;
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    return callLlm(zai, systemPrompt, userPrompt);
-  }
-}
-
 /** Persist an agent run + restore agent status + update health (persistRun-style). */
 async function persistRun(
   agentId: string,
@@ -101,7 +49,7 @@ async function persistRun(
 ): Promise<{ id: string; durationMs: number; costUsd: number }> {
   const finishedAt = new Date();
   const durationMs = finishedAt.getTime() - startedAt;
-  const costUsd = Number(((tokensIn * 0.6 + tokensOut * 2.2) / 1_000_000).toFixed(6));
+  const costUsd = llmCostUsd(tokensIn, tokensOut);
   const run = await db.agentRun.create({
     data: {
       agentId,
@@ -238,8 +186,7 @@ export async function POST(
         ? `${user}\n\nGHI CHÚ CỦA TRADER:\n${note}`
         : user;
 
-      const zai = await ZAI.create();
-      const { raw, tokensIn, tokensOut } = await callLlmWithRetry(zai, system, userPrompt);
+      const { raw, tokensIn, tokensOut } = await callLlmWithRetry(system, userPrompt);
 
       const parsed = parseAgentOutput(agent.code, raw);
       const { content, reasoning, sentiment } = parsed;

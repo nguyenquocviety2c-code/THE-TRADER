@@ -64,19 +64,22 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 
 **Fallback:** không cần — nguồn nội bộ luôn khả dụng; dữ liệu demo được đánh dấu rõ trên sticky footer dashboard.
 
-### 3.2 S2 — LLM phân tích đa agent (glm-4.6, backend-only)
+### 3.2 S2 — LLM phân tích đa agent (provider abstraction `src/lib/llm.ts`, backend-only)
 
 **Endpoint tiêu thụ:** `POST /api/agents/run` (orchestrator — mô tả luồng đầy đủ ở [TECHNICAL_BLUEPRINT.md §5.2](./TECHNICAL_BLUEPRINT.md)) · **Giai đoạn 3 thêm 2 lối gọi theo-agent:** `POST /api/agents/[id]/run` (chạy riêng) và `POST /api/agents/[id]/chat` (chat 1-1) — cùng snapshot builder `src/lib/agent-context.ts`, **rate-limit 60s/agent** (DB-backed qua `AgentRun` cuối, 429 + `Retry-After`).
 
-- **SDK:** `z-ai-web-dev-sdk` v0.0.18, model **`glm-4.6`** — chỉ import trong Route Handler, không bao giờ ở client (API key không expose).
+- **Lớp provider duy nhất `src/lib/llm.ts`** (chọn qua env `LLM_PROVIDER=auto`, mặc định):
+  - **Opencode Zen** — `https://opencode.ai/zen/v1/chat/completions` (OpenAI-compatible REST, Bearer `OPENCODE_ZEN_API_KEY`), model mặc định **`space-bunny-free`** (free-tier $0, zero-retention). **Chạy được cả ngoài sandbox** — đây là provider cho môi trường local của trader. Key lấy tại opencode.ai/zen (sign in → API key).
+  - **z-ai-web-dev-sdk** v0.0.18 — model **`glm-4.6`** qua gateway nội bộ sandbox Z.ai (đọc `/etc/.z-ai-config`); chỉ dùng để phát triển/kiểm thử trong sandbox khi chưa có key Zen.
+  - `auto`: có `OPENCODE_ZEN_API_KEY` → Opencode Zen, ngược lại → z-ai. Cùng một codebase chạy ở cả 2 môi trường. `GET /api/agents` trả khối `llm { provider, model, modelLabel, free, price… }` — UI hiển thị model runtime từ nguồn duy nhất này.
 - **Input:** snapshot từ DB — quotes + 90-day bars của watchlist, positions + avgPrice, số dư tài khoản, risk alerts đang mở, **10 tin RSS mới nhất (S5) + dòng khối ngoại (S6)** — được pack vào role-prompt cho từng agent theo `Agent.config` (chi tiết phân bổ khối: [TECHNICAL_BLUEPRINT.md §5.2](./TECHNICAL_BLUEPRINT.md)).
 - **Output parsed & persisted:**
   - `AgentMessage` (`content`, `reasoning`, `sentiment` bullish/bearish/neutral) — broadcast; **chat 1-1 lưu `broadcast=false` + `direction` USER/AGENT trong thread của agent (G3)**;
   - `Signal` từ bước tổng hợp của Portfolio Strategist (`direction`, `confidence`, `score`, `rationale`, `targetPrice/stopLoss/takeProfit`) — **G3: sinh ra `ACTIVE` chờ trader phê duyệt** (APPROVE → lệnh, REJECT → `rejectedAt`);
   - `Order` giấy chỉ tạo khi trader **APPROVE** (`/api/signals/[id]/decision`, sizing 5% NAV) hoặc **convert** (budget 50tr) — `src/lib/signal-execution.ts`;
-  - `AgentRun` audit mỗi agent: `tokensIn/tokensOut`, `costUsd`, `durationMs`, `taskStatus`, `output` JSON (chat: `output` = câu hỏi gốc; audit `AGENT_CHAT`).
+  - `AgentRun` audit mỗi agent: `tokensIn/tokensOut`, `costUsd` (bảng giá theo provider — GLM-4.6 $0.6/$2.2 mỗi MTok, model `-free` của Zen $0; ghi đè bằng `LLM_PRICE_*_MTOK`), `durationMs`, `taskStatus`, `output` JSON (chat: `output` = câu hỏi gốc; audit `AGENT_CHAT`).
 - **Tần suất:** on-demand khi trader bấm **Run agents**; đã có sẵn scheduler tự động trong mini-service market-engine (`AGENT_CYCLE_MINUTES`, **mặc định 0 = TẮT** để tiết kiệm chi phí LLM — xem [TECHNICAL_BLUEPRINT.md §6](./TECHNICAL_BLUEPRINT.md)).
-- **Fallback:** nếu SDK/LLM lỗi hoặc timeout → run đánh dấu `FAILED` với `error`, agent chuyển `ERROR`, UI vẫn hiển thị `AgentMessage` cũ (last cached) kèm nhãn stale; có thể sinh `RiskAlert` (severity INFO/WARNING) "agent pipeline unavailable".
+- **Fallback:** nếu provider/LLM lỗi hoặc timeout (vd Opencode Zen 401 key sai — lỗi ghi rõ `HTTP <status>` vào `AgentRun.error`) → run đánh dấu `FAILED` với `error`, agent chuyển `ERROR`, UI vẫn hiển thị `AgentMessage` cũ (last cached) kèm nhãn stale; có thể sinh `RiskAlert` (severity INFO/WARNING) "agent pipeline unavailable".
 
 ---
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
+import { LLM_MODEL_ID, llmStatus } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 
@@ -129,7 +130,7 @@ export async function GET() {
         role: a.role,
         roleLabel: ROLE_LABELS[a.role] ?? a.role,
         description: a.description,
-        model: a.model,
+        model: LLM_MODEL_ID, // model runtime (provider đang chạy) — DB chỉ lưu mặc định
         status: a.status,
         healthScore: a.healthScore,
         lastRunAt: a.lastRunAt,
@@ -183,6 +184,9 @@ export async function GET() {
           createdAt: t.createdAt,
         })),
         totals,
+        // Provider LLM đang chạy (auto: Opencode Zen space-bunny-free khi có key,
+        // GLM-4.6 trong sandbox) — UI chip/tooltip dùng nguồn duy nhất này
+        llm: llmStatus(),
       })
     );
   } catch (err) {

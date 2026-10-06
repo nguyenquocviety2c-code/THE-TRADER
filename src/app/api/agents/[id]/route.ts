@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { ROLE_LABELS } from "@/app/api/agents/route";
 import { mapSignalRow } from "@/lib/signal-execution";
+import { LLM_MODEL_ID } from "@/lib/llm";
 
 export const dynamic = "force-dynamic";
 
@@ -131,7 +132,7 @@ export async function GET(
           role: agent.role,
           roleLabel: ROLE_LABELS[agent.role] ?? agent.role,
           description: agent.description,
-          model: agent.model,
+          model: LLM_MODEL_ID, // model runtime (provider đang chạy) — DB chỉ lưu mặc định
           status: agent.status,
           healthScore: agent.healthScore,
           lastRunAt: agent.lastRunAt,

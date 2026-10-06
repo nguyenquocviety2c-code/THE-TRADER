@@ -92,8 +92,11 @@ export function AgentsWorkspace() {
             <div className="leading-tight">
               <p className="text-base font-semibold">Đội Agent</p>
               <p className="text-xs text-muted-foreground">
-                5 agent AI <span className="font-mono">glm-4.6</span>: phân
-                tích → cảm xúc → rủi ro → chiến lược → thực thi
+                5 agent AI{" "}
+                <span className="font-mono" title={agentsQuery.data?.llm?.modelLabel}>
+                  {agentsQuery.data?.llm?.model ?? "…"}
+                </span>
+                : phân tích → cảm xúc → rủi ro → chiến lược → thực thi
               </p>
             </div>
           </div>
