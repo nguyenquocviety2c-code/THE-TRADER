@@ -166,6 +166,7 @@ export async function POST(
     }
 
     // Rate-limit 60s — DB là nguồn chân lý (PHASE3_BLUEPRINT §4.3)
+    // (kiểm tra TRƯỚC khi claim RUNNING — nếu 429 thì không đổi trạng thái)
     const rate = await checkAgentRateLimit(agent.id);
     if (!rate.ok) {
       return NextResponse.json(
@@ -180,7 +181,22 @@ export async function POST(
       );
     }
 
-    // Đánh dấu RUNNING trong lúc chạy lẻ
+    // AUD-CODE #4 (TOCTOU single-run): đọc status rồi mới update RUNNING có thể
+    // cho 2 request đồng thời cùng pass → chạy kép (2× LLM). Claim atomic:
+    // updateMany có điều kiện status != RUNNING — chỉ 1 request thắng.
+    const claimed = await db.agent.updateMany({
+      where: { id: agent.id, status: { not: "RUNNING" } },
+      data: { status: "RUNNING" },
+    });
+    if (claimed.count === 0) {
+      return NextResponse.json(
+        { error: "Agent đang chạy một tác vụ khác." },
+        { status: 400 }
+      );
+    }
+
+    // Đánh dấu RUNNING trong lúc chạy lẻ (đã claim atomic ở trên — giữ dòng
+    // update này để chắc chắn đã ghi DB trong mọi nhánh)
     await db.agent.update({ where: { id: agent.id }, data: { status: "RUNNING" } });
 
     const startedAt = Date.now();

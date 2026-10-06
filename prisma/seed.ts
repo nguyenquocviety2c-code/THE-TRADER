@@ -83,11 +83,14 @@ function generateBars(def: StockDef, days = 90) {
   // such that the last close ≈ def.price
   let price = def.price * (1 - (rand() - 0.5) * 0.1) // start ±5%
   const dates: Date[] = []
-  const cursor = new Date()
-  cursor.setHours(15, 0, 0, 0)
+  const now = new Date()
   while (dates.length < days) {
-    if (cursor.getDay() !== 0 && cursor.getDay() !== 6) dates.push(new Date(cursor))
-    cursor.setDate(cursor.getDate() - 1)
+    if (now.getUTCDay() !== 0 && now.getUTCDay() !== 6) {
+      // AUD-CODE #19: chuẩn hoá 15:00 UTC (khớp convention Bar.date của tick
+      // route — new Date(`${iso}T15:00:00.000Z`)) — không phụ thuộc TZ máy
+      dates.push(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 15, 0, 0)))
+    }
+    now.setUTCDate(now.getUTCDate() - 1)
   }
   dates.reverse()
   for (const date of dates) {
@@ -183,9 +186,7 @@ async function main() {
       data: {
         symbol: def.symbol,
         name: def.name,
-        market: ['VCB', 'BID', 'CTG', 'TCB', 'VPB', 'VIC', 'VHM', 'VRE', 'FPT', 'CMG', 'HPG', 'HSG', 'MSN', 'MWG', 'VNM', 'SAB', 'GAS', 'PLX', 'VJC', 'MBB', 'STB', 'PNJ', 'DHG', 'VIB', 'TPB', 'SHB', 'SSI', 'VND', 'HCM'].includes(def.symbol)
-          ? 'HOSE'
-          : 'HOSE',
+        market: 'HOSE', // AUD-CODE #27: bỏ ternary chết (danh mục seed toàn HOSE)
         type: 'STOCK',
         sector: def.sector,
         outstandingShares: randInt(300, 5000) * 1_000_000,
@@ -230,7 +231,7 @@ async function main() {
       data: {
         ...a,
         model: 'space-bunny-free',
-        status: a.code === 'news-sentiment' ? 'RUNNING' : 'IDLE',
+        status: 'IDLE', // AUD-CODE #9: mọi agent seed xong đều IDLE — không kẹt RUNNING
         healthScore: randInt(88, 100),
         lastRunAt: new Date(Date.now() - randInt(2, 55) * 60_000),
       },

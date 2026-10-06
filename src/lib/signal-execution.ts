@@ -35,6 +35,24 @@ export function signalStatusConflictMessage(status: string): string {
   }
 }
 
+/**
+ * Sweep tín hiệu quá hạn (fix P1 AUD-CODE #1): ACTIVE + expiresAt < now → EXPIRED.
+ * Không có sweep thì tín hiệu chết vẫn hiện "đang mở" trong prompt Chủ tịch,
+ * notification-officer đếm sai, và trader vẫn phê duyệt được lệnh từ tín hiệu cũ.
+ * Idempotent — gọi ở đầu GET /api/signals, chu kỳ agents/run và trước khi tạo lệnh.
+ */
+export async function expireDueSignals(): Promise<number> {
+  try {
+    const res = await db.signal.updateMany({
+      where: { status: "ACTIVE", expiresAt: { lt: new Date() } },
+      data: { status: "EXPIRED" },
+    });
+    return res.count;
+  } catch {
+    return 0; // không chặn luồng chính vì sweep phụ
+  }
+}
+
 /** Signal kèm quan hệ cần thiết để map SignalRow (src/lib/types.ts). */
 export interface SignalWithRefs {
   id: string;
@@ -128,6 +146,13 @@ export async function createPaperOrderFromSignal(
 
   if (!signal) {
     return { ok: false, status: 404, error: "Không tìm thấy tín hiệu." };
+  }
+
+  // P1 AUD-CODE #1: sweep tín hiệu hết hạn NGAY TRƯỚC khi đọc trạng thái —
+  // không cho phê duyệt lệnh từ tín hiệu đã chết giữa chừng
+  await expireDueSignals();
+  if (signal.status === "ACTIVE" && signal.expiresAt && signal.expiresAt < new Date()) {
+    signal.status = "EXPIRED";
   }
 
   // Guard vòng đời (PHASE3 §4.1): chỉ tín hiệu ACTIVE mới được tạo lệnh
@@ -337,27 +362,58 @@ export async function createPaperOrderFromSignal(
     }`;
   }
 
-  const order = await db.order.create({
-    data: {
-      userId: user.id,
-      brokerAccountId: account.id,
-      signalId: signal.id,
-      instrumentId: signal.instrument.id,
-      side,
-      type: "LIMIT",
-      quantity,
-      price,
-      fee: BigInt(Math.round(0.0015 * price * quantity)), // F-201 (audit 19-b): phí môi giới 0,15% notional
-      status: "PENDING",
-      note,
-    },
-  });
-
-  await db.signal.update({
-    where: { id: signal.id },
-    // Đồng bộ vòng đời §4.1: đã có lệnh → actedAt + status ACTED
-    data: { actedAt: new Date(), status: "ACTED" },
-  });
+  // ── AUD-CODE #2 (TOCTOU): claim + tạo lệnh trong MỘT transaction ──
+  // Trước đây check existingOrder → create Order → update Signal nằm ngoài tx:
+  // 2 request APPROVE đồng thời đều vượt check → 2 lệnh, trừ tiền mặt 2 lần.
+  // Claim atomic: updateMany có điều kiện status=ACTIVE && actedAt=null — chỉ
+  // MỘT request thắng; request thua nhận 409 đúng nghĩa "đã chuyển lệnh".
+  const feeBigInt = BigInt(Math.round(0.0015 * price * quantity)); // F-201: phí 0,15% notional
+  let order;
+  try {
+    order = await db.$transaction(async (tx) => {
+      // Claim duy quyền chuyển tín hiệu sang ACTED
+      const claimed = await tx.signal.updateMany({
+        where: { id: signal.id, status: "ACTIVE", actedAt: null },
+        data: { actedAt: new Date(), status: "ACTED" },
+      });
+      if (claimed.count === 0) {
+        throw new Error("SIGNAL_CLAIM_LOST");
+      }
+      // F-207: lệnh đã tồn tại trong sổ (kể cả khi actedAt bị thiếu) → chặn trùng
+      const existing = await tx.order.findFirst({
+        where: { signalId: signal.id },
+        select: { id: true },
+      });
+      if (existing) {
+        throw new Error("SIGNAL_HAS_ORDER");
+      }
+      return tx.order.create({
+        data: {
+          userId: user.id,
+          brokerAccountId: account.id,
+          signalId: signal.id,
+          instrumentId: signal.instrument.id,
+          side,
+          type: "LIMIT",
+          quantity,
+          price,
+          fee: feeBigInt,
+          status: "PENDING",
+          note,
+        },
+      });
+    });
+  } catch (txErr) {
+    const msg = txErr instanceof Error ? txErr.message : String(txErr);
+    if (msg === "SIGNAL_CLAIM_LOST" || msg === "SIGNAL_HAS_ORDER") {
+      return {
+        ok: false,
+        status: 409,
+        error: "Tín hiệu này đã được chuyển thành lệnh trước đó (hoặc đang được xử lý đồng thời).",
+      };
+    }
+    throw txErr; // lỗi DB thật — để tầng trên xử lý 500
+  }
 
   await db.auditLog.create({
     data: {

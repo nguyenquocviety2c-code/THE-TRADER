@@ -58,12 +58,14 @@ const MODE_LABEL: Record<string, string> = {
   simulated: "mô phỏng",
   fallback: "cache",
   paper: "paper",
+  real: "EOD thật",
 };
 
 function modeDotClass(mode: string, stale: boolean): string {
   if (stale) return "bg-amber-500";
   switch (mode) {
     case "live":
+    case "real": // EOD thật từ VNDIRECT dchart — xanh như live
       return "bg-up";
     case "simulated":
       return "bg-amber-500/80";

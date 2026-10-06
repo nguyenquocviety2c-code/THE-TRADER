@@ -93,10 +93,12 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
     if (!q || q.last <= 0) continue;
     const turnover = q.volume * q.last; // giá trị giao dịch phiên
     // F-109 (audit 19-b): hệ số 0.5%–6% theo thanh khoản (doc §4.4), seeded theo (mã, ngày)
-    const pct = 0.005 + seededUnit(inst.symbol, dateIso) * 0.055; // 0.5%–6% theo thanh khoản (doc §4.4)
+    // AUD-CODE #26: 2 seed khác nhau (vol| và dir|) — trước đây cùng 1 seed làm
+    // magnitude & direction tương quan nhân tạo (mã mua ròng luôn có biên độ lớn)
+    const pct = 0.005 + seededUnit(`vol|${inst.symbol}`, dateIso) * 0.055; // 0.5%–6% theo thanh khoản (doc §4.4)
     // Quy mô dòng ròng ≈ pct × thanh khoản, giới hạn 2–80 tỷ VND
     const scale = Math.min(8e10, Math.max(2e9, turnover * pct));
-    const unit = seededUnit(inst.symbol, dateIso) * 2 - 1; // [-1, 1)
+    const unit = seededUnit(`dir|${inst.symbol}`, dateIso) * 2 - 1; // [-1, 1)
     const net = Math.round(unit * scale);
     if (net >= 0) totalBuy += net;
     else totalSell += -net;

@@ -17,6 +17,7 @@ import { db } from "@/lib/db";
 import { llmStatus } from "@/lib/llm";
 import { getTradingMode, TRADING_MODE_LABEL } from "@/lib/trading-mode";
 import { sessionPhase, SESSION_PHASE_LABEL } from "@/lib/market-session";
+import { ROSTER_BY_CODE } from "@/lib/agent-roster";
 
 export interface ServiceRunResult {
   content: string;
@@ -254,7 +255,7 @@ async function runFeatureStore(): Promise<ServiceRunResult> {
     .map((r) => `${r.symbol} (SMA20 ${r.sma20 ? Math.round(r.sma20).toLocaleString("vi-VN") : "—"}, động lượng 5 phiên ${r.mom5 != null ? fmtPct(r.mom5) : "—"}, KL/TL20 ${r.volRatio != null ? r.volRatio.toFixed(2) + "×" : "—"})`);
 
   return {
-    content: `Kho đặc trưng sẵn sàng: ${full}/10 mã top thanh khoản có đủ 5 nhóm đặc trưng (SMA20/50 · RSI14 · KL/TL20 · động lượng 5 phiên) trên ${ready[0]?.sessions ?? 0} phiên. Mẫu: ${sample.join(" · ")}.`,
+    content: `Kho đặc trưng sẵn sàng: ${full}/10 mã top thanh khoản có đủ 4 nhóm đặc trưng (SMA20/50 · động lượng 5 phiên · KL/TL20 · biến động) trên ${ready[0]?.sessions ?? 0} phiên. Mẫu: ${sample.join(" · ")}.`,
     reasoning: "Tính lại trực tiếp từ chuỗi closes/volumes 90 phiên của top-10 thanh khoản.",
     sentiment: null,
     output: { fullFeatureCount: full, checked: 10, sample: ready.slice(0, 3) },
@@ -325,8 +326,12 @@ async function runMlForecast(): Promise<ServiceRunResult> {
 
 /** A7 Exposure — VETO phơi nhiễm ngành & vị thế đơn. */
 async function runExposure(): Promise<ServiceRunResult> {
-  const MAX_SECTOR = 40; // % NAV — mirror config roster
-  const MAX_POSITION = 25; // % NAV
+  // AUD-CODE #15: hạn mức đọc từ roster config — MỘT nguồn duy nhất (không mirror tay)
+  const exposureCfg = ROSTER_BY_CODE.get("exposure")?.config as
+    | { maxSectorWeightPct?: number; maxPositionPct?: number }
+    | undefined;
+  const MAX_SECTOR = exposureCfg?.maxSectorWeightPct ?? 40; // % NAV
+  const MAX_POSITION = exposureCfg?.maxPositionPct ?? 25; // % NAV
   const snap = await portfolioSnapshot();
   const topSector = snap.sectorWeights[0];
   const topPosition = [...snap.positions].sort((a, b) => b.mv - a.mv)[0];
@@ -399,12 +404,20 @@ async function runSettlement(): Promise<ServiceRunResult> {
 /** A12 Cash Management — dòng tiền & sức mua ước tính. */
 async function runCashManagement(): Promise<ServiceRunResult> {
   const snap = await portfolioSnapshot();
-  const buyingPower = snap.cash + snap.equity * 0.5 - snap.marginUsed; // §5.4 header
-  const tight = buyingPower < 500_000_000; // marginRoomMinVnd roster
+  const cashCfg = ROSTER_BY_CODE.get("cash-management")?.config as
+    | { marginRoomMinVnd?: number; buyingPowerFactor?: number }
+    | undefined;
+  const factor = cashCfg?.buyingPowerFactor ?? 0.5;
+  const marginMin = cashCfg?.marginRoomMinVnd ?? 500_000_000;
+  // AUD-CODE #15b: trước đây cash + equity×0.5 đếm KÉP tiền mặt (equity = cash + GTTH).
+  // Đúng: sức mua = cash + GTTH vị thế mở × factor − margin đang dùng
+  const positionsMv = Math.max(0, snap.equity - snap.cash);
+  const buyingPower = snap.cash + positionsMv * factor - snap.marginUsed;
+  const tight = buyingPower < marginMin; // marginRoomMinVnd từ roster config
 
   return {
-    content: `Dòng tiền: tiền mặt ${vnd(snap.cash)} ₫ · NAV ${vnd(snap.equity)} ₫ · margin đang dùng ${vnd(snap.marginUsed)} ₫ · sức mua ước tính ${vnd(buyingPower)} ₫ (giả lập hệ số 0.5, không phải hạn mức thật VNDIRECT).${tight ? " Sức mua dưới hạn mức nội bộ 500 triệu — hạn chế tín hiệu MUA quy mô lớn." : ""}`,
-    reasoning: "cash + equity×0.5 − marginUsed (công thức chip Sức mua §5.4).",
+    content: `Dòng tiền: tiền mặt ${vnd(snap.cash)} ₫ · NAV ${vnd(snap.equity)} ₫ · margin đang dùng ${vnd(snap.marginUsed)} ₫ · sức mua ước tính ${vnd(buyingPower)} ₫ (tiền mặt + GTTH vị thế × ${factor} − margin; không phải hạn mức thật VNDIRECT).${tight ? ` Sức mua dưới hạn mức nội bộ ${vnd(marginMin)} ₫ — hạn chế tín hiệu MUA quy mô lớn.` : ""}`,
+    reasoning: "cash + positionsMv×factor − marginUsed (AUD-CODE #15b — không đếm kép cash).",
     sentiment: tight ? "neutral" : null,
     output: { cash: snap.cash, equity: snap.equity, marginUsed: snap.marginUsed, buyingPower },
   };
@@ -432,8 +445,17 @@ async function runLearningRag(): Promise<ServiceRunResult> {
 /** A14 Backtest — kiểm định chiến lược tham chiếu equal-weight. */
 async function runBacktest(): Promise<ServiceRunResult> {
   const top = await topLiquid(10);
+  // AUD-CODE #7: top rỗng → Math.min(...[]) = Infinity xuyên qua guard minLen < 31
+  if (top.length === 0) {
+    return {
+      content: "Chưa có dữ liệu bảng giá để kiểm định chiến lược — bỏ qua chu kỳ này.",
+      reasoning: "topLiquid trả về rỗng (DB chưa có bar/quote).",
+      sentiment: null,
+      output: { skipped: true, minLen: 0 },
+    };
+  }
   const minLen = Math.min(...top.map((t) => t.closes.length));
-  if (minLen < 31) {
+  if (!Number.isFinite(minLen) || minLen < 31) {
     return {
       content: "Chưa đủ dữ liệu 90 phiên để kiểm định chiến lược tham chiếu — bỏ qua chu kỳ này.",
       reasoning: "Chuỗi closes ngắn hơn 31 phiên.",

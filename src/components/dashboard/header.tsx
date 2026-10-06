@@ -62,13 +62,15 @@ export function Header() {
   const open = now ? isMarketOpen(now) : false;
 
   // PHASE3_BLUEPRINT §5.4 — chip Sức mua (ước tính, minh bạch công thức):
-  //   buyingPower = cash + marginRoom,  marginRoom = equity × RATIO − marginUsed
+  //   buyingPower = cash + marginRoom,  marginRoom = positionsMv × RATIO − marginUsed
+  //   (AUD-CODE #15b: trước đây equity×RATIO đếm kép tiền mặt — equity = cash + GTTH)
   //   MARGIN_ROOM_RATIO default 0.5 (giả lập ký quỹ 50% — KHÔNG phải hạn mức thật VNDIRECT)
   const MARGIN_ROOM_RATIO = 0.5;
   const cash = portfolio?.account.cashBalance ?? 0;
   const equity = portfolio?.account.equity ?? 0;
   const marginUsed = portfolio?.account.marginUsed ?? 0;
-  const marginRoom = Math.round(equity * MARGIN_ROOM_RATIO - marginUsed);
+  const positionsMv = Math.max(0, equity - cash); // GTTH vị thế mở
+  const marginRoom = Math.round(positionsMv * MARGIN_ROOM_RATIO - marginUsed);
   const buyingPower = cash + marginRoom;
   const overMargin = marginRoom < 0;
 

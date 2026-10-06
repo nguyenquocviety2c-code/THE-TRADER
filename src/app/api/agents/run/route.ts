@@ -3,6 +3,8 @@ import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { updateAgentHealth } from "@/lib/health";
 import { callLlmWithRetry, estimateTokens, llmCostUsd } from "@/lib/llm";
+import { reapStaleAgentRuns } from "@/lib/agent-ratelimit";
+import { expireDueSignals } from "@/lib/signal-execution";
 import {
   ROLE_PROMPTS,
   buildMarketBlock,
@@ -16,7 +18,9 @@ import { AGENT_ROSTER } from "@/lib/agent-roster";
 import { runServiceAgent, type ServiceRunResult } from "@/lib/agent-service-runs";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+// 300s: 6 LLM tuần tự × timeout 45s (llm.ts) + 17 service ~0.5s + biên độ —
+// trước đây 120s dễ bị kill giữa chu kỳ nếu gateway LLM đình trệ (AUD-CODE #8)
+export const maxDuration = 300;
 
 /**
  * POST /api/agents/run — chu kỳ phân tích đầy đủ 23 AGENTS (mở rộng Gen-1 §4.1):
@@ -170,18 +174,23 @@ export async function POST() {
       }
     );
   }
-  lastCycleStartedAt = now;
 
   const cycleStart = Date.now();
+
+  // AUD-CODE #5 + #3: watchdog dọn run/agent kẹt RUNNING (> 5 phút) TRƯỚC khi
+  // load — agent kẹt do crash cũ không được phép chặn chu kỳ vĩnh viễn
+  await reapStaleAgentRuns();
 
   // ── Load toàn bộ 23 agents ───────────────────────────────────────
   const agents = await db.agent.findMany({
     where: { code: { in: ALL_CODES } },
-    select: { id: true, code: true, config: true, healthScore: true },
+    select: { id: true, code: true, config: true, healthScore: true, status: true },
   });
   const byCode = new Map(agents.map((a) => [a.code, a]));
   const missing = ALL_CODES.filter((c) => !byCode.get(c));
   if (missing.length > 0) {
+    // AUD-CODE #10: KHÔNG set cooldown khi fail sớm ở bước validate —
+    // user không phải chờ 60s vô ích vì lỗi cấu hình (thiếu agent)
     return NextResponse.json(
       {
         error: `Thiếu agent trong hệ thống: ${missing.join(", ")}. Chạy "bun prisma/expand-agents.ts" để đồng bộ roster 23 agents.`,
@@ -189,6 +198,29 @@ export async function POST() {
       { status: 404 }
     );
   }
+
+  // AUD-CODE #3: guard chồng lấn — chu kỳ không đè lên single-run đang chạy
+  // (status đã load SAU khi watchdog dọn nên không có giả âm/ giả dương)
+  const runningAgents = agents.filter((a) => a.status === "RUNNING");
+  if (runningAgents.length > 0) {
+    return NextResponse.json(
+      {
+        error: `Có ${runningAgents.length} agent đang chạy lẻ (${runningAgents
+          .map((a) => a.code)
+          .slice(0, 3)
+          .join(", ")}…). Chờ hoàn tất hoặc thử lại sau — tránh chạy chồng lẫn tốn 2× chi phí LLM.`,
+        retryAfterSeconds: 60,
+      },
+      { status: 409, headers: { "Retry-After": "60" } }
+    );
+  }
+
+  // AUD-CODE #1 (P1): sweep tín hiệu hết hạn trước mỗi chu kỳ — prompt Chủ tịch
+  // và notification-officer chỉ thấy tín hiệu còn hạn
+  await expireDueSignals();
+
+  // AUD-CODE #10: cooldown chỉ tính từ lúc chu kỳ THẬT SỰ bắt đầu (qua validate)
+  lastCycleStartedAt = now;
 
   // Mark every agent RUNNING while the cycle executes
   await db.agent.updateMany({
@@ -207,8 +239,8 @@ export async function POST() {
   }[] = [];
   const failures: string[] = [];
 
-  /** Chạy + persist MỘT service agent (deterministic). */
-  async function runOneServiceAgent(code: string): Promise<void> {
+  /** Chạy + persist MỘT service agent (deterministic) — trả về result để đọc verdict VETO. */
+  async function runOneServiceAgent(code: string): Promise<ServiceRunResult | null> {
     const agent = byCode.get(code)!;
     const startedAt = Date.now();
     try {
@@ -235,6 +267,7 @@ export async function POST() {
         reasoning: result.reasoning,
         sentiment: result.sentiment,
       });
+      return result;
     } catch (err) {
       failures.push(code);
       console.error(`[api/agents/run] service agent ${code} failed:`, err);
@@ -247,6 +280,7 @@ export async function POST() {
         null,
         err instanceof Error ? err.message : "Lỗi dịch vụ."
       ).catch(() => undefined);
+      return null;
     }
   }
 
@@ -374,7 +408,7 @@ export async function POST() {
     }
 
     // ══ ĐỢT C · Ủy ban Kiểm soát (VETO) — risk LLM + 2 service ═════
-    await Promise.all([
+    const controlResults = await Promise.all([
       (async () => {
         const code = "risk-manager";
         const agent = byCode.get(code)!;
@@ -426,6 +460,28 @@ export async function POST() {
       ...WAVE_C_SERVICE_CODES.map((code) => runOneServiceAgent(code)),
     ]);
 
+    // ══ AUD-CODE #6: ENFORCE VETO — Ủy ban Kiểm soát có quyền phủ quyết THẠT ══
+    // Trước đây verdict "VETO" của exposure/compliance chỉ là text trong digest —
+    // Chủ tịch (LLM) có thể bỏ qua. Giờ ràng buộc cứng đúng kiến trúc Gen-1 §4.1:
+    //  - exposure VETO (danh mục vượt hạn mức) → chặn tín hiệu MUA (tăng phơi nhiễm);
+    //  - compliance VETO (biên margin âm / mode chưa cấu hình) → chặn MỌI tín hiệu mới.
+    const controlOutputs = WAVE_C_SERVICE_CODES.map(
+      (code, i) => ({ code, result: controlResults[i + 1] }) // index 0 = risk-manager
+    );
+    const vetoExposure = controlOutputs.some(
+      (c) =>
+        c.code === "exposure" &&
+        typeof c.result?.output?.verdict === "string" &&
+        (c.result.output.verdict as string).startsWith("VETO")
+    );
+    const vetoCompliance = controlOutputs.some(
+      (c) =>
+        c.code === "compliance" &&
+        typeof c.result?.output?.verdict === "string" &&
+        (c.result.output.verdict as string).startsWith("VETO")
+    );
+    const vetoBlocked = vetoExposure || vetoCompliance;
+
     // ══ ĐỢT D · Chủ tịch Hội đồng — tổng hợp 20 agents ═════════════
     const digestLines = AGENT_ROSTER.filter((a) => analyses.has(a.code)).map((a) => {
       const an = analyses.get(a.code)!;
@@ -434,12 +490,26 @@ export async function POST() {
       return `- ${a.name} (${a.gen1}): ${truncated}`;
     });
     const strategistAgent = byCode.get(CHAIRMAN_CODE)!;
+    const vetoNotice = vetoBlocked
+      ? [
+          "RÀNG BUỘC CỨNG TỪ ỦY BAN KIỂM SOÁT (VETO — bắt buộc tuân thủ):",
+          vetoExposure
+            ? "- Exposure A7 đã VETO: danh mục vượt hạn mức ngành/vị thế — KHÔNG được đưa tín hiệu MUA mới; chỉ được GIỮ hoặc BÁN để cắt tỷ trọng."
+            : "",
+          vetoCompliance
+            ? "- Compliance A8 đã VETO: biên margin/chế độ giao dịch hiện không đạt — KHÔNG được đưa bất kỳ tín hiệu mới nào (direction phải là HOLD)."
+            : "",
+          "Hệ thống sẽ tự động hạ tầm tín hiệu vi phạm về HOLD — hãy phân tích theo giới hạn này.",
+        ].filter(Boolean)
+      : [];
+
     const strategistUserPrompt = [
       [marketBlock, newsBlock, flowsBlock, valuationBlock, liquidityBlock].join("\n\n"),
       `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`,
       "",
       `BÁO CÁO TỪ ${digestLines.length} AGENTS CỦA HỘI ĐỒNG (để tổng hợp):`,
       ...digestLines,
+      ...(vetoNotice.length > 0 ? ["", ...vetoNotice] : []),
       "",
       "Hãy tổng hợp toàn bộ và đưa ra MỘT tín hiệu theo đúng định dạng JSON đã yêu cầu.",
     ].join("\n");
@@ -566,6 +636,23 @@ export async function POST() {
 
     if (strategist?.signal && validInstrumentId) {
       const sig = strategist.signal;
+      // AUD-CODE #6: VETO hard-enforce — tín hiệu vi phạm bị hạ tầm về HOLD
+      // (exposure chặn MUA / compliance chặn mọi hướng mới) kèm lý do gián tiếp
+      let vetoedBy: string | null = null;
+      if (vetoBlocked && sig.direction !== "HOLD") {
+        vetoedBy = vetoCompliance
+          ? "Compliance A8 VETO — biên margin/chế độ giao dịch hiện không đạt"
+          : "Exposure A7 VETO — danh mục vượt hạn mức phơi nhiễm, chỉ chấp nhận SELL hoặc HOLD";
+        if (!vetoCompliance && sig.direction === "SELL") {
+          // Exposure chỉ chặn MUA (SELL giảm phơi nhiễm → được phép)
+        } else {
+          sig.rationale = `[BỊ ỦY BAN KIỂM SOÁT PHỦ QUYẾT → hạ về GIỮ] ${vetoedBy}. Đề xuất gốc bị chặn. ${sig.rationale}`;
+          sig.direction = "HOLD";
+          sig.targetPrice = null;
+          sig.stopLoss = null;
+          sig.takeProfit = null;
+        }
+      }
       const expiresAt = new Date(Date.now() + 3 * 86_400_000);
       signalExpiresAt = expiresAt;
 
@@ -610,14 +697,18 @@ export async function POST() {
       let executionReasoning: string;
       let execOutput: Record<string, unknown>;
       if (sig.direction !== "HOLD") {
-        executionContent = `Nhận tín hiệu ${sig.direction === "BUY" ? "MUA" : "BÁN"} ${sig.symbol} (điểm ${sig.score}/100, tin cậy ${sig.confidence}) từ Chủ tịch Hội đồng sau khi hội đủ báo cáo của 22 agents. Đã ghi nhận tín hiệu — chờ phê duyệt của trader (nút Phê duyệt/từ chối ở luồng tin nhắn hoặc tab Tín hiệu).`;
+        executionContent = `Nhận tín hiệu ${sig.direction === "BUY" ? "MUA" : "BÁN"} ${sig.symbol} (điểm ${sig.score}/100, tin cậy ${sig.confidence}) từ Chủ tịch Hội đồng sau khi hội đủ báo cáo của ${digestLines.length} agents. Đã ghi nhận tín hiệu — chờ phê duyệt của trader (nút Phê duyệt/từ chối ở luồng tin nhắn hoặc tab Tín hiệu).`;
         executionReasoning =
           "Tín hiệu ghi nhận ở trạng thái ACTIVE — chờ trader phê duyệt trước khi tạo lệnh.";
         execOutput = { signalId: signalRow.id, awaitingApproval: true };
       } else {
-        executionContent = `Nhận tín hiệu GIỮ ${sig.symbol} (điểm ${sig.score}/100). Không tạo lệnh mới (tín hiệu GIỮ).`;
-        executionReasoning = "Tín hiệu GIỮ — không tạo lệnh.";
-        execOutput = { signalId: signalRow.id, direction: "HOLD" };
+        executionContent = vetoedBy
+          ? `Tín hiệu ${sig.symbol} bị Ủy ban Kiểm soát PHỦ QUYẾT (${vetoedBy}) — hạ về GIỮ, không trình lệnh mới. Điểm ${sig.score}/100.`
+          : `Nhận tín hiệu GIỮ ${sig.symbol} (điểm ${sig.score}/100). Không tạo lệnh mới (tín hiệu GIỮ).`;
+        executionReasoning = vetoedBy
+          ? "VETO hard-enforce (AUD-CODE #6): tín hiệu vi phạm bị hạ về HOLD."
+          : "Tín hiệu GIỮ — không tạo lệnh.";
+        execOutput = { signalId: signalRow.id, direction: "HOLD", vetoed: Boolean(vetoedBy) };
       }
 
       const execStart = Date.now();
@@ -646,17 +737,37 @@ export async function POST() {
       });
     } else {
       // No valid signal — record a no-op execution run
+      // AUD-CODE #13: nói rõ vì sao (Chủ tịch không ra tín hiệu / mã hallucinate)
       const execStart = Date.now();
+      const noSignalReason = strategist?.signal
+        ? `invalid-symbol:${strategist.signal.symbol}`
+        : "no-signal";
       const execRun = await persistRun(
         executorAgent.id,
         true,
         execStart,
         0,
         0,
-        JSON.stringify({ action: "noop", reason: "no-valid-signal" }),
+        JSON.stringify({ action: "noop", reason: noSignalReason }),
         null
       );
       executionRunId = execRun.id;
+      if (strategist?.signal && !validInstrumentId) {
+        // Chairman hallucinate mã ngoài bảng giá — ghi rõ để trader biết
+        const warnMessage = await persistMessage(
+          executorAgent.id,
+          `Chủ tịch Hội đồng đề xuất mã ${strategist.signal.symbol} không có trong bảng instrument — tín hiệu bị bỏ qua (no fabrication). Đề nghị Chủ tịch chỉ chọn mã trong danh mục VN30 đang theo dõi.`,
+          "Mã không hợp lệ — từ chối ghi nhận tín hiệu.",
+          null
+        );
+        createdMessages.push({
+          id: warnMessage.id,
+          fromAgentId: executorAgent.id,
+          content: warnMessage.content,
+          reasoning: warnMessage.reasoning,
+          sentiment: null,
+        });
+      }
     }
 
     // Settlement + Cash Management (service, song song)
@@ -715,7 +826,11 @@ export async function POST() {
           platform: WAVE_A_CODES.length,
           researchAndMl: WAVE_B_SERVICE_CODES.length + WAVE_B_LLM_CODES.length,
           control: WAVE_C_LLM_CODES.length + WAVE_C_SERVICE_CODES.length,
-          executive: 2 + WAVE_E_SERVICE_CODES.length, // strategist + executor + 2 service
+          // AUD-CODE #11: đếm động theo run thật — không hardcode khi strategist fail
+          executive:
+            (strategist ? 1 : 0) +
+            (executionRunId ? 1 : 0) +
+            WAVE_E_SERVICE_CODES.length,
         },
       })
     );

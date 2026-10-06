@@ -208,7 +208,8 @@ export function AgentChat({ agentId, agentName, initialMessages }: AgentChatProp
 
       <p className="flex items-center gap-1 text-[11px] text-muted-foreground">
         <Info className="size-3 shrink-0" aria-hidden="true" />
-        ~$0.006/tin nhắn · trả lời dựa trên dữ liệu thật trong hệ thống
+        {/* AUD-CODE #25: không hardcode giá — Space Bunny Free $0, GLM-4.6 khác; chi phí thật xem chip AI ở footer */}
+        Trả lời dựa trên dữ liệu thật trong hệ thống · chi phí theo model runtime (chip AI ở footer)
       </p>
     </div>
   );

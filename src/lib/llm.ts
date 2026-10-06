@@ -128,7 +128,14 @@ function usageOf(completion: unknown): {
 
 /* ───────────────────────── Provider: Opencode Zen ───────────────────────── */
 
-const ZEN_TIMEOUT_MS = 110_000; // maxDuration route = 120s
+/*
+ * Timeout mỗi cuộc gọi Zen. Chu kỳ 23 agents có 6 LLM tuần tự: 45s/call
+ * (reasoning_effort=low thực đo ~4s) → tổng an toàn trong maxDuration 300s;
+ * trước đây 110s có thể kéo tổng chu kỳ tới ~11 phút nếu gateway đình trệ.
+ * Override qua env ZEN_TIMEOUT_MS.
+ */
+const ZEN_TIMEOUT_MS =
+  Number(env("ZEN_TIMEOUT_MS")) > 0 ? Number(env("ZEN_TIMEOUT_MS")) : 45_000;
 
 /**
  * Reasoning effort cho model reasoning (space-bunny-free = GLM-4.6 fine-tune có
@@ -275,7 +282,8 @@ export async function callChatLlm(messages: LlmMessage[]): Promise<LlmCallResult
 }
 
 function isRateLimitError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes("429");
+  // Chỉ match "HTTP 429" có ranh giới từ — tránh false-positive kiểu "14290"
+  return err instanceof Error && /(?:HTTP|status[_ ]?code[": ]+)429\b/i.test(err.message);
 }
 
 /** Retry một lần khi 429 (giữ pattern cũ — budget request của gateway thấp). */

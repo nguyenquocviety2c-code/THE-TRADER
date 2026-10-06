@@ -1,7 +1,7 @@
 # The Trader — Data Sources Inventory
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DATA_SOURCES.md` · **Version:** 0.2.0 · **Updated:** 2026-10-06
+> **Document:** `docs/DATA_SOURCES.md` · **Version:** 0.3.0 · **Updated:** 2026-10-06
 > **Cross-refs:** [DB_SCHEMA.md](./DB_SCHEMA.md) (data dictionary) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface & kiến trúc)
 
 ---
@@ -21,9 +21,10 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 | S1 | Seed generator nội bộ (`prisma/seed.ts`) | Nội bộ, deterministic | ✅ **Implemented** | → DB | Tất cả 19 models (demo) |
 | S2 | LLM glm-4.6 (`z-ai-web-dev-sdk`) | AI service, backend-only | ✅ **Implemented** | → DB | `AgentMessage`, `AgentRun`, `Signal`, `Order` (paper), `AuditLog`, `Agent` (health) |
 | S3 | VNDIRECT Trading API | Broker API | 🟡 **Scaffold** (flag + audit, gateway pending) | ↔ ngoài | `Order`, `Trade`, `BrokerAccount`, `Position`, `AuditLog` |
-| S4 | Market data feed (VNDIRECT/VPS · HOSE/HNX) | Market data | ✅ **Implemented** (simulated + stale marking) | → DB | `Quote`, `Bar`, `Instrument`, `DataSourceStatus` |
+| S4 | Market data feed (VNDIRECT/VPS · HOSE/HNX) | Market data | ✅ **Implemented** (REAL_EOD_MODE: EOD thật dchart + intraday mô phỏng quanh ref thật — xem §4.2) | → DB | `Quote`, `Bar`, `Instrument`, `DataSourceStatus` |
 | S5 | Tin tức tài chính (RSS VN) | News | ✅ **Implemented** (RSS live) | → DB + LLM context | `NewsItem`, `AgentMessage` (sentiment), `Signal` (gián tiếp) |
 | S6 | Alternative data (dòng khối ngoại, margin) | Quant data | ✅ **Implemented** (simulated deterministic) | → LLM context | `RiskAlert`, `DataSourceStatus` + prompt context |
+| **S7** | **EOD thật VNDIRECT dchart** (`dchart-api.vndirect.com.vn`, `src/lib/eod-sync.ts`) | Market data EOD (public, đã adjust) | ✅ **Implemented (real)** | → DB | `Bar`, `Quote` (anchor), `DataSourceStatus` (`eod-history`, mode `real`) |
 
 ---
 
@@ -81,6 +82,39 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 - **Tần suất:** on-demand khi trader bấm **Run agents**; đã có sẵn scheduler tự động trong mini-service market-engine (`AGENT_CYCLE_MINUTES`, **mặc định 0 = TẮT** để tiết kiệm chi phí LLM — xem [TECHNICAL_BLUEPRINT.md §6](./TECHNICAL_BLUEPRINT.md)).
 - **Fallback:** nếu provider/LLM lỗi hoặc timeout (vd Opencode Zen 401 key sai — lỗi ghi rõ `HTTP <status>` vào `AgentRun.error`) → run đánh dấu `FAILED` với `error`, agent chuyển `ERROR`, UI vẫn hiển thị `AgentMessage` cũ (last cached) kèm nhãn stale; có thể sinh `RiskAlert` (severity INFO/WARNING) "agent pipeline unavailable".
 
+### 3.3 S7 — EOD thật VNDIRECT dchart (`src/lib/eod-sync.ts`) — ✅ Implemented (real)
+
+**Mục đích:** thay toàn bộ bar synthetic (PRNG seed 42 của S1) bằng **giá EOD THẬT đã adjust** của 30 mã VN30 — Tier 1 của VNDIRECT (probe thực đo 2026-10-05: `dchart-api.vndirect.com.vn` public, KHÔNG cần auth, egress thông). Từ nguồn này, mọi chỉ báo (SMA/RSI/valuation band/backtest), prompt 23 agent và danh mục demo đều chạy trên giá thật.
+
+**Endpoint & giao thức** (`src/lib/eod-sync.ts`):
+
+- `GET {DCHART_BASE_URL}/dchart/history?symbol=VCB&resolution=D&from=<unix-sec>&to=<unix-sec>` — trả JSON `{t[], o[], h[], l[], c[], v[], s:"ok"}` (Content-Type `text/plain` dù body là JSON — parse thủ công). `t` = nửa đêm UTC của ngày giao dịch (đã đối chiếu public.market_data).
+- **Golden signature** (chuẩn Gen-1): keys `t,o,h,l,c,v,s` đầy đủ & cùng độ dài · `s === "ok"`; body rỗng = mã không có dữ liệu (hợp lệ, trả `empty`); `"Not support resolution"` = lỗi cấu hình → `DchartConfigError` (không retry mù); 5xx/429/timeout → retry 2 lần backoff 1s→4s (`DchartNetworkError`); 4xx khác = schema drift → `DchartSchemaError`.
+- **Đơn vị:** giá dchart trả **nghìn VND** (VCB 57.3 = 57.300 ₫) → ×1000 + `round100` (Q1) khi ingest; `value` = volume × close.
+- **Validate §5:** Q1 bội 100 · Q3 volume ≥ 0 · Q4 upsert idempotent theo `@@unique([instrumentId, date])` · Q6 `t` UTC → `Bar.date` 15:00 UTC (cùng convention EOD rollover của tick route) · Q7 bỏ T7/CN + ngày tương lai; chặn dải giá 500–5.000.000 ₫ (nhiễu nguồn); OHLC sanity `high = max(h,o,c)` / `low = min(l,o,c)`; trùng ngày giữ bản cuối — mọi bar vi phạm nặng bị bỏ + đếm `barsSkipped` (minh bạch; lần import thật: **0 bar bỏ**).
+- **Tôn trọng nguồn công cộng:** throttle tối thiểu **300ms giữa 2 request**; tối đa 40 mã/chu kỳ sync.
+
+**Hàm chính:** `fetchDchartHistory` (retry/backoff) → `toRealBars` (validate + ×1000) → `syncEodFromDchart` (lookback mặc định **10 ngày** — đủ che T7/CN/lễ; upsert từng bar + **neo Quote** vào EOD cuối: `refPrice` = close phiên trước, OHLC/volume = bar cuối, change/changePct từ ref thật, trần/sàn ±7% mở theo ref thật, bid/ask ±0,1%) → `deepBackfillEod` (2013→nay: xoá bar synthetic từng instrument rồi `createMany` theo chunk 1.000).
+
+**Tần suất:** market-engine scheduler chạy `POST /api/market/eod-sync` lúc **15:45 ICT hằng ngày** (`EOD_SYNC_AT`, chỉ 1 lần/ngày — check mỗi 60s) **+ 1 lần lúc boot** (môi trường mới tự có giá thật sớm, lookback 10 ngày); trigger thủ công qua API (body `{ days }` 2–365); deep backfill qua script `prisma/import-real-eod.ts` (`env -u DATABASE_URL bun prisma/import-real-eod.ts`). Sau khi sync, engine broadcast event WebSocket `"eod"` → client invalidate quotes/watchlist/bars/portfolio.
+
+**Deep backfill + rebase danh mục (script `prisma/import-real-eod.ts`, idempotent):**
+
+1. Deep backfill 2013→nay cho 30 mã (xoá bar synthetic) + neo Quote vào close thật;
+2. **Rebase danh mục demo theo giá thật:** `Position.avgPrice` = close thật của ngày mở vị thế · `Trade.price/fee/tax` = giá thật + phí 0,15% / thuế TNCN 0,1% (SELL) · `Order.price` = close thật (fee = 0 khi chưa khớp) · `Signal ACTIVE` scale target/SL/TP quanh close thật theo đúng tỷ lệ seed (BUY: target +8% · SL −5% · TP +12%; SELL: −6%) · xoá RiskAlert demo (base trên giá synthetic) · `BrokerAccount.equity` = cash + Σ(qty × close thật).
+
+**Kết quả đo thật (phiên #33, 2026-10-06):** 30/30 mã OK · **90.785 bar EOD thật 2013→2026-10-06** · **37,8s** · 0 bar bỏ · VCB 91.600 ₫ (synthetic) → **57.300 ₫ (thật)** · PNJ biến động thật −6,91%/phiên, RSI14 13 · equity rebase **1.373.869.150 ₫**.
+
+**Mapping Prisma:**
+
+| Model | Fields được đổ từ nguồn |
+|---|---|
+| `Bar` | `date` (15:00 UTC ngày giao dịch) · `open/high/low/close` (VND, bội 100) · `volume` · `value` — upsert theo `@@unique([instrumentId, date])` |
+| `Quote` | update-in-place neo EOD cuối: `refPrice/ceilingPrice/floorPrice` (±7% theo ref thật) · `open/high/low/last/close/volume` · `change/changePct` · `bidPrice/askPrice/bidVolume/askVolume` · `tradedAt` (15:00 ICT = 08:00 UTC) |
+| `DataSourceStatus` | key **`eod-history`** (label "Lịch sử giá EOD thật (VNDIRECT)") — mode **`real`** (mode mới của `SourceMode`), `lastSuccessAt`, `meta` (symbolsOk/Empty/Failed, barsUpserted/Skipped, lastTradeDate, lookbackDays) |
+
+**Fallback:** dchart chết → DB chính là cache bền (bar/quote giữ nguyên, không ghi dữ liệu rác); `markSource` ghi `lastError`; scheduler thử lại ngày hôm sau (hoặc boot kế tiếp). Chế độ `MARKET_DATA_MODE=real-eod` (mặc định) đảm bảo tick KHÔNG ghi bar synthetic đè lên lịch sử thật (xem §4.2).
+
 ---
 
 ## 4. Nguồn ngoài (S3 scaffold · S4–S6 đã triển khai ở Giai đoạn 2)
@@ -99,17 +133,17 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 
 **Đã triển khai (scaffold, `src/lib/trading-mode.ts`):** `LIVE_TRADING=false` mặc định → mọi `Order` là paper order nội bộ. Bật `LIVE_TRADING=true` mà thiếu `VNDIRECT_API_BASE`/`VNDIRECT_API_TOKEN` → route convert trả **503** + audit `LIVE_TRADING_BLOCKED`; đủ cấu hình nhưng gateway chưa có → **501** + audit `LIVE_ORDER_GATEWAY_UNAVAILABLE`; `AuditLog` ORDER_CREATED giờ kèm `mode`. Trạng thái mode hiển thị qua `GET /api/system/status` (`trading: paper | live | live-unconfigured`). **Còn pending:** gateway mini-service thật để gửi lệnh ra VNDIRECT.
 
-### 4.2 S4 — Market data (VNDIRECT/VPS · HOSE/HNX) — ✅ Implemented (simulated + stale marking)
+### 4.2 S4 — Market data (VNDIRECT/VPS · HOSE/HNX) — ✅ Implemented (REAL_EOD_MODE: EOD thật dchart + intraday mô phỏng quanh ref thật)
 
 | Hạng mục | Chi tiết |
 |---|---|
 | **Capability** | Quote level-1 realtime (bid/ask/last/volume), tick intraday, OHLCV EOD, giá tham chiếu/trần/sàn hàng ngày, danh mục mã niêm yết |
-| **Endpoint dạng** | REST public/authorized của VNDIRECT/VPS hoặc feed HOSE/HNX — feed thật còn pending; hiện nay tick đi qua **`POST /api/market/tick`** (S4 tick engine nội bộ) và mini-service market-engine gọi endpoint này mỗi 10s (`TICK_MS` — xem [TECHNICAL_BLUEPRINT.md §6](./TECHNICAL_BLUEPRINT.md)) |
-| **Tần suất** | Tick: 10s (TICK_MS, engine gọi `POST /api/market/tick`); **EOD rollover: tick đầu tiên của ngày ICT mới** — ghi `Bar` OHLCV phiên vừa đóng (upsert `@@unique([instrumentId, date])`, chỉ ngày giao dịch — Q7), kéo `refPrice` về close phiên trước, mở dải trần/sàn mới ±7%, reset `volume` về 0 với **ngân sách khối lượng ngày** 0,3–9,2 triệu cp/mã (FNV-1a theo `(mã, ngày)` — fix F-103, không còn tích luỹ vô hạn); ref/ceiling/floor: đầu phiên 09:00 ICT |
-| **Mapping Prisma** | `Quote.*` toàn bộ field (`open/high/low/last/close`, `volume`, `bid/askPrice/Volume`, `change/changePct`, `refPrice/ceilingPrice/floorPrice`, `tradedAt`) — cập nhật tại chỗ trên quote mới nhất mỗi mã; `Bar` (`open/high/low/close/volume/value` — upsert theo `@@unique([instrumentId, date])`); `Instrument` (`isActive`, `listingDate`, `outstandingShares`); `DataSourceStatus` (mode/stale — xem dưới) |
-| **Fallback** | **Đã implement stale marking**: `DataSourceStatus` (key `market-quotes`) ghi mode + `lastSuccessAt` mỗi tick; `GET /api/system/status` tính `stale`/`ageMinutes`; footer dashboard hiển thị dot màu (live=green · simulated=amber · fallback=red · stale=amber) + `lastError`; nguồn stale >4 tiếng → `escalateStaleSources()` tạo `RiskAlert` WARNING `DATA_SOURCE_STALE` (dedupe 24h, §6.4). Không ghi quote rác vào DB |
+| **Endpoint dạng** | Feed realtime thật còn pending (finfo-api cần session khách hàng VNDIRECT); hiện nay **EOD đi qua nguồn THẬT S7** (`POST /api/market/eod-sync` → dchart), còn tick intraday đi qua **`POST /api/market/tick`** (S4 tick engine nội bộ) và mini-service market-engine gọi endpoint này mỗi 10s (`TICK_MS` — xem [TECHNICAL_BLUEPRINT.md §6](./TECHNICAL_BLUEPRINT.md)) |
+| **Tần suất** | Tick: 10s (TICK_MS) **chỉ trong phiên** (`MARKET_STRICT_SESSION=true` mặc định — ngoài phiên tick bị skip, bảng giá neo ở close thật); **EOD: nguồn THẬT dchart sở hữu** — sync 15:45 ICT hằng ngày (S7); **EOD rollover khi sang ngày ICT mới:** `REAL_EOD_MODE` (mặc định, `MARKET_DATA_MODE=real-eod`) → tick **KHÔNG ghi bar synthetic** đè lên bar thật (đặt `MARKET_DATA_MODE=simulated` để quay lại hành vi cũ tự ghi bar); rollover vẫn kéo `refPrice` về close phiên trước, mở dải trần/sàn mới ±7%, reset `volume` về 0 với **ngân sách khối lượng ngày** 0,3–9,2 triệu cp/mã (FNV-1a theo `(mã, ngày)` — fix F-103) |
+| **Mapping Prisma** | `Quote.*` toàn bộ field (`open/high/low/last/close`, `volume`, `bid/askPrice/Volume`, `change/changePct`, `refPrice/ceilingPrice/floorPrice`, `tradedAt`) — cập nhật tại chỗ trên quote mới nhất mỗi mã; `Bar` chỉ ghi từ nguồn thật S7 (upsert theo `@@unique([instrumentId, date])`); `Instrument` (`isActive`, `listingDate`, `outstandingShares`); `DataSourceStatus` (mode/stale — xem dưới) |
+| **Fallback** | **Đã implement stale marking**: `DataSourceStatus` (key `market-quotes`) ghi mode + `lastSuccessAt` mỗi tick; `GET /api/system/status` tính `stale`/`ageMinutes`; footer dashboard hiển thị dot màu (live/real=green · simulated=amber · fallback=red · stale=amber) + `lastError`; nguồn stale >4 tiếng → `escalateStaleSources()` tạo `RiskAlert` WARNING `DATA_SOURCE_STALE` (dedupe 24h, §6.4). Không ghi quote rác vào DB |
 
-**Cách triển khai thực tế (đã verify E2E):** mỗi tick thực hiện **random-walk + mean-reversion 3%** về giá tham chiếu trên quote mới nhất từng mã (drift ±0,4%/tick, clamp vào dải trần/sàn), tuân thủ toàn bộ data-quality rules §5: **Q1** giá làm tròn bội 100 VND · **Q2** luôn nằm trong dải `[floorPrice, ceilingPrice]` ±7% HOSE · **Q3** khối lượng chỉ tăng (có ngân sách ngày) · **Q5** `change = last − refPrice`, `changePct = change/refPrice × 100`. Nguồn được đánh dấu `mode="simulated"` trong `DataSourceStatus` — không giả mạo "live"; `meta.mode` của `GET /api/market/quotes` đọc trực tiếp từ `DataSourceStatus` (F-117). `MARKET_STRICT_SESSION=true` thì engine **chỉ sinh tick trong phiên** (Q7/Q8 — lịch T2–T6 + nghỉ lễ VN 2026 ước lượng trong `src/lib/market-session.ts`, biên phiên chính xác tới giây — F-111); mặc định `false` để demo chạy 24/7 (đã gắn nhãn mô phỏng). `GET /api/market/quotes` trả thêm `meta { mode, asOf }` cho stale marking phía client.
+**Cách triển khai thực tế (đã verify E2E — REAL_EOD_MODE mặc định từ phiên #33):** bảng giá được **neo vào EOD THẬT** bởi eod-sync (S7): ref/trần/sàn/volume/OHLC đều là dữ liệu thật của phiên cuối. Trong phiên, mỗi tick thực hiện **random-walk + mean-reversion 3%** quanh giá tham chiếu THẬT (drift ±0,4%/tick, clamp vào dải trần/sàn ±7%), tuân thủ toàn bộ data-quality rules §5: **Q1** giá làm tròn bội 100 VND · **Q2** luôn nằm trong dải `[floorPrice, ceilingPrice]` ±7% HOSE · **Q3** khối lượng chỉ tăng (có ngân sách ngày) · **Q5** `change = last − refPrice`, `changePct = change/refPrice × 100`. **Ngoài phiên** (`MARKET_STRICT_SESSION=true` — mặc định từ phiên #33): tick bị skip (`skipped: true`) và nguồn được đánh dấu **mode `real`** — bảng giá đang neo ở mức đóng cửa THẬT của phiên cuối (đúng sự thật hiển thị); trong phiên khi tick chạy sẽ trở lại `mode="simulated"`. `meta.mode` của `GET /api/market/quotes` đọc trực tiếp từ `DataSourceStatus` (F-117). Mọi POST tick chạy **tuần tự qua mutex in-process** (AUD-CODE #18 — chống lost-update khi 2 tick đồng thời). `GET /api/market/quotes` trả thêm `meta { mode, asOf }` cho stale marking phía client.
 
 **Bộ khớp lệnh giấy (paper matching engine — fix F-206, cùng tick):** cuối mỗi tick, lệnh `PENDING`/`PARTIALLY_FILLED` giá LIMIT được khớp **toàn phần tại giá đặt** khi thị trường vượt điều kiện (BUY: `last ≤ giá đặt` · SELL: `last ≥ giá đặt`). Mỗi lệnh khớp chạy trong một Prisma transaction (claim có điều kiện chống chạy đua giữa các tick) và ghi: `Trade` (phí 0,15% notional, thuế TNCN 0,1% chỉ lệnh BÁN) + `Position` (bình quân giá vốn khi BUY / realized P&L khi SELL, tự đóng vị thế khi về 0) + `BrokerAccount.cashBalance` + `equity` (tiền mặt + GTTH vị thế mở) + `AuditLog ORDER_FILLED` (before/after — before ghi trạng thái thật của lệnh, F-302). Lệnh SELL vượt điều kiện nhưng **không đủ vị thế mở** → tự **REJECTED đúng một lần** + `AuditLog ORDER_REJECTED` kèm lý do `INSUFFICIENT_POSITION` (F-303 — không retry mỗi tick). Hủy lệnh qua **`POST /api/orders/[id]/cancel`** (chỉ PENDING/PARTIALLY_FILLED → 409 nếu đã kết thúc) ghi `AuditLog ORDER_CANCELLED`. Khi sang phiên mới (EOD rollover), `equity` của mọi tài khoản hoạt động được chốt lại = tiền mặt + GTTH (F-105); `/api/portfolio` luôn tính live.
 
@@ -168,7 +202,7 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 | # | Quy tắc | Chi tiết |
 |---|---|---|
 | Q1 | **Bội số 100 VND** | Mọi giá HOSE phải `price % 100 == 0` (tick size). Vi phạm → reject (nguồn ngoài) / round + flag (nguồn chính thức) |
-| Q2 | **Dải giá ±7% (HOSE)** | `floorPrice ≤ price ≤ ceilingPrice`, với trần/sàn = round100(ref × 1.07 / × 0.93). HNX ±10%, UPCOM ±15% áp khi mở rộng thị trường |
+| Q2 | **Dải giá ±7% (HOSE)** | `floorPrice ≤ price ≤ ceilingPrice`, với trần/sàn = round100(ref × 1.07 / × 0.93). HNX ±10%, UPCOM ±15% áp khi mở rộng thị trường. *Ngoại lệ:* không áp cho **EOD lịch sử thật đã adjust** (S7 — giá đóng cửa thật có thể vượt dải mô phỏng của ngày khác); dải chỉ ràng buộc tick intraday và trần/sàn hôm nay |
 | Q3 | **Khối lượng không âm** | `volume ≥ 0`, `quantity > 0`, `value ≥ 0`; `value` nhất quán ≈ Σ(price × qty) |
 | Q4 | **Dedup OHLCV** | `Bar` ràng buộc `@@unique([instrumentId, date])` — ingest lại dùng upsert (idempotent); `Quote` **update-in-place** tại quote mới nhất mỗi mã (1 row/mã, `tradedAt` ghi mỗi tick; lưu lịch sử tick là roadmap — audit 2026-10-06 F-204) |
 | Q5 | **Đồng nhất change** | `change = last − refPrice`; `changePct = change / refPrice × 100` (làm tròn 2 chữ số) |
@@ -182,7 +216,7 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 ## 6. Fallback Strategy (tổng quát)
 
 1. **Serve last cached**: quote/bản tin cuối vẫn hiển thị — DB chính là cache bền (tin tức RSS lưu bền trong `NewsItem`).
-2. **Mark stale**: **đã implement** — bảng `DataSourceStatus` (singleton-theo-key) ghi `mode` + `lastSuccessAt` mỗi lần nguồn thành công/thất bại; `GET /api/system/status` tính `stale`/`ageMinutes` cho từng nguồn; footer dashboard hiển thị chip trạng thái từng nguồn (dot màu: live=green · simulated=amber · fallback=red · stale=amber, kèm `lastError`); `GET /api/news` meta cũng mang `stale`/`ageMinutes`/`providers`.
+2. **Mark stale**: **đã implement** — bảng `DataSourceStatus` (singleton-theo-key) ghi `mode` + `lastSuccessAt` mỗi lần nguồn thành công/thất bại; registry 5 nguồn (`src/lib/sources.ts`): `eod-history` ("Lịch sử giá EOD thật (VNDIRECT)") · `market-quotes` · `news` · `foreign-flows` · `trading`; `SourceMode` gồm `live`/`real`/`simulated`/`fallback`/`paper`. `GET /api/system/status` tính `stale`/`ageMinutes` cho từng nguồn; footer dashboard hiển thị chip từng nguồn (dot màu: **live/real = green** (label "EOD thật" cho `real`) · simulated=amber · fallback=red · stale=amber, kèm `lastError`); `GET /api/news` meta cũng mang `stale`/`ageMinutes`/`providers`.
 3. **No fabrication**: agent không được bịa số liệu khi thiếu nguồn — khai báo rõ "no new data" trong `AgentMessage`; dữ liệu mô phỏng (S4 tick, S6 flows) luôn gắn `mode="simulated"` và được báo rõ trong prompt.
 4. **Escalate**: **đã implement** — nguồn stale kéo dài **quá 4 tiếng** → `RiskAlert` WARNING (`code: DATA_SOURCE_STALE`, `metricKey: source.<key>.stale_minutes`, dedupe 24h) để trader quyết định tiếp tục paper-run hay dừng; chạy tự động mỗi lần `GET /api/system/status` được gọi (`escalateStaleSources()`).
 
@@ -197,11 +231,12 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 - [x] Chuẩn integer VND + round100 + fee 0.15% / tax 0.1% TNCN trong dữ liệu mẫu
 - [x] LLM phân tích đa agent qua `z-ai-web-dev-sdk` (glm-4.6, backend-only) trong `POST /api/agents/run`, có audit `AgentRun` (tokens/cost/duration)
 - [x] Ràng buộc dedup `Bar @@unique([instrumentId, date])` + composite indexes cho truy vấn feed
-- [x] **Market data ingestion job (S4 — mô phỏng):** tick engine `POST /api/market/tick` (random-walk + mean-reversion, Q1–Q5) được market-engine gọi mỗi 10s (`TICK_MS`); `MARKET_STRICT_SESSION` chỉ cho tick trong phiên
+- [x] **Market data ingestion job (S4):** tick engine `POST /api/market/tick` (random-walk + mean-reversion quanh ref THẬT, Q1–Q5, mutex in-process AUD-CODE #18) được market-engine gọi mỗi 10s (`TICK_MS`); `MARKET_STRICT_SESSION` chỉ cho tick trong phiên (**mặc định true từ phiên #33**)
+- [x] **EOD thật VNDIRECT dchart (S7 — real, phiên #33):** `src/lib/eod-sync.ts` (fetch golden-signature + validate §5 + throttle 300ms) · `POST /api/market/eod-sync` · scheduler market-engine **15:45 ICT hằng ngày + lúc boot** + broadcast event `eod` · deep backfill + rebase danh mục `prisma/import-real-eod.ts` — **90.785 bar thật 2013→nay, 30/30 mã, 0 bar bỏ**; REAL_EOD_MODE mặc định (`MARKET_DATA_MODE=real-eod`): tick không ghi bar synthetic
 - [x] **Đánh dấu stale cho quote cache (S4):** `DataSourceStatus` + `GET /api/system/status` + chips trạng thái nguồn trên footer + `escalateStaleSources()` → RiskAlert `DATA_SOURCE_STALE`
 - [x] **News crawler RSS + dedupe (S5):** 5 feed VN kiểm chứng (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet), parser `fast-xml-parser`, dedupe theo `url` (model `NewsItem`), rate-limit 60s, audit `NEWS_INGESTED`
 - [x] **Alternative data EOD (S6 — simulated):** flows simulator deterministic (`GET /api/market/flows`) + RiskAlert `FOREIGN_FLOW_OUTFLOW` (−300 tỷ, dedupe 24h) + `flowsBlock` trong prompt agent
-- [x] **WebSocket mini-service realtime quotes:** `mini-services/market-engine` (port 3003) broadcast `quotes`/`news`/`cycle` + scheduler; client nối qua gateway `io("/?XTransformPort=3003")` (hook `useRealtimeMarket`)
+- [x] **WebSocket mini-service realtime quotes:** `mini-services/market-engine` (port 3003) broadcast `quotes`/`news`/`eod`/`cycle` + scheduler; client nối qua gateway `io("/?XTransformPort=3003")` (hook `useRealtimeMarket`)
 - [x] **Job scheduler chu kỳ agent run tự động trong phiên:** có sẵn trong market-engine (`AGENT_CYCLE_MINUTES`) — **mặc định 0 = TẮT** để tiết kiệm chi phí LLM
 - [x] S3 scaffold: feature flag `LIVE_TRADING` + cổng kiểm tra + audit (`LIVE_TRADING_BLOCKED` / `LIVE_ORDER_GATEWAY_UNAVAILABLE`)
 - [x] Lịch giao dịch T2–T6 + nghỉ lễ VN 2026 ước lượng (`src/lib/market-session.ts`) + sessionPhase (ATO/liên tục/trưa/ATC)
@@ -209,7 +244,7 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 **🔜 Pending (theo roadmap [TECHNICAL_BLUEPRINT.md §9](./TECHNICAL_BLUEPRINT.md)):**
 
 - [ ] Tích hợp VNDIRECT Trading API thật (auth, đặt/hủy lệnh, sync số dư) sau feature flag `LIVE_TRADING` — gateway mini-service còn pending
-- [ ] Market data feed thật (VNDIRECT/VPS · HOSE/HNX) thay tick mô phỏng + upsert EOD bar thật + ref/ceiling/floor đầu phiên
+- [ ] **Feed quote/tick realtime thật** (VNDIRECT finfo/VPS · HOSE/HNX) thay tick mô phỏng intraday — cần session khách hàng VNDIRECT + egress; **EOD bar thật đã xong** qua S7 dchart (90.785 bar 2013→nay, upsert idempotent + ref/trần/sàn thật đầu phiên qua anchor Quote)
 - [ ] Dữ liệu khối ngoại/margin thật (EOD) thay flows simulator
 - [ ] HNX/UPCOM (dải giá ±10% / ±15%) + lịch nghỉ Tết chính thức từng năm
 - [ ] Reuters/tin quốc tế cho bối cảnh Fed/DXY (tuỳ chọn)
@@ -222,3 +257,4 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 |---|---|
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; đối chiếu `prisma/seed.ts`, `prisma/schema.prisma`, `package.json` |
 | 2026-10-06 | **Giai đoạn 2:** S3 → 🟡 Scaffold (flag `LIVE_TRADING` + audit, gateway pending); S4 → ✅ Implemented (tick engine mô phỏng + stale marking `DataSourceStatus`); S5 → ✅ Implemented (crawler RSS live 5 nguồn VN + model `NewsItem` dedupe url); S6 → ✅ Implemented (flows simulator deterministic + RiskAlert `FOREIGN_FLOW_OUTFLOW`); cập nhật §4.1–4.4, §5 Q7 (lịch lễ 2026), §6 fallback đã implement, checklist tick các mục realtime/scheduler/crawler |
+| 2026-10-06 | **v0.3 — Phiên #33 (dữ liệu EOD THẬT + audit 30 findings):** (1) nguồn mới **S7 — EOD thật VNDIRECT dchart** (§3.3: endpoint/golden signature/đơn vị nghìn VND ×1000/validate §5 Q1–Q9/throttle 300ms/scheduler 15:45 ICT + boot/deep backfill 90.785 bar 2013→2026-10-06 + rebase danh mục theo giá thật — equity 1.373.869.150 ₫); (2) **§4.2 S4 — REAL_EOD_MODE mặc định** (`MARKET_DATA_MODE=real-eod`): tick chỉ mô phỏng intraday quanh ref thật, EOD rollover KHÔNG ghi bar synthetic, ngoài phiên Quote neo close thật + mode `real`, `MARKET_STRICT_SESSION` mặc định true, mutex tick in-process; (3) `SourceMode` thêm **`real`** + nguồn footer `eod-history` (dot xanh "EOD thật") — §6.2; (4) §5 Q2 chú thích ngoại lệ EOD lịch sử đã adjust; (5) checklist: thêm mục S7 done, thu hẹp pending còn feed realtime thật; (6) phản ánh 30 fix audit cùng phiên (sweep Signal EXPIRED, VETO hard-enforce, transaction claim APPROVE, watchdog AgentRun RUNNING…) — chi tiết ở [TECHNICAL_BLUEPRINT.md §10](./TECHNICAL_BLUEPRINT.md) |

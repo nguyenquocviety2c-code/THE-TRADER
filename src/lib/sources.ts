@@ -9,7 +9,7 @@ import { db } from "@/lib/db";
  * dữ liệu sống.
  */
 
-export type SourceMode = "live" | "simulated" | "fallback" | "paper";
+export type SourceMode = "live" | "real" | "simulated" | "fallback" | "paper";
 
 export interface SourceDef {
   key: string;
@@ -18,6 +18,7 @@ export interface SourceDef {
 }
 
 export const SOURCE_DEFS: SourceDef[] = [
+  { key: "eod-history", label: "Lịch sử giá EOD thật (VNDIRECT)", defaultMode: "fallback" },
   { key: "market-quotes", label: "Bảng giá VN30", defaultMode: "simulated" },
   { key: "news", label: "Tin tức thị trường", defaultMode: "fallback" },
   { key: "foreign-flows", label: "Dòng khối ngoại", defaultMode: "simulated" },

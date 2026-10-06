@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
-import { mapSignalRow } from "@/lib/signal-execution";
+import { mapSignalRow, expireDueSignals } from "@/lib/signal-execution";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +11,10 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   try {
+    // P1 AUD-CODE #1: sweep tín hiệu hết hạn trước khi trả — UI/prompt luôn thấy
+    // đúng trạng thái vòng đời (ACTIVE chỉ còn tín hiệu còn hạn)
+    await expireDueSignals();
+
     const signals = await db.signal.findMany({
       orderBy: { createdAt: "desc" },
       take: 12,

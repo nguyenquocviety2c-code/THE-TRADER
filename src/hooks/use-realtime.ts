@@ -15,6 +15,8 @@ import type { QuotesResponse, WatchlistResponse } from "@/lib/types";
  * - "quotes": ghi thẳng vào cache TanStack Query (["quotes"], ["watchlist"])
  *   → mọi section dùng bảng giá cập nhật tức thì, không cần refetch.
  * - "news": invalidate ["news"] sau mỗi lần crawler RSS chạy.
+ * - "eod": invalidate dữ liệu giá/bar sau mỗi lần đồng bộ EOD THẬT VNDIRECT
+ *   (market-engine 15:45 ICT hằng ngày) — nến/chart/chỉ báo đổi sang giá thật.
  * - "cycle": invalidate dữ liệu agent khi scheduler chạy chu kỳ tự động.
  */
 export function useRealtimeMarket(): void {
@@ -68,6 +70,14 @@ export function useRealtimeMarket(): void {
       }, 0);
     };
 
+    const onEod = () => {
+      setTimeout(() => {
+        for (const key of ["quotes", "watchlist", "bars", "portfolio", "system-status"]) {
+          void queryClient.invalidateQueries({ queryKey: [key] });
+        }
+      }, 0);
+    };
+
     const onCycle = () => {
       setTimeout(() => {
         for (const key of ["agents", "agent-messages", "signals", "orders", "portfolio", "risk-alerts"]) {
@@ -83,6 +93,7 @@ export function useRealtimeMarket(): void {
     s.on("disconnect", onDisconnect);
     s.on("quotes", onQuotes);
     s.on("news", onNews);
+    s.on("eod", onEod);
     s.on("cycle", onCycle);
 
     return () => {
@@ -90,6 +101,7 @@ export function useRealtimeMarket(): void {
       s.off("disconnect", onDisconnect);
       s.off("quotes", onQuotes);
       s.off("news", onNews);
+      s.off("eod", onEod);
       s.off("cycle", onCycle);
       s.disconnect();
     };

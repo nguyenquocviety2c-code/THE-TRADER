@@ -260,4 +260,23 @@
 
 ---
 
-*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*
+## Prompt — Rà soát toàn diện + dữ liệu thật (2026-10-06)
+
+> **Người dùng (diễn đạt tóm tắt):** "Đóng vai kỹ sư senior, rà soát TOÀN DIỆN toàn bộ hệ thống The Trader (sau khi đã có 23 agents · Supabase · Space Bunny Free) — tìm mọi lỗi, thiếu sót, rủi ro rồi fix hết và kiểm chứng. Ngoài ra: đến lúc cần **dữ liệu thật** để tạo lên những bài học thật — hãy khảo sát và nạp dữ liệu thị trường thật (VNDIRECT) thay cho dữ liệu synthetic."
+
+**Diễn giải — 2 yêu cầu gộp trong 1 phiên (#33):**
+1. **Rà soát toàn diện như kỹ sư senior** — audit code read-only toàn hệ thống (orchestration 23 agents · service runs · LLM provider · tick engine · signal execution · serialize · frontend hooks · prisma · mini-service) rồi fix mọi finding + kiểm chứng E2E.
+2. **Nạp dữ liệu thật** — thay dữ liệu giá synthetic (PRNG seed 42) bằng giá EOD thật của VNDIRECT để mọi chỉ báo/prompt agent/backtest "tạo lên những bài học thật" (câu chữ gốc được giữ làm epigraph của `prisma/import-real-eod.ts`).
+
+**Thực thi (phiên #33 — AUD-CODE → fix 30 findings → real EOD pipeline → E2E):**
+- **AUDIT (code-reviewer read-only):** 30 findings — 1 P1 (Signal hết hạn không bao giờ chuyển EXPIRED runtime) + 9 P2 (TOCTOU APPROVE tạo 2 lệnh · cycle chồng single-run · AgentRun kẹt RUNNING chặn agent vĩnh viễn · VETO không enforce · backtest NaN khi DB rỗng · 6 LLM call có thể vượt maxDuration…) + 20 P3.
+- **30 fix áp dụng (những cái chính):** sweep `expireDueSignals` ở GET /api/signals + đầu chu kỳ + trước tạo lệnh (#1) · APPROVE bọc `db.$transaction` + claim atomic chống TOCTOU 2 lệnh (#2) · guard chống chồng lấn chu kỳ ↔ single-run + atomic claim (#3/#4) · watchdog `reapStaleAgentRuns` reset AgentRun RUNNING >5 phút (#5) · **VETO hard-enforce** — exposure VETO chặn MUA / compliance VETO chặn mọi tín hiệu mới, tín hiệu vi phạm hạ về HOLD kèm lý do (#6) · backtest NaN guard (#7) · `ZEN_TIMEOUT_MS` 45s + `maxDuration` 300s (#8) · seed agents IDLE hết (#9) · cooldown sau validate (#10–13) · feature-store báo đúng 4 nhóm (#14) · buyingPower = cash + positionsMv×0,5 − marginUsed đồng bộ service-runs + header chip (#15) · messages feed chỉ broadcast (#23) · news bỏ tin không ngày (#29) · flows seed `vol|`/`dir|` (#26) · seed `Date.UTC` + bỏ ternary chết (#19/#27) · label "Trước phiên (ATO…)" (#30) · chat bỏ hardcode $0.006 (#25) · market-engine `envMs` validate NaN (#20) · mutex tick in-process chống lost-update (#18).
+- **EOD pipeline mới:** `src/lib/eod-sync.ts` (fetchDchartHistory golden signature `t,o,h,l,c,v,s` + giá nghìn VND ×1000 + validate §5 Q1–Q9 + `Bar.date` 15:00 UTC + throttle 300ms + neo Quote) · API `POST /api/market/eod-sync` (days mặc định 10) · market-engine scheduler **EOD_SYNC_AT 15:45 ICT hằng ngày + chạy lúc boot** + emit event `"eod"` · hook `use-realtime` invalidate quotes/bars/watchlist/portfolio · `sources.ts` thêm nguồn `eod-history` + `SourceMode` `"real"` · footer mode real → dot xanh "EOD thật" · tick route `REAL_EOD_MODE` mặc định (rollover KHÔNG ghi bar synthetic, ngoài phiên markSource mode `real`) · `.env`: `MARKET_DATA_MODE=real-eod` · `DCHART_BASE_URL` · `MARKET_STRICT_SESSION=true`.
+- **Nạp dữ liệu thật (`prisma/import-real-eod.ts`):** deep backfill 2013→nay 30 mã + rebase danh mục — kết quả đo: **30/30 mã OK · 90.785 bar EOD thật 2013→2026-10-06 · 37,8s · 0 bar bỏ** · VCB 91.600 ₫ (synthetic) → **57.300 ₫ (thật)** · PNJ biến động thật −6,91%/phiên, RSI14 13 · **equity rebase 1.373.869.150 ₫** (cash + Σ qty × close thật).
+- **E2E trên dữ liệu thật:** chu kỳ 23 agents **200 OK · 50,4s · 0 lỗi** · chat agent trả lời bằng chỉ báo thật (PNJ dưới SMA20/50, RSI13, 5 phiên −29,37%) · engine boot eod-sync 30 mã 210 bar · tick ngoài phiên skipped (`MARKET_STRICT_SESSION=true`) · mode nguồn: eod-history **real** · market-quotes **real** ngoài phiên / simulated trong phiên · news live · flows simulated · trading paper · WebSocket qua gateway verify engine clients 3 · mobile 390px 0 tràn ngang · footer sticky OK · lint EXIT 0 · tsc 0 lỗi src.
+
+**Trạng thái:** ✅ Hoàn thành — hệ thống chuyển sang nền dữ liệu giá thật (EOD) + 30 findings audit đóng.
+
+---
+
+*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free + phiên #33: rà soát toàn diện 30 findings audit + dữ liệu EOD thật VNDIRECT) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*

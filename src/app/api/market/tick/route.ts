@@ -27,10 +27,17 @@ export const dynamic = "force-dynamic";
  * "live"). WebSocket mini-service gọi endpoint này định kỳ và broadcast.
  *
  * F-103 (audit 19-a) — EOD rollover: tick đầu tiên của ngày ICT mới sẽ
- *   (1) ghi Bar OHLCV của phiên vừa đóng (chỉ ngày giao dịch, bỏ T7/CN/lễ — Q7),
+ *   (1) ghi Bar OHLCV của phiên vừa đóng (chỉ ngày giao dịch, bỏ T7/CN/lễ — Q7)
+ *       — CHỈ khi MARKET_DATA_MODE=simulated; mặc định real-eod: bar EOD do
+ *       đồng bộ dchart VNDIRECT sở hữu (POST /api/market/eod-sync), tick
+ *       KHÔNG ghi bar synthetic đè lên dữ liệu thật,
  *   (2) kéo refPrice về close phiên trước, mở dải trần/sàn mới ±7%,
  *   (3) reset khối lượng về 0 với ngân sách ngày mới (0,3–9,2 triệu cp)
  *   → simulator không còn tích luỹ volume/changePct vô hạn.
+ *
+ * AUD-CODE #18 — mutex in-process: 2 tick đồng thời (scheduler + thủ công)
+ * trước đây đọc cùng quote rồi update đè nhau (lost-update giá/khối lượng).
+ * Giờ mọi POST được xếp hàng tuần tự qua chuỗi Promise module-level.
  *
  * F-206 (audit 19-b) — paper matching engine: khớp toàn phần lệnh
  *   PENDING/PARTIALLY_FILLED khi thị trường vượt điều kiện giá:
@@ -42,6 +49,16 @@ export const dynamic = "force-dynamic";
 const TICK_DRIFT = 0.004; // ±0.4% mỗi tick
 const FEE_RATE = 0.0015; // phí môi giới 0,15% × notional
 const TAX_RATE = 0.001; // thuế TNCN 0,1% — chỉ lệnh BÁN
+
+/**
+ * real-eod (mặc định): Bar EOD thuộc về nguồn THẬT dchart VNDIRECT — tick chỉ
+ * mô phỏng intraday quanh ref thật. Đặt MARKET_DATA_MODE=simulated để quay lại
+ * hành vi cũ (tick tự ghi bar synthetic khi sang ngày mới).
+ */
+const REAL_EOD_MODE = (process.env.MARKET_DATA_MODE ?? "real-eod") !== "simulated";
+
+/** AUD-CODE #18: mutex in-process — mọi POST /api/market/tick chạy tuần tự. */
+let tickMutex: Promise<NextResponse> = Promise.resolve(null as unknown as NextResponse);
 
 function round100(v: number): number {
   return Math.max(100, Math.round(v / 100) * 100);
@@ -314,9 +331,24 @@ async function fillOrder(
   });
 }
 
-export async function POST() {
+/** AUD-CODE #18: thân tick gốc — chỉ chạy tuần tự qua tickMutex. */
+async function runTick(): Promise<NextResponse> {
   try {
     if (!shouldGenerateTicks()) {
+      // REAL_EOD_MODE: ngoài phiên, bảng giá đang neo ở mức đóng cửa THẬT
+      // (eod-sync dchart) — đánh dấu mode "real" thay vì "simulated" cho đúng
+      // sự thật hiển thị; trong phiên khi tick chạy sẽ trở lại "simulated".
+      if (REAL_EOD_MODE) {
+        await markSource("market-quotes", {
+          mode: "real",
+          success: true,
+          meta: {
+            anchoredTo: "real-eod (dchart VNDIRECT)",
+            note: "Ngoài phiên — bảng giá neo ở mức đóng cửa thật của phiên cuối",
+            strictSession: true,
+          },
+        });
+      }
       const payload = await loadQuotesPayload();
       return NextResponse.json({
         ...payload,
@@ -374,8 +406,10 @@ export async function POST() {
 
       if (isRollover) {
         // Ghi Bar OHLCV của phiên vừa đóng — chỉ ngày giao dịch (Q7: bỏ T7/CN/lễ)
+        // REAL_EOD_MODE: bar EOD thuộc về nguồn THẬT dchart (eod-sync 15:45 ICT
+        // upsert bar thật) — tick không ghi bar synthetic đè lên lịch sử thật
         const barDate = new Date(`${prevIso}T15:00:00.000Z`);
-        if (isTradingDay(barDate)) {
+        if (!REAL_EOD_MODE && isTradingDay(barDate)) {
           await db.bar.upsert({
             where: { instrumentId_date: { instrumentId: inst.id, date: barDate } },
             create: {
@@ -526,7 +560,10 @@ export async function POST() {
         ticked,
         rolled,
         fills,
-        engine: "random-walk+eod-rollover",
+        engine: REAL_EOD_MODE
+          ? "random-walk quanh ref EOD thật (intraday mô phỏng)"
+          : "random-walk+eod-rollover",
+        anchoredTo: REAL_EOD_MODE ? "real-eod (dchart VNDIRECT)" : "synthetic-seed",
         band: "±7%",
         strictSession: process.env.MARKET_STRICT_SESSION === "true",
       },
@@ -541,4 +578,21 @@ export async function POST() {
       { status: 500 }
     );
   }
+}
+
+/**
+ * POST /api/market/tick — mọi invocation xếp hàng qua mutex in-process
+ * (AUD-CODE #18): hai tick đồng thời đọc cùng quote rồi update đè nhau làm
+ * mất giá/khối lượng của nhau; giờ chạy strictly tuần tự.
+ */
+export async function POST(): Promise<NextResponse> {
+  const run = tickMutex.then(runTick).catch((err) => {
+    console.error("[api/market/tick:mutex]", err);
+    return NextResponse.json(
+      { error: "Tick bảng giá thất bại." },
+      { status: 500 }
+    );
+  });
+  tickMutex = run;
+  return run;
 }

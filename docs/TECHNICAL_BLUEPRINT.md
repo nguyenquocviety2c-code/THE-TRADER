@@ -1,21 +1,22 @@
 # The Trader — Technical Blueprint
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/TECHNICAL_BLUEPRINT.md` · **Version:** 0.6.0 · **Updated:** 2026-10-06
+> **Document:** `docs/TECHNICAL_BLUEPRINT.md` · **Version:** 0.7.0 · **Updated:** 2026-10-06
 > **Cross-refs:** [DB_SCHEMA.md](./DB_SCHEMA.md) (data dictionary) · [DATA_SOURCES.md](./DATA_SOURCES.md) (nguồn dữ liệu & mapping)
 
 ---
 
 ## 1. System Overview
 
-The Trader là một **trading workspace một trang** (single-page dashboard): trader quan sát thị trường VN30 realtime, đọc tin tức RSS thật, theo dõi danh mục VNDIRECT mô phỏng, và điều phối một **đội 23 AI agent chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy — §5.1) phân tích — ra tín hiệu — thực thi lệnh giấy (paper trading). Triết lý thiết kế:
+The Trader là một **trading workspace một trang** (single-page dashboard): trader quan sát thị trường VN30 realtime trên nền **lịch sử giá EOD THẬT** (90.785 bar 2013→nay từ VNDIRECT dchart — [DATA_SOURCES.md §3.3](./DATA_SOURCES.md)), đọc tin tức RSS thật, theo dõi danh mục VNDIRECT mô phỏng (đã rebase theo giá thật), và điều phối một **đội 23 AI agent chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy — §5.1) phân tích — ra tín hiệu — thực thi lệnh giấy (paper trading). Triết lý thiết kế:
 
 1. **Paper-trading first** — toàn bộ luồng lệnh chạy nội bộ, không chạm tiền thật; live trading VNDIRECT chỉ bật sau feature flag (§9) — hiện đã có scaffold flag + cổng kiểm tra (S3, gateway thật còn pending).
 2. **Mọi phân tích AI đều có audit trail** — mỗi lần chạy agent ghi `AgentRun` (token, chi phí, thời lượng) và mọi kết luận broadcast ghi `AgentMessage` (xem [DB_SCHEMA.md §6.6–6.9](./DB_SCHEMA.md)).
 3. **Backend-only LLM qua lớp provider duy nhất** — `src/lib/llm.ts` chọn provider theo env (`LLM_PROVIDER=auto`): có `OPENCODE_ZEN_API_KEY` → **Opencode Zen** `space-bunny-free` (**Space Bunny Free** — free-tier $0, OpenAI-compatible REST, chạy được cả ngoài sandbox — môi trường local của trader; đây là backbone **mặc định cho toàn đội 23 agent**); không key → `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox Z.ai). Model họ space-bunny là model reasoning nên mặc định gửi `reasoning_effort: low` (đo thực tế ~3.7s/call thay vì ~19s). Client không bao giờ thấy API key.
 4. **Financial-grade conventions** — tiền VND integer, phí 0.15%, thuế TNCN 0.1% khi bán, dải trần/sàn ±7% HOSE ([DB_SCHEMA.md §8](./DB_SCHEMA.md)).
-5. **Minh bạch nguồn dữ liệu** — mọi nguồn được gắn nhãn `live`/`simulated`/`fallback`/`paper` trong `DataSourceStatus` và hiển thị trên footer; dữ liệu mô phỏng không bao giờ giả danh "live" (stale marking — [DATA_SOURCES.md §6](./DATA_SOURCES.md)).
-6. **Realtime-first (tuỳ chọn)** — mini-service `market-engine` broadcast tick bảng giá, tin tức mới và kết quả chu kỳ agent qua WebSocket (§6); TanStack Query vẫn là cache layer duy nhất.
+5. **Minh bạch nguồn dữ liệu** — mọi nguồn được gắn nhãn `live`/`real`/`simulated`/`fallback`/`paper` trong `DataSourceStatus` và hiển thị trên footer (nguồn `eod-history` mode `real` — dot xanh "EOD thật"); dữ liệu mô phỏng không bao giờ giả danh "live" (stale marking — [DATA_SOURCES.md §6](./DATA_SOURCES.md)).
+6. **Realtime-first (tuỳ chọn)** — mini-service `market-engine` broadcast tick bảng giá, tin tức mới, kết quả EOD sync và kết quả chu kỳ agent qua WebSocket (§6); TanStack Query vẫn là cache layer duy nhất.
+7. **Dữ liệu thật trước tiên (phiên #33)** — bar EOD THẬT VNDIRECT dchart (90.785 bar 2013→nay) làm nền cho mọi chỉ báo/prompt/backtest; những gì chưa có nguồn thật (intraday tick, dòng khối ngoại) được **mô phỏng quanh mức thật + gắn nhãn `simulated` minh bạch** — không bao giờ giả danh "live"; ngoài phiên bảng giá neo ở close thật (mode `real`).
 
 ### Tech Stack (thực tế trong `package.json` / `bun.lock`)
 
@@ -55,7 +56,8 @@ flowchart TB
     subgraph Server["Next.js Server (Route Handlers — API-only backend)"]
         API["/api/market/* · /api/news · /api/system/status\n/api/portfolio · /api/agents/* · /api/signals\n/api/risk/alerts · /api/watchlist/toggle"]
         RUN["POST /api/agents/run\nChu kỳ 23 agents — 5 đợt A→E\n(6 LLM + 17 deterministic)\nprompt kèm newsBlock + flowsBlock"]
-        TICK["POST /api/market/tick\nS4 tick engine: random-walk\n+ mean-reversion 3% (Q1–Q5)"]
+        TICK["POST /api/market/tick\nS4 tick engine: random-walk quanh ref THẬT\n+ mean-reversion 3% (Q1–Q5) — mutex in-process"]
+        EOD["POST /api/market/eod-sync\nS7 — EOD THẬT VNDIRECT dchart\n90.785 bar 2013→nay (đã adjust)\nvalidate §5 + neo Quote vào close thật"]
         NEWS["POST /api/news\nS5 crawler RSS (fast-xml-parser)\ndedupe theo url, rate-limit 60s"]
         FLOWS["GET /api/market/flows\nS6 dòng khối ngoại\n(simulated deterministic)"]
         SDK["src/lib/llm.ts — provider:\nSpace Bunny Free — Opencode Zen (có key, free-tier $0)\nz-ai glm-4.6 (sandbox)"]
@@ -63,11 +65,13 @@ flowchart TB
     end
 
     subgraph Engine["mini-service market-engine — port 3003 (LIVE)"]
-        SCHED["Scheduler\nTICK_MS 10s · NEWS_MS 15'\nAGENT_CYCLE_MINUTES (0 = TẮT)"]
-        IOSRV["socket.io server — broadcast:\nquotes · news · cycle · welcome"]
+        SCHED["Scheduler\nTICK_MS 10s · NEWS_MS 15'\nEOD_SYNC_AT 15:45 ICT hằng ngày + boot\nAGENT_CYCLE_MINUTES (0 = TẮT)"]
+        IOSRV["socket.io server — broadcast:\nquotes · news · eod · cycle · welcome"]
     end
 
     RSS[("5 feed RSS VN (S5 — live)\nVnEconomy · CafeF · VNExpress\nTuổi Trẻ · VietnamNet")]
+
+    DCHART[("VNDIRECT dchart-api (S7 — public EOD)\n90.785 bar OHLCV đã adjust 2013→nay")]
 
     DB[("Supabase Postgres — schema trader\nPrisma 6.19.3 (19 models)\nđám mây — sống qua reset sandbox")]
 
@@ -85,7 +89,10 @@ flowchart TB
     SCHED -- "server-to-server POST (APP_URL)" --> TICK
     SCHED -- "POST /api/news" --> NEWS
     SCHED -- "POST /api/agents/run" --> RUN
-    IOSRV -- "broadcast quotes / news / cycle" --> WS
+    SCHED -- "POST /api/market/eod-sync (15:45 ICT + boot)" --> EOD
+    EOD -- "fetch HTTPS (throttle 300ms, retry backoff)" --> DCHART
+    EOD --> PRISMA
+    IOSRV -- "broadcast quotes / news / eod / cycle" --> WS
     NEWS -- "fetch RSS (timeout 8s, UA TheTraderBot/1.0)" --> RSS
     RUN --> SDK
     SDK -- "HTTPS" --> LLM["Opencode Zen — space-bunny-free\n(fallback: Z.ai GLM-4.6)"]
@@ -95,7 +102,7 @@ flowchart TB
     GW -. planned .-> API
 ```
 
-**Luồng dữ liệu:** Supabase Postgres (schema `trader`) → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt **chu kỳ 23 agents chạy 5 đợt A→E** — 6 lượt LLM + 17 agent dịch vụ deterministic, sinh `AgentMessage`/`Signal` giấy), `POST /api/market/tick` (tick giá S4 + khớp lệnh giấy + EOD rollover), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
+**Luồng dữ liệu:** Supabase Postgres (schema `trader`) → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt **chu kỳ 23 agents chạy 5 đợt A→E** — 6 lượt LLM + 17 agent dịch vụ deterministic, sinh `AgentMessage`/`Signal` giấy), `POST /api/market/tick` (tick giá S4 quanh ref thật + khớp lệnh giấy + EOD rollover), `POST /api/market/eod-sync` (đồng bộ **bar EOD THẬT VNDIRECT dchart** + neo Quote), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
 
 ---
 
@@ -141,7 +148,8 @@ Tất cả route là **Route Handlers** trả JSON; lỗi trả `{ "error": stri
 | Method | Route | Mục đích | Response (tóm tắt) |
 |---|---|---|---|
 | GET | `/api/market/quotes` | Toàn bộ VN30 + quote mới nhất (volume desc) **+ summary** (VN-Index proxy, bề rộng, thanh khoản, top gainer/loser) **+ meta nguồn** (`mode`/`asOf` — S4 stale marking) | `{ quotes: QuoteRow[], summary, meta }` |
-| POST | `/api/market/tick` | **Tick bảng giá S4** (engine mô phỏng): random-walk + mean-reversion 3% trên quote mới nhất từng mã, tuân thủ Q1 (bội 100) · Q2 (dải ±7%) · Q3 · Q5; **EOD rollover** khi sang ngày ICT mới (ghi Bar phiên cũ, refPrice/dải/volume mới — ngân sách ngày 0,3–9,2tr cp); **khớp lệnh giấy** PENDING/PARTIALLY_FILLED khi giá vượt điều kiện (BUY `last ≤ giá đặt` · SELL `last ≥ giá đặt`) — cập nhật Trade/Position/tiền mặt/equity + audit `ORDER_FILLED`; lệnh SELL vượt điều kiện nhưng không đủ vị thế → **tự REJECTED 1 lần** + audit `ORDER_REJECTED` (không retry); `MARKET_STRICT_SESSION=true` thì chỉ chạy trong phiên (ngoài phiên trả `skipped: true`) | payload cùng shape `GET /api/market/quotes` + `ticked`/`rolled`/`fills` |
+| POST | `/api/market/tick` | **Tick bảng giá S4** (engine mô phỏng quanh ref THẬT): random-walk + mean-reversion 3% trên quote mới nhất từng mã, tuân thủ Q1 (bội 100) · Q2 (dải ±7%) · Q3 · Q5; **EOD rollover** khi sang ngày ICT mới (REAL_EOD_MODE mặc định — **KHÔNG ghi bar synthetic**, bar EOD thuộc về nguồn thật S7; refPrice/dải/volume mới — ngân sách ngày 0,3–9,2tr cp); **khớp lệnh giấy** PENDING/PARTIALLY_FILLED khi giá vượt điều kiện (BUY `last ≤ giá đặt` · SELL `last ≥ giá đặt`) — cập nhật Trade/Position/tiền mặt/equity + audit `ORDER_FILLED`; lệnh SELL vượt điều kiện nhưng không đủ vị thế → **tự REJECTED 1 lần** + audit `ORDER_REJECTED` (không retry); **mutex in-process** (AUD-CODE #18 — mọi POST tuần tự, chống lost-update); `MARKET_STRICT_SESSION=true` (mặc định) thì chỉ chạy trong phiên (ngoài phiên trả `skipped: true` + đánh dấu nguồn mode `real` — bảng giá neo close thật) | payload cùng shape `GET /api/market/quotes` + `ticked`/`rolled`/`fills` |
+| POST | `/api/market/eod-sync` | **Đồng bộ EOD THẬT VNDIRECT dchart (S7 — `src/lib/eod-sync.ts`)**: kéo bar EOD đã adjust cho toàn bộ instrument active (body tuỳ chọn `{ days }` — lookback mặc định 10 ngày, clamp 2–365) → validate §5 Q1–Q9 → upsert `Bar` theo `@@unique([instrumentId, date])` → **neo `Quote` vào close thật** (ref/OHLC/volume/trần/sàn thật) → đánh dấu nguồn `eod-history` mode `real`; engine gọi 15:45 ICT hằng ngày + lúc boot; mutex tự nhiên qua throttle 300ms/request | `EodSyncOutcome { ok, symbolsOk[], symbolsEmpty[], symbolsFailed[{symbol, error}], barsUpserted, barsSkipped, lastTradeDate, durationMs, days }` · 502 khi mọi mã fail |
 | GET | `/api/market/flows` | **Dòng khối ngoại ròng S6**: mode `simulated` — deterministic (FNV-1a hash theo mã+ngày), scale theo thanh khoản thật (2–80 tỷ VND); tổng bán ròng < −300 tỷ → RiskAlert WARNING `FOREIGN_FLOW_OUTFLOW` (dedupe 24h) | `{ mode, asOf, totalNet, totalBuy, totalSell, topNet[], topSell[], note }` |
 | GET | `/api/news?limit=12` | 12 tin RSS mới nhất (S5) + meta nguồn cho stale marking | `{ items[], meta: { total, mode, lastSuccessAt, stale, ageMinutes, providers } }` |
 | POST | `/api/news` | **Chạy crawler RSS 5 nguồn ngay** (rate-limit 60s giữa 2 lần nạp, audit `NEWS_INGESTED`) — nạp được thì `mode=live`, nguồn chết → `fallback` | `{ added, updated, total, mode, feeds[] }` · 429 nếu dồn lịch |
@@ -183,7 +191,7 @@ Nguồn duy nhất: **`src/lib/agent-roster.ts`** (thuần dữ liệu, không i
 
 **6 agents chạy LLM mỗi chu kỳ** (market-analyst · fair-value · news-sentiment · liquidity · risk-manager · portfolio-strategist); **17 agents còn lại chạy deterministic từ DB** — 16 hàm trong `agent-service-runs.ts` + execution-manager do chu kỳ xử lý riêng vì cần `Signal` đầu vào. `config` JSON thật của từng agent xem `src/lib/agent-roster.ts` (roster cũng là nguồn cho `prisma/expand-agents.ts` — migrate DB 5 → 23 agents idempotent).
 
-**Mô hình giao tiếp:** agents **broadcast** `AgentMessage` (`broadcast=true`, `toAgentId=null`) lên "bus"; **Ủy ban Kiểm soát (risk-manager · exposure · compliance) giữ quyền VETO** bằng cảnh báo vi phạm ngưỡng (`RiskAlert` + tin broadcast); **Portfolio Strategist là Chủ tịch + điểm hợp lưu (consolidator)** — tổng hợp báo cáo của 20 agents trước nó (nghiên cứu · học máy · kiểm soát), chấm composite score và phát sinh `Signal`; **Execution Manager** là agent duy nhất được tạo `Order` (mặc định LIMIT, tách `sliceCount` lệnh con — và cũng chỉ khi trader phê duyệt).
+**Mô hình giao tiếp:** agents **broadcast** `AgentMessage` (`broadcast=true`, `toAgentId=null`) lên "bus"; **Ủy ban Kiểm soát (risk-manager · exposure · compliance) giữ quyền VETO — từ phiên #33 (AUD-CODE #6) VETO được HARD-ENFORCE trong orchestrator, không còn chỉ là cảnh báo**: `exposure` VETO (danh mục vượt hạn mức ngành/vị thế) → **chặn mọi tín hiệu MUA**; `compliance` VETO (biên margin âm / chế độ giao dịch chưa đạt) → **chặn mọi tín hiệu mới**; tín hiệu vi phạm bị **hạ về HOLD** kèm lý do trong `rationale`, và digest Chủ tịch được chèn khối "RÀNG BUỘC CỨNG TỪ ỦY BAN KIỂM SOÁT (VETO — bắt buộc tuân thủ)"; **Portfolio Strategist là Chủ tịch + điểm hợp lưu (consolidator)** — tổng hợp báo cáo của 20 agents trước nó (nghiên cứu · học máy · kiểm soát), chấm composite score và phát sinh `Signal`; **Execution Manager** là agent duy nhất được tạo `Order` (mặc định LIMIT, tách `sliceCount` lệnh con — và cũng chỉ khi trader phê duyệt).
 
 ### 5.2 Run cycle — `POST /api/agents/run` (chu kỳ 23 agents · 5 đợt)
 
@@ -224,7 +232,7 @@ sequenceDiagram
     API-->>U: { runId, messages[], signals[], waves, failures[], durationMs } — UI invalidateQueries + toast
 ```
 
-Chu kỳ 5 đợt là **contract của orchestrator** (đã implement đầy đủ trong `src/app/api/agents/run/route.ts`, cooldown 60s chống spam chi phí): **A** nền tảng (4 service song song) → **B** nghiên cứu + học máy (8 service song song + 4 LLM tuần tự) → **C** kiểm soát (risk-manager LLM + exposure/compliance service) → **D** Chủ tịch portfolio-strategist tổng hợp **20 báo cáo** → **E** thực thi (execution-manager + settlement/cash-management). Mọi lời gọi LLM đều có prompt chứa snapshot dữ liệu thật từ DB (kèm chỉ báo SMA20/50, RSI14, động lượng 5 phiên, KL/TL20 tính từ `Bar`; fair-value thêm `valuationBlock` z-price band, liquidity thêm `liquidityBlock`) — các khối build trùng nguồn với **single-run/chat** qua `src/lib/agent-context.ts` (ROLE_PROMPTS đủ 23 agents). 4 LLM nghiên cứu + risk + strategist chạy **tuần tự** (retry backoff 2.5s khi 429; một agent lỗi không kéo sập chu kỳ — bỏ vào `failures[]`); mọi kết quả đều persist (`AgentMessage`, `Signal`) kèm audit (`AgentRun` mỗi agent, `AuditLog`: SIGNAL_CREATED · AGENT_RUN_COMPLETED) — không có kết quả AI nào "bay lơ lửng" ngoài persisted state. **Execution Manager chạy xác định (không LLM): ghi nhận tín hiệu và thông báo chờ phê duyệt của trader** — chu kỳ **không tự tạo Order**; lệnh chỉ xuất hiện khi trader **APPROVE** qua `/api/signals/[id]/decision` (sizing 5% NAV, lô 100, LIMIT — `src/lib/signal-execution.ts`) hoặc `convert` (budget 50tr). Response trả thêm khối **`waves`** (`architecture/agentsRan/platform/researchAndMl/control/executive`) tổng kết các đợt đã chạy — đo thực tế với Space Bunny Free (`reasoning_effort: low`): 1 chu kỳ 23 agents ≈ **42s, 0 lỗi, $0**.
+Chu kỳ 5 đợt là **contract của orchestrator** (đã implement đầy đủ trong `src/app/api/agents/run/route.ts`, cooldown 60s chống spam chi phí): **A** nền tảng (4 service song song) → **B** nghiên cứu + học máy (8 service song song + 4 LLM tuần tự) → **C** kiểm soát (risk-manager LLM + exposure/compliance service) → **D** Chủ tịch portfolio-strategist tổng hợp **20 báo cáo** → **E** thực thi (execution-manager + settlement/cash-management). **Đầu mỗi chu kỳ chạy 2 sweep (AUD-CODE #1/#5):** `reapStaleAgentRuns()` reset AgentRun kẹt RUNNING quá 5 phút (watchdog — agent không bị chặn vĩnh viễn) + `expireDueSignals()` chuyển Signal quá hạn sang `EXPIRED` (không còn tín hiệu chết vào prompt Chủ tịch); guard chống chồng lấn giữa chu kỳ ↔ single-run (AUD-CODE #3/#4). Mọi lời gọi LLM đều có prompt chứa snapshot dữ liệu thật từ DB (kèm chỉ báo SMA20/50, RSI14, động lượng 5 phiên, KL/TL20 tính từ `Bar` EOD THẬT dchart; fair-value thêm `valuationBlock` z-price band, liquidity thêm `liquidityBlock`) — các khối build trùng nguồn với **single-run/chat** qua `src/lib/agent-context.ts` (ROLE_PROMPTS đủ 23 agents). 4 LLM nghiên cứu + risk + strategist chạy **tuần tự** (retry backoff 2.5s khi 429; một agent lỗi không kéo sập chu kỳ — bỏ vào `failures[]`); mọi kết quả đều persist (`AgentMessage`, `Signal`) kèm audit (`AgentRun` mỗi agent, `AuditLog`: SIGNAL_CREATED · AGENT_RUN_COMPLETED) — không có kết quả AI nào "bay lơ lửng" ngoài persisted state. **Execution Manager chạy xác định (không LLM): ghi nhận tín hiệu và thông báo chờ phê duyệt của trader** — chu kỳ **không tự tạo Order**; lệnh chỉ xuất hiện khi trader **APPROVE** qua `/api/signals/[id]/decision` (sizing 5% NAV, lô 100, LIMIT — `src/lib/signal-execution.ts`, claim trong transaction chống TOCTOU 2 lệnh — AUD-CODE #2) hoặc `convert` (budget 50tr). Response trả thêm khối **`waves`** (`architecture/agentsRan/platform/researchAndMl/control/executive`) tổng kết các đợt đã chạy — đo thực tế với Space Bunny Free (`reasoning_effort: low`): 1 chu kỳ 23 agents ≈ **42s, 0 lỗi, $0**; trên **dữ liệu EOD thật** (phiên #33): 200 OK · **50,4s · 0 lỗi**.
 
 ### 5.3 Health scoring
 
@@ -246,10 +254,12 @@ Mini-service **`mini-services/market-engine`** (Bun + `socket.io`, chạy riêng
 |---|---|---|
 | `TICK_MS` | `10000` (10s) | Nhịp gọi `POST /api/market/tick` — tick bảng giá S4 rồi broadcast `quotes` |
 | `NEWS_MS` | `900000` (15 phút) | Chu kỳ gọi `POST /api/news` — crawler RSS S5 rồi broadcast `news` |
+| `EOD_SYNC_AT` | `15:45` (ICT) | Giờ hằng ngày gọi `POST /api/market/eod-sync` (sau giờ chốt phiên 15:00 ICT) — đồng bộ **bar EOD THẬT dchart VNDIRECT** + neo Quote vào close thật rồi broadcast `eod`; chỉ chạy **1 lần/ngày** (kiểm tra mỗi 60s, so ngày ICT đã sync) |
+| `EOD_SYNC_DISABLED` | `0` | `1` = tắt scheduler đồng bộ EOD thật trong market-engine |
 | `AGENT_CYCLE_MINUTES` | `0` (TẮT) | Chu kỳ tự động gọi `POST /api/agents/run` rồi broadcast `cycle` — **mặc định tắt để tiết kiệm chi phí LLM**, trader bấm nút chạy thủ công |
 | `APP_URL` | `http://localhost:3000` | Địa chỉ app Next.js cho các cuộc gọi server-to-server |
 
-Khởi động: chạy ngay một vòng tick + news để client có dữ liệu sớm, sau đó `setInterval` theo các nhịp trên.
+Khởi động: chạy ngay một vòng tick + news + **eod-sync lúc boot** để client có dữ liệu sớm (môi trường mới tự có giá thật, lookback 10 ngày), sau đó `setInterval` theo các nhịp trên. Các biến số được **validate qua `envMs`** (NaN/giá trị dưới min → fallback về mặc định — AUD-CODE #20, chống `setInterval(NaN)` dồn cục API); giờ `EOD_SYNC_AT` parse bằng `parseHhMm` (sai định dạng → fallback 15:45); tick engine của app cũng có **mutex in-process** chống lost-update (AUD-CODE #18).
 
 ### 6.2 Sự kiện broadcast (socket.io)
 
@@ -257,6 +267,7 @@ Khởi động: chạy ngay một vòng tick + news để client có dữ liệu
 |---|---|---|
 | `quotes` | payload `POST /api/market/tick` (cùng shape `GET /api/market/quotes` + `meta`, `ticked`) | `setQueryData(['quotes'])` + patch `['watchlist']` — **defer `setTimeout(0)`** để tránh warning concurrent React; cập nhật `lastTickAt` |
 | `news` | kết quả crawler `{ added, updated, mode, feeds… }` | `invalidateQueries(['news'], ['system-status'])` |
+| `eod` | kết quả `POST /api/market/eod-sync` (`EodSyncOutcome`) — chạy 15:45 ICT hằng ngày + lúc boot | `invalidateQueries(['quotes'], ['watchlist'], ['bars'], ['portfolio'], ['system-status'])` — nến/chỉ báo/danh mục tự đổi sang **giá thật** |
 | `cycle` | kết quả `POST /api/agents/run` | invalidate toàn bộ dữ liệu agent (`agents`, `agent-messages`, `signals`, `orders`, `portfolio`, `risk-alerts`) + toast |
 | `welcome` | `{ ok, service, ts }` khi client kết nối | xác nhận kết nối (đèn Live) |
 
@@ -275,7 +286,7 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 
 ### 6.4 Health endpoint
 
-`GET /` (hoặc `/health`) trên cổng 3003 trả JSON thống kê vận hành: `{ ok, service, port, startedAt, lastTickAt, lastTickError, ticks, lastNewsAt, newsRuns, cycles, clients }` — dùng để giám sát scheduler mà không cần vào log.
+`GET /` (hoặc `/health`) trên cổng 3003 trả JSON thống kê vận hành: `{ ok, service, port, eodSyncAt, startedAt, lastTickAt, lastTickError, ticks, lastNewsAt, newsRuns, lastEodSyncAt, lastEodSyncDate, lastEodSyncError, eodSyncRuns, lastCycleAt, cycles, clients }` — dùng để giám sát scheduler (kể cả EOD sync) mà không cần vào log.
 
 ---
 
@@ -304,7 +315,7 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | **JSON serialization** | `BigInt` (VND) chuyển `Number` tại API boundary — mọi giá trị demo < 2^53 nên lossless; client không cần BigInt polyfill. |
 | **Client caching** | TanStack Query `staleTime` phân tầng: quote/watchlist 30s, portfolio/orders/signals/risk/agents 30–60s, bars 5 phút; skeleton ngay lập tức từ cache cũ (stale-while-revalidate). |
 | **Loading UX** | shadcn `Skeleton` cho mọi section trong lần fetch đầu; sonner toast cho mutation `POST /api/agents/run` (không block UI). |
-| **DB footprint** | Supabase Postgres (schema `trader`) — kho chính bền vững qua reset sandbox (dữ liệu phân tích/telemetry không mất khi môi trường local bị reset); song song cùng project còn schema `public` Gen-1 với **95.259 bar EOD thật 2013→2026** (nguồn dự phòng cho tích hợp dữ liệu thật VNDIRECT). Ops SQL qua `tools/db-console.mjs` (Management API). |
+| **DB footprint** | Supabase Postgres (schema `trader`) — kho chính bền vững qua reset sandbox (dữ liệu phân tích/telemetry không mất khi môi trường local bị reset); **bar EOD thật VNDIRECT dchart đã nạp vào schema `trader` (S7 — 90.785 bar 2013→nay, phiên #33)**; song song cùng project còn schema `public` Gen-1 với 95.259 bar EOD thật (đã dùng làm nguồn đối chiếu khi validate S7). Ops SQL qua `tools/db-console.mjs` (Management API). |
 
 ---
 
@@ -320,9 +331,9 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 **Roadmap** (thứ tự ưu tiên — cập nhật trạng thái sau Giai đoạn 2):
 
 1. **VNDIRECT live trading** — ✅ scaffold xong feature flag `LIVE_TRADING` + cổng kiểm tra `src/lib/trading-mode.ts` (503 + audit `LIVE_TRADING_BLOCKED` khi thiếu cấu hình; 501 + audit `LIVE_ORDER_GATEWAY_UNAVAILABLE` khi gateway chưa có); **pending mini-service gateway thật**: xác thực broker, đặt/hủy lệnh thật, đồng bộ số dư; mọi lệnh thật vẫn đi qua Risk Manager veto (xem [DATA_SOURCES.md §4.1](./DATA_SOURCES.md)).
-2. **WebSocket mini-service realtime** — ✅ done: `mini-services/market-engine` (port 3003) broadcast `quotes`/`news`/`cycle`/`welcome` + scheduler, client nối qua gateway với query `XTransformPort=3003` (§6).
+2. **WebSocket mini-service realtime** — ✅ done: `mini-services/market-engine` (port 3003) broadcast `quotes`/`news`/`eod`/`cycle`/`welcome` + scheduler (tick 10s · RSS 15' · EOD sync 15:45 ICT + boot), client nối qua gateway với query `XTransformPort=3003` (§6).
 3. **Scheduler chu kỳ agent tự động** — ✅ done: có sẵn trong market-engine (`AGENT_CYCLE_MINUTES`), mặc định 0 (TẮT) để tiết kiệm chi phí LLM.
-4. **Nguồn dữ liệu ngoài** — market data S4 ✅ (tick engine mô phỏng Q1–Q5 + stale marking `DataSourceStatus` + `/api/system/status`); news S5 ✅ (crawler RSS live 5 nguồn VN: VnEconomy/CafeF/VNExpress/Tuổi Trẻ/VietnamNet, model `NewsItem` dedupe theo url); alternative data S6 ✅ (dòng khối ngoại simulated deterministic + RiskAlert `FOREIGN_FLOW_OUTFLOW`). Còn lại: thay dữ liệu mô phỏng bằng feed thật HOSE/HNX/VPS — kế hoạch chi tiết ở [DATA_SOURCES.md §4](./DATA_SOURCES.md).
+4. **Nguồn dữ liệu ngoài** — **EOD giá thật ✅ (phiên #33):** S7 `src/lib/eod-sync.ts` + `POST /api/market/eod-sync` — 90.785 bar EOD THẬT VNDIRECT dchart 2013→nay (public, đã adjust) + neo Quote vào close thật + scheduler 15:45 ICT; news S5 ✅ (crawler RSS live 5 nguồn VN: VnEconomy/CafeF/VNExpress/Tuổi Trẻ/VietnamNet, model `NewsItem` dedupe theo url); alternative data S6 ✅ (dòng khối ngoại simulated deterministic + RiskAlert `FOREIGN_FLOW_OUTFLOW`). Còn lại: feed **quote/tick realtime** thật HOSE/HNX/VPS (finfo cần session khách hàng VNDIRECT) thay tick mô phỏng intraday — kế hoạch chi tiết ở [DATA_SOURCES.md §4](./DATA_SOURCES.md).
 5. Mở rộng HNX/UPCOM (schema `Market` đã có sẵn), lịch nghỉ Tết chính thức (hiện là bảng ước lượng 2026 trong `src/lib/market-session.ts`), ATO/ATC simulation.
 6. PostgreSQL migration + tách bảng archive cho `Quote`/`Bar`/`NewsItem` khi khối lượng tăng.
 
@@ -338,3 +349,4 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B1–B3, 23 route):** (1) **App shell**: nav tab workspace (Zustand `activeWorkspace`, `?ws=` deep-link) — tổng quan ⇄ đội agent không reload, realtime giữ nguyên; (2) **4 API mới** (`GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision`) + `/api/agents` thêm stats/totals chi phí; rate-limit 60s/agent (DB-backed) + header Retry-After; (3) **Workspace Đội Agent**: roster 5 card (stats chi phí), panel chi tiết 5 tab (Hồ sơ/Hoạt động+sparkline/Nhiệm vụ/Phát thanh/Chat), chat 1-1 với AgentMessage.direction, phê duyệt/từ chối tín hiệu trong feed + panel; (4) **Dashboard**: nến Nhật + volume + RSI14 Wilder panel (custom Bar shape), toggle Nến/Đường, cột mở rộng bảng giá (trần/sàn/TC/cao/thấp + dấu ⌃⌄), donut phân bổ ngành + cột % tỷ trọng, ô Realized P&L, chip Sức mua ước tính (tooltip công thức), chip chi phí AI footer; (5) **hành vi mới**: chu kỳ sinh signal ACTIVE chờ duyệt (không auto-order — human-in-the-loop), audit `SIGNAL_CREATED`/`SIGNAL_APPROVED`/`SIGNAL_REJECTED`/`AGENT_CHAT`; `signal-execution.ts` một nguồn duy nhất cho toán tạo lệnh; SELL nav5pct guard vị thế |
 | 2026-10-06 | **v0.5 — LLM provider abstraction (`src/lib/llm.ts`):** (1) 2 provider chọn qua env `LLM_PROVIDER=auto`: **Opencode Zen** `space-bunny-free` (`https://opencode.ai/zen/v1/chat/completions`, Bearer `OPENCODE_ZEN_API_KEY`, free-tier $0, zero-retention — **chạy được ngoài sandbox**) hoặc `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox); (2) 3 route agent (run/single-run/chat) refactor dùng một cổng chung — bỏ 3 bản callLlm/callChatLlm trùng lặp; costUsd theo bảng giá provider (`LLM_PRICE_*_MTOK` ghi đè được); (3) `GET /api/agents` trả khối `llm` + `AgentCard.model` = model runtime — UI (workspace/panel/footer tooltip) hiển thị model đang chạy từ nguồn duy nhất; (4) `.env`/`.env.example` + README section "Chạy trên máy local" (chỉ cần API key opencode.ai/zen, KHÔNG cần Opencode CLI) |
 | 2026-10-06 | **v0.6 — Mở rộng 23 agents (5 nhóm, chu kỳ 5 đợt: 6 LLM + 17 deterministic) · Space Bunny Free làm backbone mặc định (free-tier, `reasoning_effort: low` ≈ 3.7s/call) · DB: `AgentRole` +18 enum (23 giá trị), `Agent.group` + index:** (1) kiến trúc 5 → **23 agents đúng thiết kế Gen-1 DESIGN.md §4.1** (4 dịch vụ S + 19 agent A) chia 5 nhóm research/control/executive/platform/ml — nguồn duy nhất `src/lib/agent-roster.ts` + 16 hàm deterministic `src/lib/agent-service-runs.ts` + script migrate idempotent `prisma/expand-agents.ts`; (2) chu kỳ `POST /api/agents/run` chạy **5 đợt A→E** (A nền tảng 4 service → B nghiên cứu+học máy 8 service + 4 LLM → C kiểm soát risk LLM + 2 service → D Chủ tịch tổng hợp 20 báo cáo → E thực thi), response thêm khối `waves`; (3) `POST /api/agents/[id]/run` thêm service path (17 agent deterministic, 0 LLM); `GET /api/agents` + `/api/agents/[id]` trả `group`/`groupLabel`; (4) `agent-context.ts`: ROLE_PROMPTS đủ 23 agents + `valuationBlock`/`liquidityBlock`; (5) UI: roster 5 nhóm + badge VETO (nhóm control) + cuộn dọc riêng; (6) `.env` đặt sẵn `OPENCODE_ZEN_API_KEY` → provider mặc định opencode-zen `space-bunny-free` free-tier $0 chạy được ngoài sandbox; env mới `OPENCODE_ZEN_REASONING_EFFORT` (mặc định `low` cho model họ space-bunny); (7) E2E: 1 chu kỳ 23 agents ≈ 42s · 0 lỗi · 0 failures · **$0** |
+| 2026-10-06 | **v0.7.0 — Phiên #33: rà soát toàn diện (30 findings audit AUD-CODE) + NẠP DỮ LIỆU EOD THẬT VNDIRECT:** (1) **S7 eod-sync mới** — `src/lib/eod-sync.ts`: `fetchDchartHistory` (golden signature `t,o,h,l,c,v,s` · `s="ok"` · retry 5xx/429 backoff 1s→4s · throttle 300ms) → `toRealBars` (giá **nghìn VND ×1000** + round100, validate §5 Q1–Q9, `Bar.date` 15:00 UTC, bỏ T7/CN, chặn dải 500–5.000.000 ₫) → `syncEodFromDchart` (lookback 10 ngày, upsert idempotent + **neo Quote** vào EOD cuối: ref/OHLC/volume/trần/sàn thật) → `deepBackfillEod` (2013→nay); API mới **`POST /api/market/eod-sync`** (body `{days}` 2–365, response `EodSyncOutcome`); scheduler market-engine **15:45 ICT hằng ngày + boot** + broadcast event `eod` → hook `use-realtime` invalidate quotes/watchlist/bars/portfolio; nguồn mới `eod-history` (SourceMode **`real`** — footer dot xanh "EOD thật"); (2) **deep backfill + rebase** `prisma/import-real-eod.ts`: **30/30 mã OK · 90.785 bar thật 2013→2026-10-06 · 37,8s · 0 bar bỏ** (VCB 91.600→57.300 ₫) + rebase danh mục theo giá thật (`Position.avgPrice` = close ngày mở · Trade/Order giá thật + fee 0,15%/tax 0,1% · Signal ACTIVE scale quanh close thật · xoá 3 alert demo · equity = cash + Σ qty×close = 1.373.869.150 ₫); (3) **REAL_EOD_MODE mặc định** (`MARKET_DATA_MODE=real-eod`): tick chỉ mô phỏng intraday quanh ref thật — EOD rollover KHÔNG ghi bar synthetic, ngoài phiên Quote neo close thật + mode `real`, `MARKET_STRICT_SESSION` mặc định true, mutex tick in-process (AUD-CODE #18), `envMs` validate NaN (#20); (4) **30 fix audit (1 P1 + 9 P2 + 20 P3):** sweep `expireDueSignals` (GET signals + đầu chu kỳ + trước tạo lệnh — #1) · transaction claim atomic APPROVE chống TOCTOU 2 lệnh (#2) · guard chồng lấn chu kỳ ↔ single-run + atomic claim (#3/#4) · watchdog `reapStaleAgentRuns` 5 phút (#5) · **VETO hard-enforce** — exposure chặn MUA / compliance chặn mọi tín hiệu mới, hạ về HOLD kèm lý do (#6) · backtest NaN guard (#7) · `ZEN_TIMEOUT_MS` 45s + `maxDuration` 300s (#8) · seed agents IDLE (#9) · cooldown sau validate (#10–13) · feature-store 4 nhóm (#14) · buyingPower = cash + positionsMv×0,5 − marginUsed đồng bộ service-runs + header chip (#15) · messages feed chỉ broadcast (#23) · news bỏ tin không ngày (#29) · flows seed `vol|`/`dir|` (#26) · seed `Date.UTC` + bỏ ternary chết (#19/#27) · label "Trước phiên (ATO…)" (#30) · chat bỏ hardcode $0.006 (#25); (5) **E2E trên dữ liệu thật:** chu kỳ 23 agents 200 OK · 50,4s · 0 lỗi · chat agent trả lời bằng chỉ báo thật (PNJ dưới SMA20/50, RSI13, 5 phiên −29,37%) · engine boot eod-sync 30 mã 210 bar · tick ngoài phiên skipped · mobile 390px 0 tràn ngang · lint EXIT 0 · tsc 0 lỗi src |

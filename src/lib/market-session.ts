@@ -75,7 +75,7 @@ export function sessionPhase(date: Date): SessionPhase {
 }
 
 export const SESSION_PHASE_LABEL: Record<SessionPhase, string> = {
-  "pre-open": "ATO 09:00–09:15",
+  "pre-open": "Trước phiên (ATO 09:00–09:15)",
   morning: "Liên tục sáng 09:15–11:30",
   lunch: "Nghỉ trưa 11:30–13:00",
   afternoon: "Liên tục chiều 13:00–14:45",

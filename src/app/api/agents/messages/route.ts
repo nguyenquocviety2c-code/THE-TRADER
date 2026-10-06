@@ -11,6 +11,9 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const messages = await db.agentMessage.findMany({
+      // AUD-CODE #23: feed chung chỉ trả tin broadcast — chat riêng 1-1
+      // (broadcast=false) chỉ hiển thị trong thread của agent đó
+      where: { broadcast: true },
       orderBy: { createdAt: "desc" },
       take: 30,
       include: {

@@ -111,14 +111,16 @@ function firstLink(item: Record<string, unknown>): string | null {
   return null;
 }
 
-function parseDate(item: Record<string, unknown>): Date {
+function parseDate(item: Record<string, unknown>): Date | null {
   const raw =
     item.pubDate ?? item.published ?? item.updated ?? item["dc:date"];
   if (typeof raw === "string" || typeof raw === "number") {
     const d = new Date(raw);
     if (!Number.isNaN(d.getTime()) && d.getFullYear() > 2000) return d;
   }
-  return new Date();
+  // AUD-CODE #29: KHÔNG fallback new Date() — tin thiếu ngày không được gán mốc
+  // "vừa xong" nhảy lên đầu danh sách; trả null để caller bỏ qua tin này
+  return null;
 }
 
 function extractItems(xml: string): Record<string, unknown>[] {
@@ -204,6 +206,7 @@ export async function ingestNews(): Promise<NewsIngestResult> {
         if (!title || !url) continue;
         const summary = cleanText(item.description, 320);
         const publishedAt = parseDate(item);
+        if (!publishedAt) continue; // AUD-CODE #29: bỏ tin không có ngày hợp lệ
 
         const existing = await db.newsItem.findUnique({ where: { url } });
         if (existing) {
