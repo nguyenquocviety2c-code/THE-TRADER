@@ -1,7 +1,7 @@
 # The Trader — Data Dictionary & Database Schema
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.4.0 · **Updated:** 2026-10-06
+> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.5.0 · **Updated:** 2026-10-06
 > **Source of truth:** [`prisma/schema.prisma`](../prisma/schema.prisma) — tài liệu này mô tả đúng schema đã implement. Mọi thay đổi schema phải được phản ánh lại đây.
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface) · [DATA_SOURCES.md](./DATA_SOURCES.md) (field mapping theo nguồn dữ liệu)
 
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi 5 AI agent: dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Tổng cộng **19 model**.
+The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Tổng cộng **19 model**.
 
 Schema được thiết kế theo chuẩn **financial-grade**:
 
@@ -183,7 +183,8 @@ erDiagram
         string id PK
         string code UK
         enum role
-        string model "glm-4.6"
+        string group "research|control|executive|platform|ml"
+        string model "space-bunny-free"
         enum status
         string config "JSON"
         float healthScore
@@ -436,9 +437,10 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 | `id` | String | PK, `cuid()` | Định danh duy nhất |
 | `code` | String | **Unique** | Mã agent (VD: `market-analyst`) — khóa ổn định để tham chiếu trong code |
 | `name` | String | — | Tên hiển thị |
-| `role` | Enum `AgentRole` | — | Vai trò: xem §7 |
+| `role` | Enum `AgentRole` | — | Vai trò: xem §7 (23 giá trị) |
+| `group` | String | default `"research"`, `@@index([group])` | **Nhóm điều phối chu kỳ & hiển thị UI** (v0.5 — 23 agents): `research` \| `control` \| `executive` \| `platform` \| `ml` — nguồn duy nhất `src/lib/agent-roster.ts` |
 | `description` | String | — | Mô tả trách nhiệm (tiếng Việt) |
-| `model` | String | default `"glm-4.6"` | LLM backbone — khởi tạo qua `z-ai-web-dev-sdk` (backend-only) |
+| `model` | String | default `"space-bunny-free"` | LLM backbone **mặc định khi khởi tạo** (Opencode Zen free-tier — model runtime thực tế resolve từ `src/lib/llm.ts` theo env, hiển thị qua `GET /api/agents` → `llm`) |
 | `status` | Enum `AgentStatus` | default `IDLE` | Trạng thái runtime |
 | `config` | String | default `"{}"` | **JSON cấu hình**: ngưỡng, trọng số, giới hạn (ví dụ thực tế ở [TECHNICAL_BLUEPRINT.md §5](./TECHNICAL_BLUEPRINT.md)) |
 | `lastRunAt` | DateTime | nullable | Lần chạy cuối — dùng tính độ "stale" |
@@ -447,7 +449,7 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 
 **Relations:** `runs`, `tasks`, `signals`, `messagesFrom` (`AgentMessage` — `FromAgent`), `messagesTo` (`ToAgent`).
 
-**Indexes/constraints:** unique `code`.
+**Indexes/constraints:** unique `code`; `@@index([group])` — truy vấn roster theo nhóm (UI + điều phối chu kỳ 5 đợt).
 
 **Retention:** định nghĩa dài hạn; `config` versioning qua `updatedAt` + AuditLog.
 
@@ -738,7 +740,7 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 
 ## 7. Enum Dictionary
 
-12 enum, lưu dạng TEXT trên SQLite (validate bởi Prisma Client):
+12 enum, lưu dạng TEXT trên SQLite (validate bởi Prisma Client). `AgentRole` mở rộng đủ **23 giá trị** từ v0.5 (đúng kiến trúc Gen-1 DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A; nhóm hiển thị theo `Agent.group`):
 
 | Enum | Giá trị | Diễn giải (VN) |
 |---|---|---|
@@ -750,11 +752,29 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 | | `FUND` | Quỹ mở/đóng |
 | | `BOND` | Trái phiếu |
 | | `INDEX` | Chỉ số (VN-Index, VN30) |
-| `AgentRole` | `MARKET_ANALYST` | Phân tích kỹ thuật & vi mô |
-| | `NEWS_SENTIMENT` | Tin tức & cảm xúc thị trường |
-| | `RISK_MANAGER` | Quản trị rủi ro |
-| | `PORTFOLIO_STRATEGIST` | Chiến lược danh mục (orchestrator tổng hợp) |
-| | `EXECUTION_MANAGER` | Thực thi lệnh qua VNDIRECT |
+| `AgentRole` | `MARKET_ANALYST` | Phân tích kỹ thuật & vi mô (A2 — nhóm research, LLM) |
+| | `NEWS_SENTIMENT` | Tin tức & cảm xúc thị trường (A4 — research, LLM) |
+| | `RISK_MANAGER` | Quản trị rủi ro (A6 — control, VETO, LLM) |
+| | `PORTFOLIO_STRATEGIST` | Chiến lược danh mục (A1 — Chủ tịch Hội đồng, LLM) |
+| | `EXECUTION_MANAGER` | Thực thi lệnh qua VNDIRECT (A10 — executive, service) |
+| | `DATA_COLLECTOR` | S0 — thu thập dữ liệu thị trường (platform, service) |
+| | `NOTIFICATION_OFFICER` | S1 — thông báo & tổng hợp (platform, service) |
+| | `FEATURE_STORE` | S2 — kho đặc trưng (platform, service) |
+| | `RL_GYM` | S3 — môi trường giả lập RL (ml, service) |
+| | `FAIR_VALUE` | A3 — định giá hợp lý (research, LLM) |
+| | `LIQUIDITY` | A5 — thanh khoản & dòng tiền (research, LLM) |
+| | `EXPOSURE` | A7 — phơi nhiễm danh mục (control, VETO, service) |
+| | `COMPLIANCE` | A8 — tuân thủ quy định (control, VETO, service) |
+| | `DATA_INTEGRITY` | A9 — toàn vẹn dữ liệu (platform, service) |
+| | `SETTLEMENT` | A11 — thanh toán bù trừ (executive, service) |
+| | `CASH_MANAGEMENT` | A12 — quản lý dòng tiền (executive, service) |
+| | `LEARNING_RAG` | A13 — học tập & RAG (ml, service) |
+| | `BACKTEST` | A14 — kiểm định lịch sử (ml, service) |
+| | `ML_FORECAST` | A15 — dự báo machine learning (research, service) |
+| | `RL_POLICY` | A16 — chính sách RL (ml, service) |
+| | `DL_TRAINER` | A17 — huấn luyện deep learning (ml, service) |
+| | `RL_TRAINER` | A18 — huấn luyện RL (ml, service) |
+| | `MODEL_REGISTRY` | A19 — đăng ký mô hình (ml, service) |
 | `AgentStatus` | `IDLE` / `RUNNING` / `ERROR` / `PAUSED` | Trạng thái runtime của agent |
 | `SignalDirection` | `BUY` / `SELL` / `HOLD` | Khuyến nghị hành động |
 | `SignalConfidence` | `LOW` / `MEDIUM` / `HIGH` | Độ tin cậy |
@@ -796,7 +816,7 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 - **90 ngày OHLCV mỗi mã** (2,700 bar): random-walk có mean-reversion, bỏ thứ 7/CN, giá làm tròn 100 VND; close cuối ép về giá tham chiếu.
 - **Quote mới nhất mỗi mã**: change/changePct so close trước, trần/sàn ±7%, bid/ask ±0.1% kèm khối lượng ngẫu nhiên.
 - **Demo user + tài khoản VNDIRECT margin** (số dư 486,5tr; equity seed gốc 1,284tr đã được migration audit 2026-10-06 tính lại thành `cash + GTTH` ≈ 1,572tr và được fill engine/EOD rollover chốt liên tục; margin 92tr).
-- **5 agent** (config thật ở [TECHNICAL_BLUEPRINT.md §5](./TECHNICAL_BLUEPRINT.md)) + 6 AgentRun/agent, 9 AgentTask, 5 AgentMessage broadcast, 8 Signal, 7 Position, 7 Order + Trade (fee/tax đúng quy ước §8), 3 RiskAlert, 6 AuditLog, watchlist mặc định 8 mã.
+- **23 agent** theo roster `src/lib/agent-roster.ts` (5 nhóm research/control/executive/platform/ml — config thật ở [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)) + 6 AgentRun/agent, 9 AgentTask, 5 AgentMessage broadcast, 8 Signal, 7 Position, 7 Order + Trade (fee/tax đúng quy ước §8), 3 RiskAlert, 6 AuditLog, watchlist mặc định 8 mã. DB đã có dữ liệu 5 agent từ phiên bản cũ → chạy `bun prisma/expand-agents.ts` (idempotent — upsert theo `code`, giữ nguyên runs/messages/signals/health).
 
 Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — chỉ chạy ở môi trường dev/demo. Chi tiết thuật toán sinh dữ liệu: [DATA_SOURCES.md §3](./DATA_SOURCES.md).
 
@@ -810,3 +830,4 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 | 2026-10-06 | **v0.2 — Giai đoạn 2:** thêm 2 model `NewsItem` (S5 RSS, dedupe theo `url`) + `DataSourceStatus` (S4 stale marking, singleton-theo-`key`) → tổng **19 model**; cập nhật ERD + dictionary §6.18/§6.19; ghi nhận quote được cập nhật bởi tick engine `POST /api/market/tick`; bổ sung action audit mới |
 | 2026-10-06 | **v0.3 — Audit vòng 1+2 (Task 21/22):** `AgentMessage` thêm `@@index([createdAt])` (F-116); §6.4 Quote bổ sung vòng đời phiên EOD rollover + fill engine; §6.2 `equity` ghi rõ chính sách snapshot (chốt khi khớp lệnh/EOD, live do `/api/portfolio` tính); §4.3 làm rõ Quote là update-in-place tại chỗ (không append-only — khớp DATA_SOURCES Q4); §9 cập nhật equity migration; thay lễ 2026-04-10 → 2026-04-27 trong lịch (ở `market-session.ts`) |
 | 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B2):** `AgentMessage.direction` (AGENT\|USER) + index `[fromAgentId, broadcast, createdAt desc]` cho thread chat 1-1; `Signal.status` (ACTIVE\|ACTED\|REJECTED\|EXPIRED) + `rejectedAt`/`rejectNote` + index `[status, createdAt desc]` — tín hiệu giờ chờ trader phê duyệt (chu kỳ không tự tạo lệnh); audit action mới `SIGNAL_CREATED`/`SIGNAL_APPROVED`(via decision)/`SIGNAL_REJECTED`/`AGENT_CHAT`; backfill migration `scripts/set-signal-status.ts` (13 ACTED · 3 ACTIVE); API mới: `GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision` (§4 TECHNICAL_BLUEPRINT) |
+| 2026-10-06 | **v0.5 — Mở rộng 23 agents (Gen-1 DESIGN.md §4.1):** `enum AgentRole` **+18 giá trị** (tổng 23: 5 cũ + S0–S3 dịch vụ + A3/A5/A7–A9/A11–A19 chuyên gia); model `Agent` thêm field **`group`** (String, default `"research"` — research\|control\|executive\|platform\|ml) + index **`@@index([group])`**; `Agent.model` default `"glm-4.6"` → **`"space-bunny-free"`** (Opencode Zen free-tier — model runtime vẫn resolve từ `src/lib/llm.ts`); seed dùng roster `src/lib/agent-roster.ts` + script migrate idempotent `prisma/expand-agents.ts` (upsert theo `code`, không đụng lịch sử runs/messages); chu kỳ chạy 5 đợt A→E — chi tiết [TECHNICAL_BLUEPRINT.md §5](./TECHNICAL_BLUEPRINT.md) |

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Loader2, Play } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -12,11 +13,59 @@ import { useRunAgents } from "@/hooks/use-run-agents";
 import { RateLimitError, useSingleAgentRun } from "@/hooks/use-agent-actions";
 import { AgentRosterCard } from "@/components/dashboard/agent-roster-card";
 import { AgentDetailPanel } from "@/components/dashboard/agent-detail-panel";
-import type { AgentsResponse } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import type { AgentCard, AgentsResponse } from "@/lib/types";
+
+/** Mở rộng 23 agents — thứ tự 5 nhóm hiển thị trong roster (agent-roster.ts backend). */
+const GROUP_ORDER = ["research", "control", "executive", "platform", "ml"] as const;
+
+/** Mô tả ngắn mỗi nhóm dưới header section. */
+const GROUP_DESCRIPTIONS: Record<string, string> = {
+  research: "Phân tích chuyên sâu cấp tín hiệu đầu vào",
+  control: "Quyền VETO — rủi ro, phơi nhiễm, tuân thủ",
+  executive: "Tổng hợp, ra tín hiệu, thực thi",
+  platform: "Thu thập & kiểm định dữ liệu",
+  ml: "Backtest, dự báo, giả lập RL",
+};
+
+interface AgentGroupSection {
+  key: string;
+  label: string;
+  description: string;
+  agents: AgentCard[];
+}
+
+/** Chia agents theo nhóm theo GROUP_ORDER — nhóm lạ gom vào section "Khác" cuối danh sách. */
+function groupAgentsBySection(agents: AgentCard[]): AgentGroupSection[] {
+  const sections: AgentGroupSection[] = GROUP_ORDER.map((key) => ({
+    key,
+    label: "",
+    description: GROUP_DESCRIPTIONS[key] ?? "",
+    agents: [],
+  }));
+  const fallback: AgentGroupSection = {
+    key: "other",
+    label: "Nhóm khác",
+    description: "Agent chưa phân nhóm",
+    agents: [],
+  };
+  for (const a of agents) {
+    const section = sections.find((s) => s.key === a.group);
+    if (section) {
+      // groupLabel do API trả về (đồng nhất trong nhóm) — lấy của agent đầu tiên.
+      if (!section.label) section.label = a.groupLabel;
+      section.agents.push(a);
+    } else {
+      if (fallback.agents.length === 0) fallback.label = a.groupLabel || "Nhóm khác";
+      fallback.agents.push(a);
+    }
+  }
+  return [...sections, fallback].filter((s) => s.agents.length > 0);
+}
 
 /**
  * PHASE3_BLUEPRINT §4.7 — workspace "Đội Agent" (B2 thay placeholder B1):
- * roster 5 card + panel chi tiết/chat. Mobile stack dọc, desktop 2 cột xl:.
+ * roster 23 card chia 5 nhóm + panel chi tiết/chat. Mobile stack dọc, desktop 2 cột xl:.
  * Mutation "chạy riêng" sống ở đây để nút roster + panel đồng bộ trạng thái.
  */
 export function AgentsWorkspace() {
@@ -68,9 +117,12 @@ export function AgentsWorkspace() {
   }, [hasRetry]);
 
   const agents = agentsQuery.data?.agents ?? [];
+  const sections = groupAgentsBySection(agents);
   const totals = agentsQuery.data?.totals;
   const totalTokens =
     totals ? totals.totalTokensIn + totals.totalTokensOut : null;
+  // Số agent động (… khi đang tải — tránh nhảy số trên header).
+  const agentCount = agentsQuery.isLoading ? null : agents.length;
 
   return (
     <div
@@ -92,11 +144,13 @@ export function AgentsWorkspace() {
             <div className="leading-tight">
               <p className="text-base font-semibold">Đội Agent</p>
               <p className="text-xs text-muted-foreground">
-                5 agent AI{" "}
+                <span className="tabular-nums">{agentCount ?? "…"}</span> agents ·{" "}
+                {GROUP_ORDER.length} nhóm: nền tảng dữ liệu → hội đồng nghiên cứu → ủy
+                ban kiểm soát (VETO) → chủ tịch → thực thi
+                <span className="mx-1" aria-hidden="true">·</span>
                 <span className="font-mono" title={agentsQuery.data?.llm?.modelLabel}>
                   {agentsQuery.data?.llm?.model ?? "…"}
                 </span>
-                : phân tích → cảm xúc → rủi ro → chiến lược → thực thi
               </p>
             </div>
           </div>
@@ -112,7 +166,7 @@ export function AgentsWorkspace() {
               onClick={() => runAgents.mutate()}
               disabled={runAgents.isPending}
               className="min-h-11 gap-2"
-              aria-label="Chạy chu kỳ đầy đủ 5 agent"
+              aria-label={`Chạy chu kỳ đầy đủ${agentCount ? ` ${agentCount} agent` : ""}`}
             >
               {runAgents.isPending ? (
                 <>
@@ -122,7 +176,7 @@ export function AgentsWorkspace() {
               ) : (
                 <>
                   <Play className="size-4" aria-hidden="true" />
-                  Chạy chu kỳ đầy đủ
+                  Chạy chu kỳ đầy đủ{agentCount ? ` (${agentCount} agents)` : ""}
                 </>
               )}
             </Button>
@@ -130,32 +184,63 @@ export function AgentsWorkspace() {
         </CardContent>
       </Card>
 
-      {/* Body: roster (trái) + panel chi tiết/chat (phải) */}
+      {/* Body: roster (trái, cuộn dọc khi dài ở desktop) + panel chi tiết/chat (phải) */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
-        <div className="grid grid-cols-1 gap-3 self-start sm:grid-cols-2 xl:col-span-2 xl:grid-cols-1">
+        <div
+          className="flex flex-col gap-4 self-start xl:col-span-2 xl:max-h-[calc(100vh-13rem)] xl:overflow-y-auto xl:pr-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border"
+        >
           {agentsQuery.isLoading ? (
-            Array.from({ length: 5 }).map((_, i) => (
-              <Skeleton key={i} className="h-48 w-full rounded-xl" />
-            ))
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Skeleton key={i} className="h-48 w-full rounded-xl" />
+              ))}
+            </div>
           ) : agentsQuery.isError ? (
-            <p className="text-sm text-down sm:col-span-2 xl:col-span-1">
+            <p className="text-sm text-down">
               {agentsQuery.error?.message ?? "Không tải được danh sách agent."}
             </p>
           ) : (
-            agents.map((a) => (
-              <AgentRosterCard
-                key={a.id}
-                agent={a}
-                selected={selectedId === a.id}
-                onSelect={() =>
-                  setSelectedId((cur) => (cur === a.id ? cur : a.id))
-                }
-                onRun={() => handleRun(a.id)}
-                runPending={
-                  singleRun.isPending && singleRun.variables === a.id
-                }
-                retryAfterSeconds={retryAfter[a.id] ?? null}
-              />
+            sections.map((section, i) => (
+              <section
+                key={section.key}
+                aria-label={section.label}
+                className={cn("flex flex-col gap-3", i > 0 && "border-t border-border pt-4")}
+              >
+                {/* Header nhóm — dính lên khi cuộn vùng roster ở desktop */}
+                <div className="flex flex-col gap-0.5 xl:sticky xl:top-0 xl:z-10 xl:bg-background/95 xl:py-1 xl:backdrop-blur">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      {section.label}
+                    </h3>
+                    <Badge
+                      variant="secondary"
+                      className="px-1.5 py-0 text-[10px] tabular-nums"
+                    >
+                      {section.agents.length} agent
+                    </Badge>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground/80">
+                    {section.description}
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                  {section.agents.map((a) => (
+                    <AgentRosterCard
+                      key={a.id}
+                      agent={a}
+                      selected={selectedId === a.id}
+                      onSelect={() =>
+                        setSelectedId((cur) => (cur === a.id ? cur : a.id))
+                      }
+                      onRun={() => handleRun(a.id)}
+                      runPending={
+                        singleRun.isPending && singleRun.variables === a.id
+                      }
+                      retryAfterSeconds={retryAfter[a.id] ?? null}
+                    />
+                  ))}
+                </div>
+              </section>
             ))
           )}
         </div>

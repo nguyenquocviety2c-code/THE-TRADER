@@ -103,6 +103,8 @@ export function Footer() {
     refetchInterval: 60_000,
   });
   const aiCost = agents?.totals;
+  // Số agent động cho tooltip chi phí AI (fallback kiến trúc 23 agents).
+  const agentCount = agents?.agents?.length;
 
   const relativeLabel =
     lastUpdatedMs > 0 && nowMs > 0
@@ -150,7 +152,7 @@ export function Footer() {
             <Badge
               variant="outline"
               className="gap-1.5 px-2 py-0.5 text-[10px] text-muted-foreground"
-              title={`Tổng chi phí LLM ${agents?.llm?.model ?? "—"} (${agents?.llm?.modelLabel ?? "provider src/lib/llm.ts"}) của 5 agent: ${aiCost.runCount} lượt chạy · ${aiCost.totalTokensIn.toLocaleString("vi-VN")} token vào · ${aiCost.totalTokensOut.toLocaleString("vi-VN")} token ra${agents?.llm?.free ? " · model free-tier — chi phí phát sinh = $0" : ""}`}
+              title={`Tổng chi phí LLM ${agents?.llm?.model ?? "—"} (${agents?.llm?.modelLabel ?? "provider src/lib/llm.ts"}) của ${agentCount ? `${agentCount} agents` : "23 agents"}: ${aiCost.runCount} lượt chạy · ${aiCost.totalTokensIn.toLocaleString("vi-VN")} token vào · ${aiCost.totalTokensOut.toLocaleString("vi-VN")} token ra${agents?.llm?.free ? " · model free-tier — chi phí phát sinh = $0" : ""}`}
             >
               <Sparkles className="size-3" aria-hidden="true" />
               AI: ${aiCost.totalCostUsd.toFixed(2)} ·{" "}

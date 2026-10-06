@@ -1,11 +1,12 @@
 /**
  * The Trader — Seed script
  * Populates: demo user + VNDIRECT account, VN30 instruments, quotes,
- * 90-day price history, 5 agents + runs/messages/tasks, signals,
- * orders/trades/positions, risk alerts, watchlist.
+ * 90-day price history, 23 agents (roster src/lib/agent-roster.ts) + runs/
+ * messages/tasks, signals, orders/trades/positions, risk alerts, watchlist.
  * Run: bun prisma/seed.ts
  */
 import { PrismaClient } from '@prisma/client'
+import { AGENT_ROSTER } from '../src/lib/agent-roster'
 
 const db = new PrismaClient()
 
@@ -64,48 +65,16 @@ const STOCKS: StockDef[] = [
   { symbol: 'HCM', name: 'Công ty CP Chứng khoán TP.HCM', sector: 'Chứng khoán', price: 28900, vol: 0.021, volBase: 1_700_000 },
 ]
 
-const AGENTS = [
-  {
-    code: 'market-analyst',
-    name: 'Market Analyst',
-    role: 'MARKET_ANALYST' as const,
-    description:
-      'Phân tích kỹ thuật & vi mô: xu hướng giá, khối lượng, động lượng, hỗ trợ/kháng cự trên dữ liệu OHLCV của HOSE/HNX.',
-    config: JSON.stringify({ lookbackDays: 90, indicators: ['SMA20', 'SMA50', 'RSI14', 'MACD', 'BOLL'], weight: 0.35 }),
-  },
-  {
-    code: 'news-sentiment',
-    name: 'News & Sentiment',
-    role: 'NEWS_SENTIMENT' as const,
-    description:
-      'Đọc tin tức tài chính Việt Nam & quốc tế, chấm điểm cảm xúc (bullish/bearish/neutral) và cảnh báo sự kiện bất thường.',
-    config: JSON.stringify({ sources: ['cafef', 'vneconomy', 'reuters'], languages: ['vi', 'en'], weight: 0.2 }),
-  },
-  {
-    code: 'risk-manager',
-    name: 'Risk Manager',
-    role: 'RISK_MANAGER' as const,
-    description:
-      'Giám sát giới hạn rủi ro: drawdown danh mục, tỷ trọng ngành, bet sizing, stop-loss và tuân thủ quy định giao dịch.',
-    config: JSON.stringify({ maxDrawdownPct: 15, maxSectorWeightPct: 40, maxPositionPct: 25, dailyLossLimitVnd: 50000000 }),
-  },
-  {
-    code: 'portfolio-strategist',
-    name: 'Portfolio Strategist',
-    role: 'PORTFOLIO_STRATEGIST' as const,
-    description:
-      'Tổng hợp tín hiệu từ các agent, phân bổ danh mục theo phong cách cân bằng rủi ro-lợi nhuận, đề xuất tỷ trọng mục tiêu.',
-    config: JSON.stringify({ targetPositions: 8, rebalanceThresholdPct: 5, style: 'balanced' }),
-  },
-  {
-    code: 'execution-manager',
-    name: 'Execution Manager',
-    role: 'EXECUTION_MANAGER' as const,
-    description:
-      'Thực thi lệnh qua API VNDIRECT: chọn loại lệnh, tách lệnh (TWAP/VWAP), theo dõi trạng thái khớp và báo cáo sau giao dịch.',
-    config: JSON.stringify({ sliceCount: 3, maxSlippagePct: 0.5, orderType: 'LIMIT' }),
-  },
-]
+// 23 agents — nguồn duy nhất: src/lib/agent-roster.ts (code/name/role/group/
+// description/config); model mặc định space-bunny-free (runtime đọc từ llm.ts)
+const AGENTS = AGENT_ROSTER.map((a) => ({
+  code: a.code,
+  name: a.name,
+  role: a.role as never,
+  group: a.group,
+  description: a.description,
+  config: JSON.stringify(a.config),
+}))
 
 // Generate 90 trading days (skip weekends), most recent first is NOT required — generate ascending then reverse
 function generateBars(def: StockDef, days = 90) {
@@ -260,7 +229,7 @@ async function main() {
     const agent = await db.agent.create({
       data: {
         ...a,
-        model: 'glm-4.6',
+        model: 'space-bunny-free',
         status: a.code === 'news-sentiment' ? 'RUNNING' : 'IDLE',
         healthScore: randInt(88, 100),
         lastRunAt: new Date(Date.now() - randInt(2, 55) * 60_000),

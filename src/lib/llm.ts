@@ -130,6 +130,21 @@ function usageOf(completion: unknown): {
 
 const ZEN_TIMEOUT_MS = 110_000; // maxDuration route = 120s
 
+/**
+ * Reasoning effort cho model reasoning (space-bunny-free = GLM-4.6 fine-tune có
+ * chain-of-thought). Đo thực tế: không set → ~1433 reasoning tokens ≈ 19s/call;
+ * effort "low" → ~40 reasoning tokens ≈ 3.7s/call (nhanh ~5×) mà chất lượng
+ * trả lời vẫn đủ tốt cho phân tích ngắn của agent. Override qua env
+ * OPENCODE_ZEN_REASONING_EFFORT = low | medium | high | none (none = không gửi).
+ */
+function zenReasoningEffort(): string | null {
+  const wanted = env("OPENCODE_ZEN_REASONING_EFFORT").toLowerCase();
+  if (wanted === "none") return null;
+  if (wanted === "low" || wanted === "medium" || wanted === "high") return wanted;
+  // Mặc định: model họ space-bunny (reasoning) → "low"; model khác → không gửi
+  return LLM_MODEL_ID.includes("space-bunny") ? "low" : null;
+}
+
 interface ZenChatResponse {
   choices?: { message?: { content?: string } }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -146,6 +161,7 @@ async function zenChatCompletions(
     );
   }
   const baseUrl = (env("OPENCODE_ZEN_BASE_URL") || ZEN_DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const reasoningEffort = zenReasoningEffort();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ZEN_TIMEOUT_MS);
   try {
@@ -155,7 +171,11 @@ async function zenChatCompletions(
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: LLM_MODEL_ID, messages }),
+      body: JSON.stringify({
+        model: LLM_MODEL_ID,
+        messages,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      }),
       signal: controller.signal,
     });
     const bodyText = await res.text();

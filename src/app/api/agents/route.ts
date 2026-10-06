@@ -2,25 +2,23 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { LLM_MODEL_ID, llmStatus } from "@/lib/llm";
+import { ROLE_LABELS, GROUP_LABELS, type AgentGroup } from "@/lib/agent-roster";
 
 export const dynamic = "force-dynamic";
 
-/** Vietnamese display labels for agent roles. */
-export const ROLE_LABELS: Record<string, string> = {
-  MARKET_ANALYST: "Phân tích thị trường",
-  NEWS_SENTIMENT: "Tin tức & cảm xúc",
-  RISK_MANAGER: "Quản trị rủi ro",
-  PORTFOLIO_STRATEGIST: "Chiến lược danh mục",
-  EXECUTION_MANAGER: "Thực thi lệnh",
-};
-
 /**
- * GET /api/agents — all 5 agents (parsed config, pending tasks, last run)
- * plus the 12 most recent tasks across agents.
+ * GET /api/agents — toàn bộ 23 agents (parsed config, pending tasks, last run)
+ * + 12 task gần nhất across agents.
  *
  * PHASE3 B2 §4.2: mỗi agent kèm `stats` (runCount, successRate, tokens,
  * cost, lastError, chatCount) + `totals` chi phí AI toàn đội (§5.5).
+ * Mở rộng 23 agents: thêm `group`/`groupLabel` (research|control|executive|
+ * platform|ml) cho UI xếp nhóm roster.
  */
+
+function groupLabelOf(group: string): string {
+  return GROUP_LABELS[group as AgentGroup] ?? group;
+}
 export async function GET() {
   try {
     const [agents, tasks, pendingCounts, lastRuns, runStats, chatCounts, errorRuns] =
@@ -129,6 +127,8 @@ export async function GET() {
         name: a.name,
         role: a.role,
         roleLabel: ROLE_LABELS[a.role] ?? a.role,
+        group: a.group,
+        groupLabel: groupLabelOf(a.group),
         description: a.description,
         model: LLM_MODEL_ID, // model runtime (provider đang chạy) — DB chỉ lưu mặc định
         status: a.status,

@@ -36,6 +36,25 @@ enum AgentRole {
   RISK_MANAGER // quản trị rủi ro
   PORTFOLIO_STRATEGIST // chiến lược danh mục
   EXECUTION_MANAGER // thực thi lệnh
+  // ── Mở rộng 23 agents (Gen-1 §4.1): S-dịch vụ + A-chuyên gia ──
+  DATA_COLLECTOR // S0 — thu thập dữ liệu thị trường
+  NOTIFICATION_OFFICER // S1 — thông báo & tổng hợp
+  FEATURE_STORE // S2 — kho đặc trưng
+  RL_GYM // S3 — môi trường giả lập RL
+  FAIR_VALUE // A3 — định giá hợp lý
+  LIQUIDITY // A5 — thanh khoản & dòng tiền
+  EXPOSURE // A7 — phơi nhiễm danh mục (VETO)
+  COMPLIANCE // A8 — tuân thủ quy định (VETO)
+  DATA_INTEGRITY // A9 — toàn vẹn dữ liệu
+  SETTLEMENT // A11 — thanh toán bù trừ
+  CASH_MANAGEMENT // A12 — quản lý dòng tiền
+  LEARNING_RAG // A13 — học tập & RAG
+  BACKTEST // A14 — kiểm định lịch sử
+  ML_FORECAST // A15 — dự báo machine learning
+  RL_POLICY // A16 — chính sách RL
+  DL_TRAINER // A17 — huấn luyện deep learning
+  RL_TRAINER // A18 — huấn luyện RL
+  MODEL_REGISTRY // A19 — đăng ký mô hình
 }
 
 enum AgentStatus {
@@ -227,8 +246,11 @@ model Agent {
   code String @unique // e.g. "market-analyst"
   name String
   role AgentRole
+  // Nhóm hiển thị & điều phối chu kỳ 23 agents (agent-roster.ts):
+  // research | control | executive | platform | ml
+  group String @default("research")
   description String
-  model String @default("glm-4.6") // LLM backbone
+  model String @default("space-bunny-free") // LLM backbone (mặc định — runtime từ llm.ts)
   status AgentStatus @default(IDLE)
   config String @default("{}") // JSON: thresholds, weights
   lastRunAt DateTime?
@@ -241,6 +263,8 @@ model Agent {
   messagesTo AgentMessage[] @relation("ToAgent")
   tasks AgentTask[]
   signals Signal[]
+
+  @@index([group])
 }
 
 model AgentRun {

@@ -150,6 +150,9 @@ export interface AgentCard {
   name: string;
   role: string;
   roleLabel: string;
+  /** Mở rộng 23 agents — nhóm điều phối & hiển thị (agent-roster.ts). */
+  group: string;
+  groupLabel: string;
   description: string;
   model: string;
   status: string;
@@ -315,7 +318,8 @@ export interface AgentRunResult {
   error: string | null;
 }
 
-/** Response of the full multi-agent cycle — POST /api/agents/run (blueprint §5.2). */
+/** Response of the full multi-agent cycle — POST /api/agents/run (blueprint §5.2).
+ *  Mở rộng 23 agents: thêm `waves` tổng kết các đợt đã chạy. */
 export interface RunCycleResponse {
   runId: string | null;
   messages: AgentMessageRow[];
@@ -341,6 +345,15 @@ export interface RunCycleResponse {
   } | null;
   failures: string[];
   durationMs: number;
+  /** Mở rộng 23 agents — tổng kết các đợt chu kỳ. */
+  waves?: {
+    architecture: string;
+    agentsRan: number;
+    platform: number;
+    researchAndMl: number;
+    control: number;
+    executive: number;
+  };
 }
 
 /** Back-compat alias (older single-agent response shape). */

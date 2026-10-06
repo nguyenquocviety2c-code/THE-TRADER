@@ -4,6 +4,8 @@ import { toPlain } from "@/lib/serialize";
 import { updateAgentHealth } from "@/lib/health";
 import { buildSingleRunPrompt } from "@/lib/agent-context";
 import { checkAgentRateLimit } from "@/lib/agent-ratelimit";
+import { ROSTER_BY_CODE } from "@/lib/agent-roster";
+import { runServiceAgent } from "@/lib/agent-service-runs";
 import {
   callLlmWithRetry,
   estimateTokens,
@@ -14,13 +16,16 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 /**
- * POST /api/agents/[id]/run — chạy riêng 1 agent (PHASE3_BLUEPRINT §4.3).
+ * POST /api/agents/[id]/run — chạy riêng 1 agent (PHASE3_BLUEPRINT §4.3,
+ * mở rộng 23 agents).
  *
  * Luồng: guard 404/409/400 → rate-limit 60s (DB là nguồn chân lý) →
- * buildSingleRunPrompt(code) → LLM (provider src/lib/llm.ts — Opencode Zen
- * space-bunny-free khi có key, GLM-4.6 trong sandbox) → parse JSON theo vai →
- * AgentRun + AgentMessage (broadcast) + health + audit AGENT_RUN_COMPLETED
- * (mode "single"). Lỗi LLM → persistRun FAILED + 502 (pattern run route).
+ *  - agent LLM (6): buildSingleRunPrompt(code) → LLM (Opencode Zen
+ *    space-bunny-free khi có key, GLM-4.6 trong sandbox) → parse JSON theo vai
+ *  - agent service (17): runServiceAgent(code) — deterministic từ DB,
+ *    0 chi phí LLM, ~0.2–1.5s
+ * → AgentRun + AgentMessage (broadcast) + health + audit AGENT_RUN_COMPLETED
+ * (mode "single"). Lỗi → persistRun FAILED + 502 (pattern run route).
  */
 
 /** Robustly extract the first JSON object from an LLM response. */
@@ -179,6 +184,86 @@ export async function POST(
     await db.agent.update({ where: { id: agent.id }, data: { status: "RUNNING" } });
 
     const startedAt = Date.now();
+
+    // ── Service agent: chạy deterministic (mở rộng 23 agents — 0 LLM) ──
+    const rosterEntry = ROSTER_BY_CODE.get(agent.code);
+    if (rosterEntry?.kind === "service") {
+      try {
+        const result = await runServiceAgent(agent.code);
+        const run = await persistRun(
+          agent.id,
+          true,
+          startedAt,
+          0,
+          0,
+          JSON.stringify({ mode: "single", ...result.output }),
+          null
+        );
+        const message = await db.agentMessage.create({
+          data: {
+            fromAgentId: agent.id,
+            broadcast: true, // tin chạy riêng vẫn vào broadcast feed (§4.3)
+            direction: "AGENT",
+            content: result.content,
+            reasoning: result.reasoning || null,
+            sentiment: result.sentiment ?? null,
+          },
+        });
+        await db.auditLog.create({
+          data: {
+            action: "AGENT_RUN_COMPLETED",
+            entity: "Agent",
+            entityId: agent.id,
+            after: JSON.stringify({
+              mode: "single",
+              kind: "service",
+              tokensIn: 0,
+              tokensOut: 0,
+              costUsd: 0,
+              durationMs: run.durationMs,
+            }),
+          },
+        });
+        return NextResponse.json(
+          toPlain({
+            agent: { id: agent.id, code: agent.code, name: agent.name },
+            message: {
+              id: message.id,
+              content: message.content,
+              reasoning: message.reasoning,
+              sentiment: message.sentiment,
+            },
+            run: {
+              id: run.id,
+              tokensIn: 0,
+              tokensOut: 0,
+              costUsd: run.costUsd,
+              durationMs: run.durationMs,
+              taskStatus: "COMPLETED",
+            },
+          })
+        );
+      } catch (err) {
+        console.error("[api/agents/[id]/run] service agent failed:", err);
+        const errorMessage =
+          err instanceof Error ? err.message : "Dịch vụ agent lỗi.";
+        await persistRun(
+          agent.id,
+          false,
+          startedAt,
+          0,
+          0,
+          null,
+          errorMessage
+        ).catch(() => null);
+        return NextResponse.json(
+          { error: `Agent dịch vụ lỗi: ${errorMessage}` },
+          { status: 500 }
+        );
+      }
+    }
+
+    // ── LLM agent: prompt theo vai + ghi chú tuỳ chọn của trader ──
     try {
       // Prompt theo vai (block chọn lọc như run route) + ghi chú tuỳ chọn của trader
       const { system, user } = await buildSingleRunPrompt(agent.code);

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
-import { ROLE_LABELS } from "@/app/api/agents/route";
+import { ROLE_LABELS, GROUP_LABELS, type AgentGroup } from "@/lib/agent-roster";
 import { mapSignalRow } from "@/lib/signal-execution";
 import { LLM_MODEL_ID } from "@/lib/llm";
 
@@ -131,6 +131,8 @@ export async function GET(
           name: agent.name,
           role: agent.role,
           roleLabel: ROLE_LABELS[agent.role] ?? agent.role,
+          group: agent.group,
+          groupLabel: GROUP_LABELS[agent.group as AgentGroup] ?? agent.group,
           description: agent.description,
           model: LLM_MODEL_ID, // model runtime (provider đang chạy) — DB chỉ lưu mặc định
           status: agent.status,

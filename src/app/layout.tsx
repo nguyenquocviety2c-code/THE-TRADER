@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "The Trader — Multi-Agent Trading System",
   description:
-    "Hệ thống giao dịch đa tác tử (multi-agent) cho VNDIRECT: bảng giá VN30 realtime, danh mục, tín hiệu AI, quản trị rủi ro và luồng phân tích từ 5 agent thông minh.",
+    "Hệ thống giao dịch đa tác tử (multi-agent) cho VNDIRECT: bảng giá VN30 realtime, danh mục, tín hiệu AI, quản trị rủi ro và luồng phân tích từ đội 23 agent AI (5 nhóm: nghiên cứu, kiểm soát VETO, điều hành, nền tảng dữ liệu, học máy).",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

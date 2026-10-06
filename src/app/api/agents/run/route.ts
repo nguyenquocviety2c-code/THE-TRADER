@@ -2,44 +2,60 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
 import { updateAgentHealth } from "@/lib/health";
-import {
-  callLlmWithRetry,
-  estimateTokens,
-  llmCostUsd,
-} from "@/lib/llm";
+import { callLlmWithRetry, estimateTokens, llmCostUsd } from "@/lib/llm";
 import {
   ROLE_PROMPTS,
   buildMarketBlock,
   buildNewsBlock,
   buildFlowsBlock,
   buildOpenSignalsBlock,
+  buildValuationBlock,
+  buildLiquidityBlock,
 } from "@/lib/agent-context";
+import { AGENT_ROSTER } from "@/lib/agent-roster";
+import { runServiceAgent, type ServiceRunResult } from "@/lib/agent-service-runs";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 /**
- * POST /api/agents/run — full multi-agent analysis cycle
- * (TECHNICAL_BLUEPRINT §5.2):
+ * POST /api/agents/run — chu kỳ phân tích đầy đủ 23 AGENTS (mở rộng Gen-1 §4.1):
  *
- *  1. Snapshot: quotes, 90-day bars (top liquid), positions, account, risk alerts
- *     — qua các builder src/lib/agent-context.ts (PHASE3_BLUEPRINT §4.6)
- *  2. Role prompts dùng chung ROLE_PROMPTS (single-run & chat cùng nguồn)
- *  3. Run 3 analysis agents in parallel (market / news / risk) → AgentMessage + AgentRun
- *  4. Portfolio Strategist consolidates → AgentMessage + AgentRun + Signal
- *  5. Execution Manager (deterministic) → ghi nhận tín hiệu, KHÔNG tự tạo lệnh —
- *     tín hiệu để status ACTIVE chờ trader phê duyệt (PHASE3_BLUEPRINT §4.5/§4.9)
- *  6. AuditLog: SIGNAL_CREATED · AGENT_RUN_COMPLETED
+ *  ĐỢT A · Nền tảng dữ liệu (4 service, song song — 0 LLM):
+ *    data-collector · notification-officer · feature-store · data-integrity
+ *  ĐỢT B · Hội đồng Nghiên cứu + Phòng Học máy:
+ *    service song song (8): ml-forecast · backtest · learning-rag · rl-gym ·
+ *    rl-policy · dl-trainer · rl-trainer · model-registry
+ *    LLM tuần tự (4): market-analyst · fair-value · news-sentiment · liquidity
+ *  ĐỢT C · Ủy ban Kiểm soát (VETO): risk-manager (LLM) + exposure · compliance
+ *    (service, chạy song song với risk-manager)
+ *  ĐỢT D · Chủ tịch Hội đồng: portfolio-strategist (LLM) tổng hợp TOÀN BỘ
+ *    báo cáo 20 agents ở trên → MỘT tín hiệu
+ *  ĐỢT E · Thực thi & hậu cần: execution-manager (ghi nhận tín hiệu, KHÔNG tự
+ *    tạo lệnh — chờ trader phê duyệt §4.5/§4.9) + settlement · cash-management
+ *
+ *  LLM provider: src/lib/llm.ts — Opencode Zen space-bunny-free khi có key
+ *  (chạy được ngoài sandbox, free-tier $0), GLM-4.6 khi trong sandbox.
+ *  Service agents deterministic từ DB — không tốn tokens.
  */
-
-const ANALYST_CODES = ["market-analyst", "news-sentiment", "risk-manager"] as const;
-const STRATEGIST_CODE = "portfolio-strategist";
-const EXECUTOR_CODE = "execution-manager";
-const ALL_CODES = [...ANALYST_CODES, STRATEGIST_CODE, EXECUTOR_CODE] as const;
 
 /** F-203 (audit 19-b): rate-limit chu kỳ — chống spam chi phí LLM không giới hạn. */
 const CYCLE_COOLDOWN_MS = 60_000;
 let lastCycleStartedAt = 0;
+
+// ── Sơ đồ đợt (tất cả code đều nằm trong AGENT_ROSTER 23 agents) ──
+const WAVE_A_CODES = ["data-collector", "notification-officer", "feature-store", "data-integrity"] as const;
+const WAVE_B_SERVICE_CODES = [
+  "ml-forecast", "backtest", "learning-rag", "rl-gym",
+  "rl-policy", "dl-trainer", "rl-trainer", "model-registry",
+] as const;
+const WAVE_B_LLM_CODES = ["market-analyst", "fair-value", "news-sentiment", "liquidity"] as const;
+const WAVE_C_LLM_CODES = ["risk-manager"] as const;
+const WAVE_C_SERVICE_CODES = ["exposure", "compliance"] as const;
+const CHAIRMAN_CODE = "portfolio-strategist";
+const WAVE_E_SERVICE_CODES = ["settlement", "cash-management"] as const;
+const EXECUTOR_CODE = "execution-manager";
+const ALL_CODES = AGENT_ROSTER.map((a) => a.code);
 
 function round100(v: number): number {
   return Math.max(0, Math.round(v / 100) * 100);
@@ -95,7 +111,6 @@ async function persistRun(
 ): Promise<{ id: string; durationMs: number }> {
   const finishedAt = new Date();
   const durationMs = finishedAt.getTime() - startedAt;
-  const costUsd = llmCostUsd(tokensIn, tokensOut);
   const run = await db.agentRun.create({
     data: {
       agentId,
@@ -105,7 +120,7 @@ async function persistRun(
       durationMs,
       tokensIn,
       tokensOut,
-      costUsd,
+      costUsd: llmCostUsd(tokensIn, tokensOut), // space-bunny-free = $0; GLM-4.6 sandbox tính thật
       output,
       error,
     },
@@ -159,16 +174,18 @@ export async function POST() {
 
   const cycleStart = Date.now();
 
-  // ── Load the 5 agents ────────────────────────────────────────────
+  // ── Load toàn bộ 23 agents ───────────────────────────────────────
   const agents = await db.agent.findMany({
-    where: { code: { in: [...ALL_CODES] } },
+    where: { code: { in: ALL_CODES } },
     select: { id: true, code: true, config: true, healthScore: true },
   });
   const byCode = new Map(agents.map((a) => [a.code, a]));
   const missing = ALL_CODES.filter((c) => !byCode.get(c));
   if (missing.length > 0) {
     return NextResponse.json(
-      { error: `Thiếu agent trong hệ thống: ${missing.join(", ")}.` },
+      {
+        error: `Thiếu agent trong hệ thống: ${missing.join(", ")}. Chạy "bun prisma/expand-agents.ts" để đồng bộ roster 23 agents.`,
+      },
       { status: 404 }
     );
   }
@@ -179,50 +196,106 @@ export async function POST() {
     data: { status: "RUNNING" },
   });
 
+  // Kết quả phân tích theo code (đưa vào digest cho Chủ tịch)
+  const analyses = new Map<string, AgentAnalysis>();
+  const createdMessages: {
+    id: string;
+    fromAgentId: string;
+    content: string;
+    reasoning: string | null;
+    sentiment: string | null;
+  }[] = [];
+  const failures: string[] = [];
+
+  /** Chạy + persist MỘT service agent (deterministic). */
+  async function runOneServiceAgent(code: string): Promise<void> {
+    const agent = byCode.get(code)!;
+    const startedAt = Date.now();
+    try {
+      const result: ServiceRunResult = await runServiceAgent(code);
+      await persistRun(
+        agent.id,
+        true,
+        startedAt,
+        0,
+        0,
+        JSON.stringify(result.output),
+        null
+      );
+      const message = await persistMessage(agent.id, result.content, result.reasoning, result.sentiment);
+      createdMessages.push({
+        id: message.id,
+        fromAgentId: agent.id,
+        content: result.content,
+        reasoning: result.reasoning || null,
+        sentiment: result.sentiment,
+      });
+      analyses.set(code, {
+        content: result.content,
+        reasoning: result.reasoning,
+        sentiment: result.sentiment,
+      });
+    } catch (err) {
+      failures.push(code);
+      console.error(`[api/agents/run] service agent ${code} failed:`, err);
+      await persistRun(
+        agent.id,
+        false,
+        startedAt,
+        0,
+        0,
+        null,
+        err instanceof Error ? err.message : "Lỗi dịch vụ."
+      ).catch(() => undefined);
+    }
+  }
+
   try {
     // ── 1. Snapshot — builder dùng chung (PHASE3_BLUEPRINT §4.6) ────
-    const [market, newsBlock, flowsBlock, openSignalsBlock] = await Promise.all([
-      buildMarketBlock(),
-      buildNewsBlock(),
-      buildFlowsBlock(),
-      buildOpenSignalsBlock(),
-    ]);
+    const [market, newsBlock, flowsBlock, openSignalsBlock, valuationBlock, liquidityBlock] =
+      await Promise.all([
+        buildMarketBlock(),
+        buildNewsBlock(),
+        buildFlowsBlock(),
+        buildOpenSignalsBlock(),
+        buildValuationBlock(),
+        buildLiquidityBlock(),
+      ]);
     const marketBlock = market.block;
 
-    // ── 2. Role prompts (ROLE_PROMPTS — cùng nguồn với single-run/chat) ──
+    // ── 2. Role prompts cho các agent LLM ──────────────────────────
     const prompts: Record<string, { system: string; user: string }> = {
       "market-analyst": {
         system: ROLE_PROMPTS["market-analyst"].system,
         user: [marketBlock, flowsBlock].join("\n\n"),
       },
+      "fair-value": {
+        system: ROLE_PROMPTS["fair-value"].system,
+        user: [marketBlock, valuationBlock].join("\n\n"),
+      },
       "news-sentiment": {
         system: ROLE_PROMPTS["news-sentiment"].system,
         user: [marketBlock, newsBlock, flowsBlock].join("\n\n"),
+      },
+      liquidity: {
+        system: ROLE_PROMPTS["liquidity"].system,
+        user: [marketBlock, liquidityBlock].join("\n\n"),
       },
       "risk-manager": {
         system: ROLE_PROMPTS["risk-manager"].system,
         user: [marketBlock, flowsBlock].join("\n\n"),
       },
-      "portfolio-strategist": {
-        system: ROLE_PROMPTS["portfolio-strategist"].system,
-        user: [marketBlock, newsBlock, flowsBlock, `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`].join(
-          "\n\n"
-        ),
-      },
     };
 
-    // ── 3. Three analysis agents — sequential (SDK rate limits concurrency) ──
-    const analyses: Partial<Record<(typeof ANALYST_CODES)[number], AgentAnalysis>> = {};
-    const createdMessages: {
-      id: string;
-      fromAgentId: string;
-      content: string;
-      reasoning: string | null;
-      sentiment: string | null;
-    }[] = [];
-    const failures: string[] = [];
+    // ══ ĐỢT A · Nền tảng dữ liệu (4 service, song song) ════════════
+    await Promise.all(WAVE_A_CODES.map((code) => runOneServiceAgent(code)));
 
-    for (const code of ANALYST_CODES) {
+    // ══ ĐỢT B · Nghiên cứu + Học máy ═══════════════════════════════
+    // Service agents (8) song song trước — nhanh, 0 LLM
+    await Promise.all(WAVE_B_SERVICE_CODES.map((code) => runOneServiceAgent(code)));
+
+    // LLM research agents (4) tuần tự — tôn trọng rate-limit gateway
+    for (const code of WAVE_B_LLM_CODES) {
       const agent = byCode.get(code)!;
       const startedAt = Date.now();
       try {
@@ -248,7 +321,7 @@ export async function POST() {
             ? (sentimentRaw as AgentAnalysis["sentiment"])
             : null;
 
-        const run = await persistRun(
+        await persistRun(
           agent.id,
           true,
           startedAt,
@@ -265,8 +338,7 @@ export async function POST() {
           reasoning: reasoning || null,
           sentiment,
         });
-        analyses[code] = { content, reasoning, sentiment };
-        void run;
+        analyses.set(code, { content, reasoning, sentiment });
       } catch (err) {
         failures.push(code);
         console.error(`[api/agents/run] agent ${code} failed:`, err);
@@ -282,36 +354,94 @@ export async function POST() {
       }
     }
 
-    // All three analysts failed → the cycle cannot be consolidated
-    if (failures.length === ANALYST_CODES.length) {
-      // F-205 (audit 19-b): không để strategist/executor kẹt RUNNING khi chu kỳ bỏ cuộc sớm
+    // Cả 4 agent nghiên cứu LLM đều lỗi → không thể tổng hợp
+    if (WAVE_B_LLM_CODES.every((c) => failures.includes(c))) {
+      // F-205 (audit 19-b): không để các agent sau kẹt RUNNING khi chu kỳ bỏ cuộc sớm
       await db.agent
         .updateMany({
-          where: { code: { in: [STRATEGIST_CODE, EXECUTOR_CODE] } },
+          where: { code: { in: ALL_CODES.filter((c) => !failures.includes(c) && !analyses.has(c)) } },
           data: { status: "IDLE" },
         })
         .catch(() => undefined);
       return NextResponse.json(
         {
           error:
-            "Cả 3 agent phân tích đều lỗi lúc này (mô hình AI không phản hồi). Vui lòng thử lại sau ít phút.",
+            "Cả 4 agent nghiên cứu (Market/Fair Value/News/Liquidity) đều lỗi lúc này (mô hình AI không phản hồi). Vui lòng thử lại sau ít phút.",
           failures,
         },
         { status: 502 }
       );
     }
 
-    // ── 4. Portfolio Strategist consolidation ─────────────────────
-    const strategistAgent = byCode.get(STRATEGIST_CODE)!;
+    // ══ ĐỢT C · Ủy ban Kiểm soát (VETO) — risk LLM + 2 service ═════
+    await Promise.all([
+      (async () => {
+        const code = "risk-manager";
+        const agent = byCode.get(code)!;
+        const startedAt = Date.now();
+        try {
+          const { raw, tokensIn, tokensOut } = await callLlmWithRetry(
+            prompts[code].system,
+            prompts[code].user
+          );
+          const parsed = parseJsonBlock<{ content: unknown; reasoning: unknown }>(raw);
+          const content =
+            typeof parsed?.content === "string" && parsed.content.trim()
+              ? parsed.content.trim()
+              : raw.trim();
+          const reasoning =
+            typeof parsed?.reasoning === "string" ? parsed.reasoning.trim() : "";
+          await persistRun(
+            agent.id,
+            true,
+            startedAt,
+            tokensIn,
+            tokensOut,
+            JSON.stringify({ content, reasoning }),
+            null
+          );
+          const message = await persistMessage(agent.id, content, reasoning, null);
+          createdMessages.push({
+            id: message.id,
+            fromAgentId: agent.id,
+            content,
+            reasoning: reasoning || null,
+            sentiment: null,
+          });
+          analyses.set(code, { content, reasoning, sentiment: null });
+        } catch (err) {
+          failures.push(code);
+          console.error(`[api/agents/run] agent ${code} failed:`, err);
+          await persistRun(
+            agent.id,
+            false,
+            startedAt,
+            estimateTokens(prompts[code].system + prompts[code].user),
+            0,
+            null,
+            err instanceof Error ? err.message : "Lỗi không xác định."
+          ).catch(() => undefined);
+        }
+      })(),
+      ...WAVE_C_SERVICE_CODES.map((code) => runOneServiceAgent(code)),
+    ]);
+
+    // ══ ĐỢT D · Chủ tịch Hội đồng — tổng hợp 20 agents ═════════════
+    const digestLines = AGENT_ROSTER.filter((a) => analyses.has(a.code)).map((a) => {
+      const an = analyses.get(a.code)!;
+      const truncated =
+        an.content.length > 160 ? `${an.content.slice(0, 160).trimEnd()}…` : an.content;
+      return `- ${a.name} (${a.gen1}): ${truncated}`;
+    });
+    const strategistAgent = byCode.get(CHAIRMAN_CODE)!;
     const strategistUserPrompt = [
-      prompts[STRATEGIST_CODE].user,
+      [marketBlock, newsBlock, flowsBlock, valuationBlock, liquidityBlock].join("\n\n"),
+      `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`,
       "",
-      "KẾT QUẢ TỪ 3 AGENT PHÂN TÍCH (để tổng hợp):",
-      `- Market Analyst: ${analyses["market-analyst"]?.content ?? "(agent lỗi — bỏ qua)"}`,
-      `- News & Sentiment: ${analyses["news-sentiment"]?.content ?? "(agent lỗi — bỏ qua)"}`,
-      `- Risk Manager: ${analyses["risk-manager"]?.content ?? "(agent lỗi — bỏ qua)"}`,
+      `BÁO CÁO TỪ ${digestLines.length} AGENTS CỦA HỘI ĐỒNG (để tổng hợp):`,
+      ...digestLines,
       "",
-      "Hãy tổng hợp và đưa ra tín hiệu theo đúng định dạng JSON đã yêu cầu.",
+      "Hãy tổng hợp toàn bộ và đưa ra MỘT tín hiệu theo đúng định dạng JSON đã yêu cầu.",
     ].join("\n");
 
     const strategistStart = Date.now();
@@ -319,7 +449,7 @@ export async function POST() {
     let strategistRunId = "";
     try {
       const { raw, tokensIn, tokensOut } = await callLlmWithRetry(
-        prompts[STRATEGIST_CODE].system,
+        ROLE_PROMPTS[CHAIRMAN_CODE].system,
         strategistUserPrompt
       );
       const parsed = parseJsonBlock<{
@@ -403,22 +533,22 @@ export async function POST() {
       });
     } catch (strategistErr) {
       console.error("[api/agents/run] strategist failed:", strategistErr);
-      failures.push(STRATEGIST_CODE);
+      failures.push(CHAIRMAN_CODE);
       await persistRun(
         strategistAgent.id,
         false,
         strategistStart,
-        estimateTokens(prompts[STRATEGIST_CODE].system + strategistUserPrompt),
+        estimateTokens(ROLE_PROMPTS[CHAIRMAN_CODE].system + strategistUserPrompt),
         0,
         null,
         strategistErr instanceof Error ? strategistErr.message : "Lỗi tổng hợp."
       ).catch(() => undefined);
     }
 
-    // ── 5. Execution Manager — ghi nhận tín hiệu, chờ phê duyệt ────
-    // PHASE3_BLUEPRINT §4.5/§4.9: chu kỳ KHÔNG còn tự tạo Order — tín hiệu
-    // BUY/SELL để status ACTIVE, trader phê duyệt/từ chối qua
-    // POST /api/signals/[id]/decision.
+    // ══ ĐỢT E · Thực thi & hậu cần ═════════════════════════════════
+    // Execution Manager — ghi nhận tín hiệu, chờ phê duyệt (PHASE3_BLUEPRINT
+    // §4.5/§4.9): chu kỳ KHÔNG tự tạo Order — tín hiệu BUY/SELL giữ status
+    // ACTIVE, trader phê duyệt/từ chối qua POST /api/signals/[id]/decision.
     const executorAgent = byCode.get(EXECUTOR_CODE)!;
     let createdSignal: {
       id: string;
@@ -480,7 +610,7 @@ export async function POST() {
       let executionReasoning: string;
       let execOutput: Record<string, unknown>;
       if (sig.direction !== "HOLD") {
-        executionContent = `Nhận tín hiệu ${sig.direction === "BUY" ? "MUA" : "BÁN"} ${sig.symbol} (điểm ${sig.score}/100, tin cậy ${sig.confidence}). Đã ghi nhận tín hiệu — chờ phê duyệt của trader (nút Phê duyệt/từ chối ở luồng tin nhắn hoặc tab Tín hiệu).`;
+        executionContent = `Nhận tín hiệu ${sig.direction === "BUY" ? "MUA" : "BÁN"} ${sig.symbol} (điểm ${sig.score}/100, tin cậy ${sig.confidence}) từ Chủ tịch Hội đồng sau khi hội đủ báo cáo của 22 agents. Đã ghi nhận tín hiệu — chờ phê duyệt của trader (nút Phê duyệt/từ chối ở luồng tin nhắn hoặc tab Tín hiệu).`;
         executionReasoning =
           "Tín hiệu ghi nhận ở trạng thái ACTIVE — chờ trader phê duyệt trước khi tạo lệnh.";
         execOutput = { signalId: signalRow.id, awaitingApproval: true };
@@ -529,15 +659,21 @@ export async function POST() {
       executionRunId = execRun.id;
     }
 
-    // ── 6. Cycle-level audit log ──────────────────────────────────
+    // Settlement + Cash Management (service, song song)
+    await Promise.all(WAVE_E_SERVICE_CODES.map((code) => runOneServiceAgent(code)));
+
+    // ── Cycle-level audit log ──────────────────────────────────────
     const cycleDurationMs = Date.now() - cycleStart;
+    const ranCount = analyses.size + (strategist ? 1 : 0) + (executionRunId ? 1 : 0);
     await db.auditLog.create({
       data: {
         action: "AGENT_RUN_COMPLETED",
         entity: "AgentRun",
         entityId: strategistRunId || executionRunId || null,
         after: JSON.stringify({
+          architecture: "23-agents",
           messages: createdMessages.length,
+          agentsRan: ranCount,
           signal: createdSignal?.symbol ?? null,
           order: null, // §4.9 — chu kỳ không còn tự tạo lệnh
           durationMs: cycleDurationMs,
@@ -546,7 +682,7 @@ export async function POST() {
       },
     });
 
-    // ── Response (shape per TECHNICAL_BLUEPRINT §4) ───────────────
+    // ── Response (shape per TECHNICAL_BLUEPRINT §4) ────────────────
     const messageRows = await db.agentMessage.findMany({
       where: { id: { in: createdMessages.map((m) => m.id) } },
       include: { fromAgent: { select: { code: true, name: true, role: true } } },
@@ -572,6 +708,15 @@ export async function POST() {
         order: null, // giữ trường cho client cũ — lệnh chỉ tạo khi trader phê duyệt
         failures,
         durationMs: cycleDurationMs,
+        // Mở rộng 23 agents — tổng kết các đợt đã chạy
+        waves: {
+          architecture: "23-agents",
+          agentsRan: ranCount,
+          platform: WAVE_A_CODES.length,
+          researchAndMl: WAVE_B_SERVICE_CODES.length + WAVE_B_LLM_CODES.length,
+          control: WAVE_C_LLM_CODES.length + WAVE_C_SERVICE_CODES.length,
+          executive: 2 + WAVE_E_SERVICE_CODES.length, // strategist + executor + 2 service
+        },
       })
     );
   } catch (err) {

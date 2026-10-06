@@ -4,12 +4,30 @@ import * as React from "react";
 import { formatDistanceToNow } from "date-fns";
 import { vi } from "date-fns/locale";
 import {
+  Bell,
+  BookOpen,
+  Boxes,
   Brain,
   ChartCandlestick,
+  Compass,
+  Cpu,
+  Database,
+  Droplets,
+  FileCheck2,
+  Gamepad2,
+  GraduationCap,
+  History,
+  Layers,
   Loader2,
   Newspaper,
   Play,
+  Radar,
+  Receipt,
+  Scale,
+  ScanSearch,
   ShieldAlert,
+  TrendingUp,
+  Wallet,
   Zap,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +36,8 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import type { AgentCard } from "@/lib/types";
 
-/** Icon theo vai agent — dùng chung roster card + detail panel (PHASE3 §4.7). */
+/** Icon theo vai agent — dùng chung roster card + detail panel (PHASE3 §4.7).
+ *  Mở rộng 23 agents: đủ icon cho toàn bộ role enum phía backend. */
 export const AGENT_ROLE_ICONS: Record<
   string,
   React.ComponentType<{ className?: string }>
@@ -28,6 +47,24 @@ export const AGENT_ROLE_ICONS: Record<
   RISK_MANAGER: ShieldAlert,
   PORTFOLIO_STRATEGIST: Brain,
   EXECUTION_MANAGER: Zap,
+  FAIR_VALUE: Scale,
+  LIQUIDITY: Droplets,
+  ML_FORECAST: TrendingUp,
+  EXPOSURE: Radar,
+  COMPLIANCE: FileCheck2,
+  SETTLEMENT: Receipt,
+  CASH_MANAGEMENT: Wallet,
+  DATA_COLLECTOR: Database,
+  NOTIFICATION_OFFICER: Bell,
+  FEATURE_STORE: Boxes,
+  DATA_INTEGRITY: ScanSearch,
+  LEARNING_RAG: BookOpen,
+  BACKTEST: History,
+  RL_GYM: Gamepad2,
+  RL_POLICY: Compass,
+  DL_TRAINER: Cpu,
+  RL_TRAINER: GraduationCap,
+  MODEL_REGISTRY: Layers,
 };
 
 export const AGENT_STATUS_DOT: Record<
@@ -126,21 +163,32 @@ export function AgentRosterCard({
             <p className="text-[11px] text-muted-foreground">{agent.roleLabel}</p>
           </div>
         </div>
-        <span className="flex items-center gap-1.5 pt-1" title={dot.label}>
-          <span className="relative flex size-2">
-            {running && (
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-60" />
-            )}
-            <span
-              className={cn(
-                "relative inline-flex size-2 rounded-full",
-                agent.status === "ERROR" ? "bg-down" : dot.className
+        <div className="flex items-center gap-1.5 pt-1">
+          {agent.group === "control" && (
+            <Badge
+              variant="outline"
+              className="border-amber-500/40 px-1.5 py-0 text-[10px] font-semibold tracking-wide text-amber-600 dark:text-amber-400"
+              title="Ủy ban Kiểm soát — có quyền phủ quyết (VETO) tín hiệu"
+            >
+              VETO
+            </Badge>
+          )}
+          <span className="flex items-center gap-1.5" title={dot.label}>
+            <span className="relative flex size-2">
+              {running && (
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-60" />
               )}
-              aria-hidden="true"
-            />
+              <span
+                className={cn(
+                  "relative inline-flex size-2 rounded-full",
+                  agent.status === "ERROR" ? "bg-down" : dot.className
+                )}
+                aria-hidden="true"
+              />
+            </span>
+            <span className="text-[10px] text-muted-foreground">{dot.label}</span>
           </span>
-          <span className="text-[10px] text-muted-foreground">{dot.label}</span>
-        </span>
+        </div>
       </div>
 
       <p className="truncate text-[11px] leading-relaxed text-muted-foreground" title={agent.description}>

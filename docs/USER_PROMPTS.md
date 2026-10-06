@@ -243,4 +243,21 @@
 
 ---
 
-*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*
+## Prompt — Mở rộng 23 agents & Space Bunny Free làm model mặc định (2026-10-06)
+
+> **Người dùng:** "Mở rộng đội agent từ 5 lên đúng 23 agents theo thiết kế gốc Gen-1 (DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A, chia 5 nhóm: Hội đồng Nghiên cứu · Ủy ban Kiểm soát VETO · Ban Điều hành · Nền tảng Dữ liệu · Phòng Học máy). Đồng thời cấu hình model Space Bunny Free (Opencode Zen) làm model mặc định cho TOÀN BỘ agents — API key (dạng `oc_sk_…`) đã có sẵn trong `.env`."
+
+**Diễn giải — 2 yêu cầu gộp trong 1 phiên (#32):**
+1. **Mở rộng kiến trúc 5 → 23 agents** đúng thiết kế Gen-1 DESIGN.md §4.1 (app Gen-2 dựng lại sau reset trước đó chỉ còn pipeline 5 agent); 6 agent chạy LLM mỗi chu kỳ + 17 agent deterministic, chu kỳ chia 5 đợt.
+2. **Space Bunny Free làm backbone mặc định của toàn đội** — free-tier $0, chạy được ngoài sandbox (không cần GLM-4.6 gateway nội bộ Z.ai).
+
+**Thực thi (phiên #32 — sau Task 30/31 Supabase + LLM provider):**
+- **23 agents · 5 nhóm:** `src/lib/agent-roster.ts` (nguồn duy nhất — thuần dữ liệu dùng chung seed/expand-agents/API/UI) · `src/lib/agent-service-runs.ts` (16 hàm deterministic, 0 chi phí LLM) · `prisma/expand-agents.ts` (migrate DB 5 → 23 agents idempotent) · `agent-context.ts` (ROLE_PROMPTS đủ 23 agents + `valuationBlock`/`liquidityBlock`) · chu kỳ `POST /api/agents/run` chạy **5 đợt A→E** (A nền tảng 4 service song song → B nghiên cứu + học máy 8 service + 4 LLM tuần tự → C kiểm soát risk LLM + 2 service → D Chủ tịch tổng hợp 20 báo cáo → E thực thi; response thêm khối `waves`) · `[id]/run` thêm service path · `GET /api/agents` + `/api/agents/[id]` trả `group`/`groupLabel` · DB: `AgentRole` +18 enum, `Agent.group` + `@@index([group])`, `Agent.model` default `space-bunny-free` · UI: roster 5 nhóm + badge VETO (nhóm control) + cuộn dọc riêng.
+- **Space Bunny Free mặc định:** `.env` đã có `OPENCODE_ZEN_API_KEY` → provider tự động opencode-zen · model `space-bunny-free` (free-tier $0, chạy được local ngoài sandbox); `llm.ts` thêm `reasoning_effort: low` cho model họ space-bunny (đo thực tế: không set ~1433 reasoning tokens ≈ 19s/call → low ~40 tokens ≈ **3.7s/call, nhanh ~5×**); env mới `OPENCODE_ZEN_REASONING_EFFORT` (low|medium|high|none, mặc định low).
+- **Kết quả E2E:** 1 chu kỳ 23 agents **42s · 0 lỗi · 0 failures · $0**; 2 chu kỳ + single-run + chat đều $0; 23 agents chạy thật (runs/messages ghi Supabase); UI roster 5 nhóm + 3 badge VETO; browser E2E desktop + mobile 0 console error.
+
+**Trạng thái:** ✅ Hoàn thành.
+
+---
+
+*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*

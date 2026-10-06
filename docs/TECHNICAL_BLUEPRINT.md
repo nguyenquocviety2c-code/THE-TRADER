@@ -1,18 +1,18 @@
 # The Trader — Technical Blueprint
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/TECHNICAL_BLUEPRINT.md` · **Version:** 0.3.0 · **Updated:** 2026-10-06
+> **Document:** `docs/TECHNICAL_BLUEPRINT.md` · **Version:** 0.6.0 · **Updated:** 2026-10-06
 > **Cross-refs:** [DB_SCHEMA.md](./DB_SCHEMA.md) (data dictionary) · [DATA_SOURCES.md](./DATA_SOURCES.md) (nguồn dữ liệu & mapping)
 
 ---
 
 ## 1. System Overview
 
-The Trader là một **trading workspace một trang** (single-page dashboard): trader quan sát thị trường VN30 realtime, đọc tin tức RSS thật, theo dõi danh mục VNDIRECT mô phỏng, và điều phối một **hội đồng 5 AI agent** phân tích — ra tín hiệu — thực thi lệnh giấy (paper trading). Triết lý thiết kế:
+The Trader là một **trading workspace một trang** (single-page dashboard): trader quan sát thị trường VN30 realtime, đọc tin tức RSS thật, theo dõi danh mục VNDIRECT mô phỏng, và điều phối một **đội 23 AI agent chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy — §5.1) phân tích — ra tín hiệu — thực thi lệnh giấy (paper trading). Triết lý thiết kế:
 
 1. **Paper-trading first** — toàn bộ luồng lệnh chạy nội bộ, không chạm tiền thật; live trading VNDIRECT chỉ bật sau feature flag (§9) — hiện đã có scaffold flag + cổng kiểm tra (S3, gateway thật còn pending).
 2. **Mọi phân tích AI đều có audit trail** — mỗi lần chạy agent ghi `AgentRun` (token, chi phí, thời lượng) và mọi kết luận broadcast ghi `AgentMessage` (xem [DB_SCHEMA.md §6.6–6.9](./DB_SCHEMA.md)).
-3. **Backend-only LLM qua lớp provider duy nhất** — `src/lib/llm.ts` chọn provider theo env (`LLM_PROVIDER=auto`): có `OPENCODE_ZEN_API_KEY` → **Opencode Zen** `space-bunny-free` (OpenAI-compatible REST, chạy được cả ngoài sandbox — môi trường local của trader); không key → `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox Z.ai). Client không bao giờ thấy API key.
+3. **Backend-only LLM qua lớp provider duy nhất** — `src/lib/llm.ts` chọn provider theo env (`LLM_PROVIDER=auto`): có `OPENCODE_ZEN_API_KEY` → **Opencode Zen** `space-bunny-free` (**Space Bunny Free** — free-tier $0, OpenAI-compatible REST, chạy được cả ngoài sandbox — môi trường local của trader; đây là backbone **mặc định cho toàn đội 23 agent**); không key → `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox Z.ai). Model họ space-bunny là model reasoning nên mặc định gửi `reasoning_effort: low` (đo thực tế ~3.7s/call thay vì ~19s). Client không bao giờ thấy API key.
 4. **Financial-grade conventions** — tiền VND integer, phí 0.15%, thuế TNCN 0.1% khi bán, dải trần/sàn ±7% HOSE ([DB_SCHEMA.md §8](./DB_SCHEMA.md)).
 5. **Minh bạch nguồn dữ liệu** — mọi nguồn được gắn nhãn `live`/`simulated`/`fallback`/`paper` trong `DataSourceStatus` và hiển thị trên footer; dữ liệu mô phỏng không bao giờ giả danh "live" (stale marking — [DATA_SOURCES.md §6](./DATA_SOURCES.md)).
 6. **Realtime-first (tuỳ chọn)** — mini-service `market-engine` broadcast tick bảng giá, tin tức mới và kết quả chu kỳ agent qua WebSocket (§6); TanStack Query vẫn là cache layer duy nhất.
@@ -33,7 +33,7 @@ The Trader là một **trading workspace một trang** (single-page dashboard): 
 | Charts | Recharts | 3.10.1 |
 | Toasts | Sonner | 2.0.8 |
 | Date utils | date-fns | 4.4.0 |
-| AI | `src/lib/llm.ts` — provider abstraction: **Opencode Zen** `space-bunny-free` (OpenAI-compatible REST, key `OPENCODE_ZEN_API_KEY`) hoặc `z-ai-web-dev-sdk` GLM-4.6 (sandbox) — backend-only | 0.0.18 |
+| AI | `src/lib/llm.ts` — provider abstraction: **Opencode Zen** `space-bunny-free` (Space Bunny Free — free-tier $0, key `OPENCODE_ZEN_API_KEY`, `reasoning_effort: low` ≈ 3.7s/call) hoặc `z-ai-web-dev-sdk` GLM-4.6 (sandbox) — backend-only, mặc định cho 6 agent LLM của đội 23 | 0.0.18 |
 | Realtime client | `socket.io-client` (nối mini-service market-engine, §6) | 4.8.4 |
 | RSS parser | `fast-xml-parser` (crawler tin tức S5) | 5.11.2 |
 | Runtime | Bun | 1.3.14 |
@@ -54,11 +54,11 @@ flowchart TB
 
     subgraph Server["Next.js Server (Route Handlers — API-only backend)"]
         API["/api/market/* · /api/news · /api/system/status\n/api/portfolio · /api/agents/* · /api/signals\n/api/risk/alerts · /api/watchlist/toggle"]
-        RUN["POST /api/agents/run\nOrchestrator chu kỳ đa agent\n(prompt kèm newsBlock + flowsBlock)"]
+        RUN["POST /api/agents/run\nChu kỳ 23 agents — 5 đợt A→E\n(6 LLM + 17 deterministic)\nprompt kèm newsBlock + flowsBlock"]
         TICK["POST /api/market/tick\nS4 tick engine: random-walk\n+ mean-reversion 3% (Q1–Q5)"]
         NEWS["POST /api/news\nS5 crawler RSS (fast-xml-parser)\ndedupe theo url, rate-limit 60s"]
         FLOWS["GET /api/market/flows\nS6 dòng khối ngoại\n(simulated deterministic)"]
-        SDK["src/lib/llm.ts — provider:\nOpencode Zen space-bunny-free (có key)\nz-ai glm-4.6 (sandbox)"]
+        SDK["src/lib/llm.ts — provider:\nSpace Bunny Free — Opencode Zen (có key, free-tier $0)\nz-ai glm-4.6 (sandbox)"]
         PRISMA["Prisma Client\n(src/lib/db.ts singleton)"]
     end
 
@@ -88,14 +88,14 @@ flowchart TB
     IOSRV -- "broadcast quotes / news / cycle" --> WS
     NEWS -- "fetch RSS (timeout 8s, UA TheTraderBot/1.0)" --> RSS
     RUN --> SDK
-    SDK -- "HTTPS" --> LLM["Z.ai — GLM 4.6"]
+    SDK -- "HTTPS" --> LLM["Opencode Zen — space-bunny-free\n(fallback: Z.ai GLM-4.6)"]
     RUN --> PRISMA
     TICK --> PRISMA
     FLOWS --> PRISMA
     GW -. planned .-> API
 ```
 
-**Luồng dữ liệu:** Supabase Postgres (schema `trader`) → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt chu kỳ phân tích đa agent, sinh `AgentMessage`/`Signal`/`Order` giấy), `POST /api/market/tick` (tick giá S4 + khớp lệnh giấy + EOD rollover), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
+**Luồng dữ liệu:** Supabase Postgres (schema `trader`) → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt **chu kỳ 23 agents chạy 5 đợt A→E** — 6 lượt LLM + 17 agent dịch vụ deterministic, sinh `AgentMessage`/`Signal` giấy), `POST /api/market/tick` (tick giá S4 + khớp lệnh giấy + EOD rollover), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
 
 ---
 
@@ -112,13 +112,13 @@ flowchart TB
 | **Watchlist** | Bảng giá với **chế độ chuyển đổi**: Toàn bộ VN30 ⇄ Danh mục theo dõi; tìm kiếm; **cột sao** toggle watchlist; **toggle Cột mở rộng (G3 §5.2)**: thêm Trần · Sàn · TC · Cao · Thấp (≥ sm; mobile hiện gọn dưới ô Mã); dấu ⌃/⌄ khi giá chạm trần/sàn | `GET /api/market/quotes` hoặc `GET /api/market/watchlist` |
 | **Price chart** | Recharts **G3 §5.1**: **Nến Nhật** (custom Bar shape: wick + thân, xanh=đóng≥mở) + **volume histogram** màu theo phiên + **panel RSI14 Wilder** (~96px, guideline 30/70, vùng quá mua/bán amber) + toggle **Nến/Đường** (Zustand `chartMode`); SMA20 overlay; range 30/60/90; symbol picker; tooltip O/H/L/C/Volume | `GET /api/instruments/bars?symbol=&days=` |
 | **Portfolio tabs** | Tabs: **Vị thế** (P&L runtime + **cột % tỷ trọng** G3 §5.3 + dòng tổng), **Lệnh** (nút Hủy), **Giao dịch**; **donut phân bổ ngành** cạnh tabs (desktop ≥ md; mobile dòng "Top ngành") + ô ghép Biến động ngày / **Lãi/lỗ đã thực hiện** | `GET /api/portfolio`, `GET /api/orders` |
-| **Multi-agent panel** | 5 thẻ agent (health bar + **stats mini runs/thành công/chi phí** G3) + feed broadcast (tin strategist kèm nút **✅ Phê duyệt / ⛔ Từ chối** khi có signal ACTIVE — G3 §4.7) + AgentTask list + nút **Chạy chu kỳ** | `GET /api/agents`, `GET /api/agents/messages`, `GET /api/signals` |
+| **Multi-agent panel** | 23 thẻ agent chia 5 nhóm — Nghiên cứu · Kiểm soát VETO (badge VETO amber) · Điều hành · Nền tảng dữ liệu · Học máy (health bar + **stats mini runs/thành công/chi phí** G3) + feed broadcast (tin strategist kèm nút **✅ Phê duyệt / ⛔ Từ chối** khi có signal ACTIVE — G3 §4.7) + AgentTask list + nút **Chạy chu kỳ** | `GET /api/agents`, `GET /api/agents/messages`, `GET /api/signals` |
 | **Signals** | Bảng Signal: direction badge, confidence, score, target/stop-loss/take-profit, rationale, expiresAt, **trạng thái ACTIVE/ACTED/REJECTED/EXPIRED** + nút **Chuyển lệnh** (POST convert) | `GET /api/signals` |
 | **Risk alerts** | Thẻ cảnh báo theo severity | `GET /api/risk/alerts` |
 | **Tin tức (News card)** | 12 tin RSS mới nhất + badge chế độ nguồn + nút Nạp tin | `GET /api/news?limit=12`, `POST /api/news` |
 | **Sticky footer** | Chips trạng thái nguồn + **chip chi phí AI (G3 §5.5)**: `AI: $X · YK tokens` từ totals `/api/agents` + badge Realtime + last-updated + disclaimer | `GET /api/system/status`, `GET /api/agents` |
 
-**Workspace "Đội Agent" (G3 §4.7):** header tổng quan đội (số agent · chi phí AI lũy kế · nút **Chạy chu kỳ đầy đủ**) + layout 2 cột xl: trái = 5 **roster card** (icon vai, health bar, status dot, stats mini, nút ▶ **Chạy riêng** — disabled kèm đếm ngược 429) · phải = **panel chi tiết** 5 tab (Hồ sơ / Hoạt động — bảng AgentRun + sparkline chi phí 7 ngày / Nhiệm vụ / Phát thanh + tín hiệu đang mở kèm nút duyệt-từ chối / **Chat** — thread USER↔AGENT, cảnh báo "~$0.006/tin", rate-limit 60s/agent hiển thị đếm ngược). Execution Manager không chat/chạy lẻ (409/400 + Card giải thích).
+**Workspace "Đội Agent" (G3 §4.7):** header tổng quan đội (số agent · chi phí AI lũy kế · nút **Chạy chu kỳ đầy đủ (23 agents)**) + layout 2 cột xl: trái = **23 roster card chia 5 nhóm** theo `group` (research · control · executive · platform · ml — header nhóm sticky + cuộn dọc riêng ở desktop; nhóm control mang **badge VETO** amber; icon vai riêng từng role, health bar, status dot, stats mini, nút ▶ **Chạy riêng** — disabled kèm đếm ngược 429) · phải = **panel chi tiết** 5 tab (Hồ sơ / Hoạt động — bảng AgentRun + sparkline chi phí 7 ngày / Nhiệm vụ / Phát thanh + tín hiệu đang mở kèm nút duyệt-từ chối / **Chat** — thread USER↔AGENT, cảnh báo "~$0.006/tin", rate-limit 60s/agent hiển thị đếm ngược). Execution Manager không chat/chạy lẻ (409/400 + Card giải thích).
 
 ### State management
 
@@ -152,10 +152,10 @@ Tất cả route là **Route Handlers** trả JSON; lỗi trả `{ "error": stri
 | GET | `/api/portfolio` | Sổ tài khoản demo (**accountNumber đã mask**) + positions P&L runtime + totals | `{ account, positions[], totals }` |
 | GET | `/api/orders` | 20 lệnh + 20 bút toán gần nhất (fee/tax dạng Number) | `{ orders[], trades[] }` |
 | POST | `/api/orders/[id]/cancel` | **Hủy lệnh đang chờ khớp** (chỉ PENDING/PARTIALLY_FILLED — phần chưa khớp; lệnh đã kết thúc → 409; không có → 404) + audit `ORDER_CANCELLED`; chạy đua an toàn với fill engine trong tick (claim có điều kiện) | `{ order }` · 404/409 |
-| GET | `/api/agents` | Trạng thái 5 agent (config parse, pendingTaskCount, lastRun) + **stats mỗi agent (G3 §4.2**: runCount, successRate, totalTokensIn/Out, totalCostUsd, lastError, chatCount)** + **totals chi phí AI toàn đội** + 12 nhiệm vụ | `{ agents[] (kèm stats), tasks[], totals }` |
-| POST | `/api/agents/run` | **Chu kỳ phân tích đa agent đầy đủ** (4 LLM call: 3 agent phân tích → strategist tổng hợp → execution ghi nhận; xem §5.2; prompt kèm `newsBlock` + `flowsBlock`; **G3: tín hiệu BUY/SELL sinh ra ACTIVE chờ trader phê duyệt — không tự tạo lệnh**, audit `SIGNAL_CREATED`) | `{ runId, messages[], signals[], order: null, failures[], durationMs }` |
+| GET | `/api/agents` | Trạng thái **23 agent** (config parse, pendingTaskCount, lastRun, **`group`/`groupLabel` — 5 nhóm research/control/executive/platform/ml**) + **stats mỗi agent (G3 §4.2**: runCount, successRate, totalTokensIn/Out, totalCostUsd, lastError, chatCount)** + **totals chi phí AI toàn đội** + 12 nhiệm vụ | `{ agents[] (kèm stats + group/groupLabel), tasks[], totals, llm }` |
+| POST | `/api/agents/run` | **Chu kỳ phân tích đầy đủ 23 agents — 5 đợt A→E** (A nền tảng 4 service song song → B nghiên cứu+học máy 8 service + 4 LLM tuần tự → C kiểm soát risk LLM + 2 service → D Chủ tịch tổng hợp 20 báo cáo → E thực thi; 6 lượt LLM + 17 deterministic; xem §5.2; prompt kèm `newsBlock` + `flowsBlock`; **G3: tín hiệu BUY/SELL sinh ra ACTIVE chờ trader phê duyệt — không tự tạo lệnh**, audit `SIGNAL_CREATED`; cooldown chu kỳ 60s) | `{ runId, messages[], signals[], order: null, failures[], durationMs, waves { architecture, agentsRan, platform, researchAndMl, control, executive } }` |
 | GET | `/api/agents/[id]` | **G3 §4.2 — hồ sơ chi tiết agent**: config parsed + stats + 20 runs + 12 tasks + **thread chat 1-1 (asc)** + 20 tin broadcast + signals ACTIVE của agent | `{ agent, runs[], tasks[], chat[], broadcastFeed[], signals[] }` · 404 nếu id rác |
-| POST | `/api/agents/[id]/run` | **G3 §4.3 — chạy riêng 1 agent** (role-prompt đúng chuyên môn + context thật; rate-limit 60s/agent dựa trên AgentRun cuối — 429 kèm `retryAfterSeconds` + header Retry-After; execution-manager → 409; agent RUNNING → 400) | `{ agent, message, run }` · 404/400/409/429 |
+| POST | `/api/agents/[id]/run` | **G3 §4.3 — chạy riêng 1 agent**: agent **LLM** (6 agent nhóm research/control/executive) gọi model như chu kỳ; agent **service (17)** chạy **deterministic từ DB qua `src/lib/agent-service-runs.ts` — 0 chi phí LLM**; rate-limit 60s/agent dựa trên AgentRun cuối — 429 kèm `retryAfterSeconds` + header Retry-After; execution-manager → 409; agent RUNNING → 400 | `{ agent, message, run }` · 404/400/409/429 |
 | POST | `/api/agents/[id]/chat` | **G3 §4.4 — chat trực tiếp** (body `{message}` 2–500 ký tự; lưu tin USER ngay kể cả LLM lỗi; 10 tin history + bối cảnh dữ liệu compact; audit `AGENT_CHAT`; LLM lỗi → 200 reply null + error VN) | `{ userMessage, reply, run, threadLength, error? }` · 400/404/429 |
 | GET | `/api/agents/messages?limit=30` | Feed tin broadcast gần nhất (kèm `direction`) | `{ messages[] }` join `fromAgent` |
 | GET | `/api/signals?limit=` | Tín hiệu còn hiệu lực + gần nhất (kèm `status`/`rejectedAt`/`rejectNote` G3) | `{ signals[] }` join `Instrument` + `Agent` |
@@ -169,42 +169,62 @@ Tham chiếu field: mỗi response khớp định nghĩa model tại [DB_SCHEMA.
 
 ## 5. Multi-Agent Design
 
-### 5.1 Hội đồng 5 agent (orchestrator pattern)
+### 5.1 Đội 23 agents — 5 nhóm (kiến trúc Gen-1 DESIGN.md §4.1)
 
-| # | Agent (`code`) | Role | Trách nhiệm | `config` JSON (thực tế trong DB) |
-|---|---|---|---|---|
-| 1 | `market-analyst` | `MARKET_ANALYST` | Phân tích kỹ thuật & vi mô trên OHLCV 90 ngày: xu hướng, khối lượng, động lượng, hỗ trợ/kháng cự | `{"lookbackDays":90,"indicators":["SMA20","SMA50","RSI14","MACD","BOLL"],"weight":0.35}` |
-| 2 | `news-sentiment` | `NEWS_SENTIMENT` | Đọc tin tài chính VN & quốc tế; chấm điểm cảm xúc bullish/bearish/neutral; cảnh báo sự kiện | `{"sources":["cafef","vneconomy","reuters"],"languages":["vi","en"],"weight":0.2}` |
-| 3 | `risk-manager` | `RISK_MANAGER` | Giám sát giới hạn: drawdown, tỷ trọng ngành, kích thước vị thế, stop-loss | `{"maxDrawdownPct":15,"maxSectorWeightPct":40,"maxPositionPct":25,"dailyLossLimitVnd":50000000}` |
-| 4 | `portfolio-strategist` | `PORTFOLIO_STRATEGIST` | **Tổng hợp** tín hiệu các agent → phân bổ danh mục, đề xuất tỷ trọng mục tiêu, sinh `Signal` | `{"targetPositions":8,"rebalanceThresholdPct":5,"style":"balanced"}` |
-| 5 | `execution-manager` | `EXECUTION_MANAGER` | Thực thi lệnh qua VNDIRECT: chọn loại lệnh, tách lệnh, theo dõi khớp, báo cáo sau giao dịch | `{"sliceCount":3,"maxSlippagePct":0.5,"orderType":"LIMIT"}` |
+Nguồn duy nhất: **`src/lib/agent-roster.ts`** (thuần dữ liệu, không import — dùng chung bởi `prisma/seed.ts` · `prisma/expand-agents.ts` · API routes · UI). Mỗi agent có `group` (5 nhóm) và `kind`: **`llm`** — chu kỳ gọi model qua `src/lib/llm.ts` (prompt role trong `src/lib/agent-context.ts`) hoặc **`service`** — chạy deterministic từ DB (`src/lib/agent-service-runs.ts`, 0 chi phí LLM, ~0.2–1.5s).
 
-**Mô hình giao tiếp:** agents **broadcast** `AgentMessage` (`broadcast=true`, `toAgentId=null`) lên "bus"; Risk Manager có quyền **veto** bằng cảnh báo vi phạm ngưỡng (`RiskAlert` + tin broadcast); **Portfolio Strategist là điểm hợp lưu (consolidator)** — đọc toàn bộ broadcast, chấm composite score (weight của analyst 0.35 / news 0.2 / risk-derived penalty) và phát sinh `Signal`; **Execution Manager** là agent duy nhất được tạo `Order` (mặc định LIMIT, tách `sliceCount` lệnh con).
+| Nhóm (`group`) | Label UI | Agents (code · Gen-1) | kind |
+|---|---|---|---|
+| `research` (5) | Hội đồng Nghiên cứu | `market-analyst` (A2) · `fair-value` (A3) · `news-sentiment` (A4) · `liquidity` (A5) · `ml-forecast` (A15) | 4 LLM + 1 service |
+| `control` (3) | Ủy ban Kiểm soát · VETO | `risk-manager` (A6) · `exposure` (A7) · `compliance` (A8) | 1 LLM + 2 service |
+| `executive` (4) | Ban Điều hành | `portfolio-strategist` (A1 — **Chủ tịch**) · `execution-manager` (A10) · `settlement` (A11) · `cash-management` (A12) | 1 LLM + 3 service |
+| `platform` (4) | Nền tảng Dữ liệu | `data-collector` (S0) · `notification-officer` (S1) · `feature-store` (S2) · `data-integrity` (A9) | 4 service |
+| `ml` (7) | Phòng Học máy | `learning-rag` (A13) · `backtest` (A14) · `rl-gym` (S3) · `rl-policy` (A16) · `dl-trainer` (A17) · `rl-trainer` (A18) · `model-registry` (A19) | 7 service |
 
-### 5.2 Run cycle — `POST /api/agents/run`
+**6 agents chạy LLM mỗi chu kỳ** (market-analyst · fair-value · news-sentiment · liquidity · risk-manager · portfolio-strategist); **17 agents còn lại chạy deterministic từ DB** — 16 hàm trong `agent-service-runs.ts` + execution-manager do chu kỳ xử lý riêng vì cần `Signal` đầu vào. `config` JSON thật của từng agent xem `src/lib/agent-roster.ts` (roster cũng là nguồn cho `prisma/expand-agents.ts` — migrate DB 5 → 23 agents idempotent).
+
+**Mô hình giao tiếp:** agents **broadcast** `AgentMessage` (`broadcast=true`, `toAgentId=null`) lên "bus"; **Ủy ban Kiểm soát (risk-manager · exposure · compliance) giữ quyền VETO** bằng cảnh báo vi phạm ngưỡng (`RiskAlert` + tin broadcast); **Portfolio Strategist là Chủ tịch + điểm hợp lưu (consolidator)** — tổng hợp báo cáo của 20 agents trước nó (nghiên cứu · học máy · kiểm soát), chấm composite score và phát sinh `Signal`; **Execution Manager** là agent duy nhất được tạo `Order` (mặc định LIMIT, tách `sliceCount` lệnh con — và cũng chỉ khi trader phê duyệt).
+
+### 5.2 Run cycle — `POST /api/agents/run` (chu kỳ 23 agents · 5 đợt)
 
 ```mermaid
 sequenceDiagram
     participant U as Trader (UI)
     participant API as POST /api/agents/run
     participant DB as Prisma / Supabase Postgres
-    participant LLM as src/lib/llm.ts (Opencode Zen space-bunny-free | z-ai glm-4.6)
+    participant LLM as src/lib/llm.ts (space-bunny-free | glm-4.6)
 
     U->>API: POST /api/agents/run
-    API->>DB: 1. Snapshot: Quote, Bar(90d), Position, BrokerAccount, RiskAlert mở, NewsItem 10 tin mới (S5), dòng khối ngoại (S6)
-    API->>API: 2. Build role-prompt cho từng agent (snapshot + config từ Agent.config)
-    loop 3 agent phân tích (market / news / risk)
-        API->>LLM: Chat completion (role prompt, model runtime)
-        LLM-->>API: Phân tích (content, reasoning, sentiment)
-        API->>DB: 3. Ghi AgentMessage (broadcast) + AgentRun (tokens, cost, duration)
+    API->>DB: 0. Snapshot: Quote, Bar(90d), Position, BrokerAccount, RiskAlert mở, NewsItem (S5), dòng khối ngoại (S6)
+    rect rgb(235, 235, 245)
+        note over API,DB: ĐỢT A · Nền tảng dữ liệu (4 service song song — 0 LLM)
+        API->>DB: data-collector · notification-officer · feature-store · data-integrity
     end
-    API->>LLM: 4. Portfolio Strategist tổng hợp messages → mục tiêu phân bổ
-    API->>DB: 5. Ghi Signal (direction, confidence, score, target/stop, expiresAt)
-    API->>DB: 6. Execution Manager (xác định, không LLM): ghi nhận Signal ACTIVE chờ phê duyệt + AuditLog (SIGNAL_CREATED, AGENT_RUN_COMPLETED)
-    API-->>U: { runId, messages[], signals[] } — UI invalidateQueries + toast
+    rect rgb(235, 245, 235)
+        note over API,DB: ĐỢT B · Nghiên cứu + Học máy
+        API->>DB: 8 service song song (ml-forecast · backtest · learning-rag · rl-gym · rl-policy · dl-trainer · rl-trainer · model-registry)
+        loop 4 LLM tuần tự (market-analyst · fair-value · news-sentiment · liquidity)
+            API->>LLM: Chat completion (role prompt + context thật)
+            LLM-->>API: Phân tích (content, reasoning, sentiment)
+            API->>DB: AgentMessage (broadcast) + AgentRun (tokens, cost, duration)
+        end
+    end
+    rect rgb(245, 240, 225)
+        note over API,DB: ĐỢT C · Ủy ban Kiểm soát (VETO)
+        API->>LLM: risk-manager (Chat completion)
+        API->>DB: exposure · compliance (service, song song với risk-manager)
+    end
+    API->>LLM: ĐỢT D · portfolio-strategist (Chủ tịch) tổng hợp 20 báo cáo → mục tiêu phân bổ
+    API->>DB: Ghi Signal (direction, confidence, score, target/stop, expiresAt) — ACTIVE chờ duyệt
+    rect rgb(240, 235, 245)
+        note over API,DB: ĐỢT E · Thực thi & hậu cần
+        API->>DB: execution-manager ghi nhận Signal (không tự tạo lệnh) + settlement · cash-management
+        API->>DB: AuditLog (SIGNAL_CREATED, AGENT_RUN_COMPLETED — architecture "23-agents")
+    end
+    API-->>U: { runId, messages[], signals[], waves, failures[], durationMs } — UI invalidateQueries + toast
 ```
 
-Bước 1–6 là **contract của orchestrator** (đã implement đầy đủ trong `src/app/api/agents/run/route.ts`): mọi lời gọi LLM đều có prompt chứa snapshot dữ liệu thật từ DB (kèm chỉ báo SMA20/50, RSI14, động lượng 5 phiên, KL/TL20 tính từ `Bar`) — các khối build trùng nguồn với **single-run/chat** qua `src/lib/agent-context.ts` (G3). Phân bổ theo agent: news-sentiment nhận `marketBlock + newsBlock + flowsBlock`; market-analyst và risk-manager nhận `marketBlock + flowsBlock`; portfolio-strategist nhận đủ + khối tín hiệu đang mở. 3 agent phân tích chạy **tuần tự** (SDK giới hạn concurrency — retry backoff 2.5s khi 429; một agent lỗi không kéo sập chu kỳ); mọi kết quả đều persist (`AgentMessage`, `Signal`) kèm audit (`AgentRun` mỗi agent, `AuditLog`: SIGNAL_CREATED · AGENT_RUN_COMPLETED) — không có kết quả AI nào "bay lơ lửng" ngoài persisted state. **Execution Manager chạy xác định (không LLM): ghi nhận tín hiệu và thông báo chờ phê duyệt của trader** — từ Giai đoạn 3 chu kỳ **không tự tạo Order**; lệnh chỉ xuất hiện khi trader **APPROVE** qua `/api/signals/[id]/decision` (sizing 5% NAV, lô 100, LIMIT — `src/lib/signal-execution.ts`) hoặc `convert` (budget 50tr).
+Chu kỳ 5 đợt là **contract của orchestrator** (đã implement đầy đủ trong `src/app/api/agents/run/route.ts`, cooldown 60s chống spam chi phí): **A** nền tảng (4 service song song) → **B** nghiên cứu + học máy (8 service song song + 4 LLM tuần tự) → **C** kiểm soát (risk-manager LLM + exposure/compliance service) → **D** Chủ tịch portfolio-strategist tổng hợp **20 báo cáo** → **E** thực thi (execution-manager + settlement/cash-management). Mọi lời gọi LLM đều có prompt chứa snapshot dữ liệu thật từ DB (kèm chỉ báo SMA20/50, RSI14, động lượng 5 phiên, KL/TL20 tính từ `Bar`; fair-value thêm `valuationBlock` z-price band, liquidity thêm `liquidityBlock`) — các khối build trùng nguồn với **single-run/chat** qua `src/lib/agent-context.ts` (ROLE_PROMPTS đủ 23 agents). 4 LLM nghiên cứu + risk + strategist chạy **tuần tự** (retry backoff 2.5s khi 429; một agent lỗi không kéo sập chu kỳ — bỏ vào `failures[]`); mọi kết quả đều persist (`AgentMessage`, `Signal`) kèm audit (`AgentRun` mỗi agent, `AuditLog`: SIGNAL_CREATED · AGENT_RUN_COMPLETED) — không có kết quả AI nào "bay lơ lửng" ngoài persisted state. **Execution Manager chạy xác định (không LLM): ghi nhận tín hiệu và thông báo chờ phê duyệt của trader** — chu kỳ **không tự tạo Order**; lệnh chỉ xuất hiện khi trader **APPROVE** qua `/api/signals/[id]/decision` (sizing 5% NAV, lô 100, LIMIT — `src/lib/signal-execution.ts`) hoặc `convert` (budget 50tr). Response trả thêm khối **`waves`** (`architecture/agentsRan/platform/researchAndMl/control/executive`) tổng kết các đợt đã chạy — đo thực tế với Space Bunny Free (`reasoning_effort: low`): 1 chu kỳ 23 agents ≈ **42s, 0 lỗi, $0**.
 
 ### 5.3 Health scoring
 
@@ -317,3 +337,4 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | 2026-10-06 | **v0.3 — Giai đoạn 2 (S3–S6 + realtime):** (1) mini-service `market-engine` LIVE (port 3003): WebSocket broadcast + scheduler, section mới §6; (2) 6 API route mới (`/api/news` GET/POST, `/api/market/tick`, `/api/market/flows`, `/api/system/status`, `/api/watchlist/toggle`) + `meta` nguồn cho `/api/market/quotes`; (3) schema 19 model: `NewsItem` (S5, dedupe url) + `DataSourceStatus` (S4 stale marking); (4) crawler RSS 5 nguồn VN kiểm chứng + newsBlock/flowsBlock trong prompt chu kỳ agent; (5) S3 flag `LIVE_TRADING` + cổng kiểm tra + audit; (6) frontend: News card, Market pulse bar, cột sao watchlist, badge Live/Realtime, chips trạng thái nguồn động; roadmap cập nhật trạng thái |
 | 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B1–B3, 23 route):** (1) **App shell**: nav tab workspace (Zustand `activeWorkspace`, `?ws=` deep-link) — tổng quan ⇄ đội agent không reload, realtime giữ nguyên; (2) **4 API mới** (`GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision`) + `/api/agents` thêm stats/totals chi phí; rate-limit 60s/agent (DB-backed) + header Retry-After; (3) **Workspace Đội Agent**: roster 5 card (stats chi phí), panel chi tiết 5 tab (Hồ sơ/Hoạt động+sparkline/Nhiệm vụ/Phát thanh/Chat), chat 1-1 với AgentMessage.direction, phê duyệt/từ chối tín hiệu trong feed + panel; (4) **Dashboard**: nến Nhật + volume + RSI14 Wilder panel (custom Bar shape), toggle Nến/Đường, cột mở rộng bảng giá (trần/sàn/TC/cao/thấp + dấu ⌃⌄), donut phân bổ ngành + cột % tỷ trọng, ô Realized P&L, chip Sức mua ước tính (tooltip công thức), chip chi phí AI footer; (5) **hành vi mới**: chu kỳ sinh signal ACTIVE chờ duyệt (không auto-order — human-in-the-loop), audit `SIGNAL_CREATED`/`SIGNAL_APPROVED`/`SIGNAL_REJECTED`/`AGENT_CHAT`; `signal-execution.ts` một nguồn duy nhất cho toán tạo lệnh; SELL nav5pct guard vị thế |
 | 2026-10-06 | **v0.5 — LLM provider abstraction (`src/lib/llm.ts`):** (1) 2 provider chọn qua env `LLM_PROVIDER=auto`: **Opencode Zen** `space-bunny-free` (`https://opencode.ai/zen/v1/chat/completions`, Bearer `OPENCODE_ZEN_API_KEY`, free-tier $0, zero-retention — **chạy được ngoài sandbox**) hoặc `z-ai-web-dev-sdk` GLM-4.6 (gateway nội bộ sandbox); (2) 3 route agent (run/single-run/chat) refactor dùng một cổng chung — bỏ 3 bản callLlm/callChatLlm trùng lặp; costUsd theo bảng giá provider (`LLM_PRICE_*_MTOK` ghi đè được); (3) `GET /api/agents` trả khối `llm` + `AgentCard.model` = model runtime — UI (workspace/panel/footer tooltip) hiển thị model đang chạy từ nguồn duy nhất; (4) `.env`/`.env.example` + README section "Chạy trên máy local" (chỉ cần API key opencode.ai/zen, KHÔNG cần Opencode CLI) |
+| 2026-10-06 | **v0.6 — Mở rộng 23 agents (5 nhóm, chu kỳ 5 đợt: 6 LLM + 17 deterministic) · Space Bunny Free làm backbone mặc định (free-tier, `reasoning_effort: low` ≈ 3.7s/call) · DB: `AgentRole` +18 enum (23 giá trị), `Agent.group` + index:** (1) kiến trúc 5 → **23 agents đúng thiết kế Gen-1 DESIGN.md §4.1** (4 dịch vụ S + 19 agent A) chia 5 nhóm research/control/executive/platform/ml — nguồn duy nhất `src/lib/agent-roster.ts` + 16 hàm deterministic `src/lib/agent-service-runs.ts` + script migrate idempotent `prisma/expand-agents.ts`; (2) chu kỳ `POST /api/agents/run` chạy **5 đợt A→E** (A nền tảng 4 service → B nghiên cứu+học máy 8 service + 4 LLM → C kiểm soát risk LLM + 2 service → D Chủ tịch tổng hợp 20 báo cáo → E thực thi), response thêm khối `waves`; (3) `POST /api/agents/[id]/run` thêm service path (17 agent deterministic, 0 LLM); `GET /api/agents` + `/api/agents/[id]` trả `group`/`groupLabel`; (4) `agent-context.ts`: ROLE_PROMPTS đủ 23 agents + `valuationBlock`/`liquidityBlock`; (5) UI: roster 5 nhóm + badge VETO (nhóm control) + cuộn dọc riêng; (6) `.env` đặt sẵn `OPENCODE_ZEN_API_KEY` → provider mặc định opencode-zen `space-bunny-free` free-tier $0 chạy được ngoài sandbox; env mới `OPENCODE_ZEN_REASONING_EFFORT` (mặc định `low` cho model họ space-bunny); (7) E2E: 1 chu kỳ 23 agents ≈ 42s · 0 lỗi · 0 failures · **$0** |

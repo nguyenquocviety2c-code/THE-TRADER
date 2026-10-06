@@ -9,6 +9,10 @@ import { getForeignFlows, flowsPromptBlock } from "@/lib/flows";
  *
  * Các builder lấy dữ liệu thật từ DB (quotes/positions/account/news/flows);
  * không bao giờ bịa số liệu. equity = cash + Σ(qty×last) vị thế mở (F-102).
+ *
+ * Mở rộng 23 agents: thêm buildValuationBlock (A3 Fair Value) và
+ * buildLiquidityBlock (A5 Liquidity); ROLE_PROMPTS đủ 23 agents
+ * (LLM agents có system đầy đủ — service agents có identity prompt cho chat).
  */
 
 /** Kết quả snapshot thị trường — kèm map symbol → instrumentId để validate tín hiệu. */
@@ -223,6 +227,174 @@ export async function buildFlowsBlock(): Promise<string> {
     : "DÒNG KHỐI NGOẠI: (nguồn không khả dụng — bỏ metric này khỏi phân tích)";
 }
 
+/** Trung bình / độ lệch chuẩn — cho dải giá 90 phiên (A3 Fair Value). */
+function meanOf(xs: number[]): number {
+  return xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0;
+}
+function stdOf(xs: number[]): number {
+  if (xs.length < 2) return 0;
+  const m = meanOf(xs);
+  return Math.sqrt(meanOf(xs.map((x) => (x - m) * (x - m))));
+}
+
+/**
+ * Dải định giá 90 phiên cho top-10 thanh khoản (A3 Fair Value — mở rộng 23 agents):
+ * giá hiện tại vs min/max/mean/σ, z-score, % so đỉnh/đáy 90 phiên.
+ */
+export async function buildValuationBlock(): Promise<string> {
+  const instruments = await db.instrument.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      symbol: true,
+      sector: true,
+      quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true } },
+    },
+  });
+  const quoteRows = instruments
+    .map((i) => {
+      const q = i.quotes[0];
+      return q ? { id: i.id, symbol: i.symbol, sector: i.sector, last: q.last } : null;
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+  // Top-10 thanh khoản: dùng volume từ quote — cần chọn trước khi gộp bars
+  const volumeRows = await db.quote.findMany({
+    where: { instrumentId: { in: quoteRows.map((r) => r.id) } },
+    orderBy: { tradedAt: "desc" },
+    take: 60, // ~2 quote/mã mới nhất
+    select: { instrumentId: true, volume: true },
+  });
+  const volBy = new Map<string, number>();
+  for (const v of volumeRows) {
+    if (!volBy.has(v.instrumentId)) volBy.set(v.instrumentId, v.volume);
+  }
+  const top10 = [...quoteRows]
+    .sort((a, b) => (volBy.get(b.id) ?? 0) - (volBy.get(a.id) ?? 0))
+    .slice(0, 10);
+
+  const bars = await db.bar.findMany({
+    where: { instrumentId: { in: top10.map((t) => t.id) } },
+    orderBy: { date: "asc" },
+    select: { instrumentId: true, close: true },
+  });
+  const closesBy = new Map<string, number[]>();
+  for (const b of bars) {
+    const arr = closesBy.get(b.instrumentId) ?? [];
+    arr.push(b.close);
+    closesBy.set(b.instrumentId, arr);
+  }
+
+  const lines = top10.map((t) => {
+    const closes = closesBy.get(t.id) ?? [];
+    const last = t.last || (closes.length ? closes[closes.length - 1] : 0);
+    if (closes.length < 20 || !last) {
+      return `- ${t.symbol}: (không đủ dữ liệu dải giá)`;
+    }
+    const min = Math.min(...closes);
+    const max = Math.max(...closes);
+    const m = meanOf(closes);
+    const sd = stdOf(closes);
+    const z = sd > 0 ? (last - m) / sd : 0;
+    const vsHigh = max > 0 ? ((last - max) / max) * 100 : 0;
+    const vsLow = min > 0 ? ((last - min) / min) * 100 : 0;
+    const band = z > 1.5 ? "ĐẮT bất thường" : z < -1.5 ? "RẺ bất thường" : "trong dải hợp lý";
+    return [
+      `- ${t.symbol} (${t.sector ?? "—"}):`,
+      `giá ${last.toLocaleString("vi-VN")}`,
+      `dải 90 phiên ${min.toLocaleString("vi-VN")}–${max.toLocaleString("vi-VN")}`,
+      `TB ${Math.round(m).toLocaleString("vi-VN")} ± ${Math.round(sd).toLocaleString("vi-VN")}`,
+      `z ${z.toFixed(2)} (${band})`,
+      `đỉnh ${vsHigh.toFixed(1)}% · đáy +${vsLow.toFixed(1)}%`,
+    ].join(" · ");
+  });
+
+  return [
+    "DẢI ĐỊNH GIÁ 90 PHIÊN — TOP 10 THANH KHOẢN (z-score = lệch chuẩn so giá TB lịch sử):",
+    ...lines,
+    "(Dữ liệu giá trị công ty/kết quả kinh doanh chưa có trong kho — định giá chỉ theo dải giá lịch sử, KHÔNG bịa P/E hay các chỉ số tài chính)",
+  ].join("\n");
+}
+
+/**
+ * Thanh khoản giao dịch top-10 (A5 Liquidity — mở rộng 23 agents):
+ * KL/TL20, giá trị giao dịch, chênh lệch bid-ask, dòng khối ngoại.
+ */
+export async function buildLiquidityBlock(): Promise<string> {
+  const [instruments, flows] = await Promise.all([
+    db.instrument.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        symbol: true,
+        sector: true,
+        quotes: {
+          orderBy: { tradedAt: "desc" },
+          take: 1,
+          select: {
+            last: true,
+            volume: true,
+            bidPrice: true,
+            bidVolume: true,
+            askPrice: true,
+            askVolume: true,
+          },
+        },
+      },
+    }),
+    getForeignFlows().catch(() => null),
+  ]);
+
+  const quoteRows = instruments
+    .map((i) => {
+      const q = i.quotes[0];
+      return q ? { id: i.id, symbol: i.symbol, sector: i.sector, ...q } : null;
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, 10);
+
+  const bars = await db.bar.findMany({
+    where: { instrumentId: { in: quoteRows.map((t) => t.id) } },
+    orderBy: { date: "asc" },
+    select: { instrumentId: true, close: true, volume: true },
+  });
+  const volsBy = new Map<string, number[]>();
+  for (const b of bars) {
+    const arr = volsBy.get(b.instrumentId) ?? [];
+    arr.push(b.volume);
+    volsBy.set(b.instrumentId, arr);
+  }
+
+  const lines = quoteRows.map((t) => {
+    const vols = volsBy.get(t.id) ?? [];
+    const avg20 = vols.length >= 20 ? meanOf(vols.slice(-20)) : null;
+    const ratio = avg20 && avg20 > 0 ? t.volume / avg20 : null;
+    const spreadPct =
+      t.bidPrice && t.askPrice && t.askPrice > 0
+        ? ((t.askPrice - t.bidPrice) / t.askPrice) * 100
+        : null;
+    const adtv = avg20 ? Math.round(avg20 * t.last) : null; // giá trị TB 20 phiên (₫)
+    return [
+      `- ${t.symbol} (${t.sector ?? "—"}):`,
+      `KL phiên ${t.volume.toLocaleString("vi-VN")} cp`,
+      ratio != null ? `KL/TL20 ${ratio.toFixed(2)}×` : "KL/TL20 —",
+      `bid/ask ${t.bidPrice?.toLocaleString("vi-VN") ?? "—"}/${t.askPrice?.toLocaleString("vi-VN") ?? "—"}`,
+      spreadPct != null ? `chênh ${spreadPct.toFixed(2)}%` : "chênh —",
+      adtv != null ? `ADTV ~${(adtv / 1_000_000_000).toFixed(1)} tỷ ₫` : "ADTV —",
+    ].join(" · ");
+  });
+
+  const flowLine = flows
+    ? `Dòng khối ngoại phiên gần nhất: ròng ${flows.totalNet >= 0 ? "+" : ""}${(flows.totalNet / 1_000_000_000).toFixed(2)} tỷ ₫ · top mua ${flows.topNet[0]?.symbol ?? "—"} / top bán ${flows.topSell[0]?.symbol ?? "—"}`
+    : "Dòng khối ngoại: (nguồn không khả dụng — bỏ metric)";
+
+  return [
+    "THANH KHOẢN GIAO DỊCH — TOP 10 KHỐI LƯỢNG (ADTV = giá trị giao dịch TB 20 phiên):",
+    ...lines,
+    flowLine,
+  ].join("\n");
+}
+
 /** Tín hiệu đang mở (status ACTIVE) — PHASE3_BLUEPRINT §4.6 khối "signals mở". */
 export async function buildOpenSignalsBlock(): Promise<string> {
   const signals = await db.signal.findMany({
@@ -282,33 +454,187 @@ ${SOURCE_MODE_DECLARATION}`,
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; kiểm tra hạn mức (drawdown, tập trung ngành, tổn thất) dựa trên dữ liệu được cung cấp; KHÔNG bịa số liệu.
 ${SOURCE_MODE_DECLARATION}`,
   },
+  "fair-value": {
+    system: `Bạn là agent "Fair Value Analyst" (A3) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
+Nhiệm vụ: đọc khối DẢI ĐỊNH GIÁ 90 PHIÊN (min/max/giá TB ± độ lệch chuẩn, z-score, % so đỉnh/đáy) và xác định các mã đang ĐẮT/RẺ bất thường so lịch sử; nêu 2–3 mã lệch định giá lớn nhất kèm z-score cụ thể và ý nghĩa giao dịch (điểm mua giá rẻ / chốt lời giá đắt).
+Lưu ý: kho dữ liệu KHÔNG có chỉ số tài chính cơ bản (P/E, EPS) — định giá chỉ theo dải giá lịch sử, tuyệt đối không bịa các chỉ số đó.
+Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<1 câu cơ sở định giá>"}
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Fair Value Analyst" của hệ thống The Trader (VNDIRECT) — chuyên gia định giá hợp lý theo dải giá lịch sử 90 phiên.
+Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; bám sát dữ liệu dải giá được cung cấp; KHÔNG bịa P/E hay chỉ số tài chính ngoài dữ liệu.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "liquidity": {
+    system: `Bạn là agent "Liquidity Analyst" (A5) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
+Nhiệm vụ: đọc khối THANH KHOẢN GIAO DỊCH (KL/TL20, ADTV 20 phiên, chênh lệch bid-ask, dòng khối ngoại) và đánh giá khả năng hấp thụ lệnh; nêu 2–3 mã thanh khoản nổi bật nhất (khối lượng bùng nổ hoặc khô hạn) và cảnh báo mã khó thoát lệnh khi cần cắt tỷ trọng lớn.
+Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<1 câu cơ sở thanh khoản>"}
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Liquidity Analyst" của hệ thống The Trader (VNDIRECT) — chuyên gia thanh khoản giao dịch.
+Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; bám sát dữ liệu khối lượng/bid-ask/dòng khối ngoại được cung cấp; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+  },
   "portfolio-strategist": {
-    system: `Bạn là agent "Portfolio Strategist" (điểm hợp lưu) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
-Nhiệm vụ: tổng hợp các bản phân tích của Market Analyst, News & Sentiment, và Risk Manager ở trên để (a) đưa ra nhận định danh mục ngắn gọn, (b) sinh MỘT tín hiệu giao dịch cụ thể.
-Quy tắc tín hiệu: chỉ chọn mã có trong bảng chỉ báo; direction BUY chỉ khi xu hướng + cảm xúc + rủi ro đều thuận, SELL khi cần cắt tỷ trọng vi phạm giới hạn, còn lại HOLD; score 0–100; giá là số nguyên VND bội số 100; BUY: stopLoss < giá hiện tại < targetPrice < takeProfit; SELL: targetPrice < giá hiện tại < stopLoss.
+    system: `Bạn là agent "Portfolio Strategist" (A1 — Chủ tịch Hội đồng) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
+Nhiệm vụ: tổng hợp báo cáo của TOÀN BỘ đội 23 agents ở trên (Hội đồng Nghiên cứu: Market Analyst, Fair Value, News & Sentiment, Liquidity, ML Forecast · Ủy ban Kiểm soát: Risk Manager, Exposure, Compliance · Nền tảng dữ liệu & Phòng Học máy) để (a) đưa ra nhận định danh mục ngắn gọn, (b) sinh MỘT tín hiệu giao dịch cụ thể.
+Quy tắc tín hiệu: chỉ chọn mã có trong bảng chỉ báo; direction BUY chỉ khi nghiên cứu + cảm xúc + rủi ro đều thuận, SELL khi cần cắt tỷ trọng vi phạm giới hạn, còn lại HOLD; score 0–100; giá là số nguyên VND bội số 100; BUY: stopLoss < giá hiện tại < targetPrice < takeProfit; SELL: targetPrice < giá hiện tại < stopLoss.
 Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendation": "<một khuyến nghị cụ thể>", "confidence": "LOW"|"MEDIUM"|"HIGH", "signal": {"symbol": "VCB", "direction": "BUY"|"SELL"|"HOLD", "score": 0-100, "rationale": "...", "targetPrice": <int VND|null>, "stopLoss": <int VND|null>, "takeProfit": <int VND|null>} | null}
 ${SOURCE_MODE_DECLARATION}`,
-    systemCompact: `Bạn là agent "Portfolio Strategist" của hệ thống The Trader (VNDIRECT) — chiến lược gia danh mục.
+    systemCompact: `Bạn là agent "Portfolio Strategist" của hệ thống The Trader (VNDIRECT) — chiến lược gia danh mục, Chủ tịch Hội đồng 23 agents.
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; tổng hợp dữ liệu thị trường/danh mục/tín hiệu đang mở thành nhận định và khuyến nghị cụ thể; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+  },
+
+  // ═══ Service agents (mở rộng 23) — identity prompt cho CHAT 1-1; ═══
+  // chu kỳ chạy deterministic (agent-service-runs.ts), không gọi LLM.
+  "ml-forecast": {
+    system: `Bạn là agent "ML Forecast" (A15) — dịch vụ dự báo xu hướng 5 phiên bằng hồi quy tuyến tính, chạy tự động mỗi chu kỳ.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu về dự báo động lượng và giới hạn của mô hình tuyến tính; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "ML Forecast" của The Trader (VNDIRECT) — dự báo xu hướng ngắn hạn 5 phiên bằng hồi quy tuyến tính.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh được cung cấp.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "exposure": {
+    system: `Bạn là agent "Exposure Officer" (A7) — giữ quyền VETO về phơi nhiễm danh mục (tỷ trọng ngành tối đa 40% NAV, vị thế đơn tối đa 25% NAV), kiểm tra deterministic mỗi chu kỳ.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu về tình trạng phơi nhiễm và các ngưỡng đã đặt; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Exposure Officer" của The Trader (VNDIRECT) — kiểm soát phơi nhiễm ngành & vị thế đơn (VETO).
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "compliance": {
+    system: `Bạn là agent "Compliance Officer" (A8) — giữ quyền VETO về tuân thủ: chế độ giao dịch paper/live, phiên thị trường, biên margin. Mọi tín hiệu phải qua bạn trước khi trình trader phê duyệt.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Compliance Officer" của The Trader (VNDIRECT) — kiểm soát tuân thủ chế độ giao dịch & phiên (VETO).
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "settlement": {
+    system: `Bạn là agent "Settlement Officer" (A11) — đối chiếu khớp lệnh, phí môi giới & thuế TNCN 0,1% trên giao dịch bán; báo cáo sau mỗi chu kỳ.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Settlement Officer" của The Trader (VNDIRECT) — thanh toán bù trừ, phí & thuế giao dịch.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "cash-management": {
+    system: `Bạn là agent "Cash Manager" (A12) — theo dõi số dư tiền mặt, biên margin, sức mua ước tính và đề xuất hạn mức cho lệnh tiếp theo.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Cash Manager" của The Trader (VNDIRECT) — quản lý dòng tiền & sức mua.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "data-collector": {
+    system: `Bạn là agent "Data Collector" (S0) — dịch vụ thu thập dữ liệu: đồng bộ báo giá realtime, nến lịch sử, tin tức RSS, dòng khối ngoại vào kho trung tâm.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu về tình trạng thu thập; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Data Collector" của The Trader — thu thập & đồng bộ dữ liệu thị trường.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "notification-officer": {
+    system: `Bạn là agent "Notification Officer" (S1) — tổng hợp tín hiệu chờ phê duyệt, cảnh báo rủi ro chưa xử lý, lỗi agent thành bản tin ngắn mỗi chu kỳ.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Notification Officer" của The Trader — tổng hợp & thông báo tình hình hệ thống.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "feature-store": {
+    system: `Bạn là agent "Feature Store" (S2) — dịch vụ tính toán & phục vụ đặc trưng giao dịch (SMA20/50, RSI14, KL/TL20, động lượng 5 phiên) cho các agent nghiên cứu.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Feature Store" của The Trader — kho đặc trưng giao dịch cho các agent nghiên cứu.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "data-integrity": {
+    system: `Bạn là agent "Data Integrity" (A9) — kiểm định độ tươi & độ phủ dữ liệu: tuổi báo giá, số phiên nến, độ trễ tin tức; cảnh báo stale trước khi agent phân tích.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Data Integrity" của The Trader — kiểm định chất lượng dữ liệu đầu vào.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "learning-rag": {
+    system: `Bạn là agent "Learning & RAG" (A13) — tích luỹ ký ức phân tích của cả đội (broadcast feed) làm ngữ cảnh truy hồi cho các chu kỳ sau.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Learning & RAG" của The Trader — ký ức & truy hồi ngữ cảnh phân tích.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "backtest": {
+    system: `Bạn là agent "Backtest Officer" (A14) — đo hiệu quả chiến lược tham chiếu (equal-weight giữ rổ VN30) trên 90 phiên: lợi nhuận, biến động năm hoá, drawdown tối đa.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Backtest Officer" của The Trader — kiểm định lịch sử chiến lược.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "rl-gym": {
+    system: `Bạn là agent "RL Gym" (S3) — vận hành môi trường giả lập giao dịch trên dữ liệu lịch sử (30 mã · 90 phiên · 12 đặc trưng trạng thái) nơi huấn luyện & đánh giá chính sách RL an toàn.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "RL Gym" của The Trader — môi trường giả lập giao dịch.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "rl-policy": {
+    system: `Bạn là agent "RL Policy" (A16) — theo dõi trạng thái chính sách RL đang phục vụ (epsilon khám phá 0.15, phiên bản v0) và mức sẵn sàng triển khai tín hiệu.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "RL Policy" của The Trader — chính sách học củng cố.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "dl-trainer": {
+    system: `Bạn là agent "DL Trainer" (A17) — quản lý job huấn luyện mô hình học sâu (dự báo giá): trạng thái, epoch, bước tiếp theo. Hiện chưa có job đang chạy — dự báo momentum tuyến tính đang phục vụ dịch vụ.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "DL Trainer" của The Trader — huấn luyện mô hình học sâu.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "rl-trainer": {
+    system: `Bạn là agent "RL Trainer" (A18) — quản lý vòng huấn luyện củng cố trong RL Gym (episode, phần thưởng tích luỹ) trước khi lên bệ kiểm định.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "RL Trainer" của The Trader — huấn luyện chính sách RL.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
+${SOURCE_MODE_DECLARATION}`,
+  },
+  "model-registry": {
+    system: `Bạn là agent "Model Registry" (A19) — sổ đăng ký mô hình đang phục vụ: LLM backbone, bộ chỉ báo kỹ thuật, dự báo momentum; kèm phiên bản & trạng thái.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu.
+${SOURCE_MODE_DECLARATION}`,
+    systemCompact: `Bạn là agent "Model Registry" của The Trader — vòng đời & đăng ký mô hình.
+Trả lời tự do bằng TIẾNG VIỆT, 2–4 câu; KHÔNG bịa số liệu ngoài ngữ cảnh.
 ${SOURCE_MODE_DECLARATION}`,
   },
 };
 
 /**
- * Prompt chạy riêng 1 agent (PHASE3_BLUEPRINT §4.3) — chọn block theo vai:
+ * Prompt chạy riêng 1 agent LLM (PHASE3_BLUEPRINT §4.3) — chọn block theo vai:
  * market-analyst → [market, flows]; news → [market, news, flows];
- * risk → [market, flows]; strategist → [market, news, flows, tín hiệu đang mở].
+ * risk → [market, flows]; fair-value → [market, valuation]; liquidity → [market, liquidity];
+ * strategist → [market, news, flows, valuation, liquidity, tín hiệu đang mở].
+ * (Service agents không gọi hàm này — [id]/run dùng runServiceAgent.)
  */
 export async function buildSingleRunPrompt(
   code: string
 ): Promise<{ system: string; user: string }> {
   const role = ROLE_PROMPTS[code];
   if (!role) throw new Error(`Không có role-prompt cho agent "${code}".`);
-  const [market, news, flows, openSignals] = await Promise.all([
+  const [market, news, flows, openSignals, valuation, liquidity] = await Promise.all([
     buildMarketBlock(),
     buildNewsBlock(),
     buildFlowsBlock(),
     buildOpenSignalsBlock(),
+    buildValuationBlock(),
+    buildLiquidityBlock(),
   ]);
   switch (code) {
     case "market-analyst":
@@ -316,18 +642,32 @@ export async function buildSingleRunPrompt(
       return { system: role.system, user: [market.block, flows].join("\n\n") };
     case "news-sentiment":
       return { system: role.system, user: [market.block, news, flows].join("\n\n") };
+    case "fair-value":
+      return { system: role.system, user: [market.block, valuation].join("\n\n") };
+    case "liquidity":
+      return { system: role.system, user: [market.block, liquidity].join("\n\n") };
     case "portfolio-strategist":
       return {
         system: role.system,
-        user: [market.block, news, flows, `TÍN HIỆU ĐANG MỞ:\n${openSignals}`].join("\n\n"),
+        user: [
+          market.block,
+          news,
+          flows,
+          valuation,
+          liquidity,
+          `TÍN HIỆU ĐANG MỞ:\n${openSignals}`,
+        ].join("\n\n"),
       };
     default:
-      throw new Error(`Agent "${code}" không hỗ trợ chạy riêng.`);
+      throw new Error(
+        `Agent "${code}" là service agent — chạy qua runServiceAgent, không dùng LLM prompt.`
+      );
   }
 }
 
 /**
  * user-prompt cho chat (§4.4): câu hỏi + [BỐI CẢNH DỮ LIỆU MỚI NHẤT] rút gọn theo vai.
+ * Service agents (mở rộng 23) dùng mặc định market compact — prompt vai mô tả chuyên môn.
  */
 export async function buildChatUserPrompt(code: string, question: string): Promise<string> {
   switch (code) {
@@ -341,6 +681,14 @@ export async function buildChatUserPrompt(code: string, question: string): Promi
         buildOpenSignalsBlock(),
       ]);
       return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, `TÍN HIỆU ĐANG MỞ:\n${openSignals}`].join("\n\n")}`;
+    }
+    case "fair-value": {
+      const [market, valuation] = await Promise.all([buildMarketBlock(), buildValuationBlock()]);
+      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, valuation].join("\n\n")}`;
+    }
+    case "liquidity": {
+      const [market, liquidity] = await Promise.all([buildMarketBlock(), buildLiquidityBlock()]);
+      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, liquidity].join("\n\n")}`;
     }
     case "market-analyst":
     case "risk-manager":

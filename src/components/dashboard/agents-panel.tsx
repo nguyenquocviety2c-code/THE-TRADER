@@ -99,8 +99,8 @@ export function AgentsPanel() {
             Hệ thống đa tác tử (Multi-Agent)
           </CardTitle>
           <CardDescription>
-            5 agent AI phối hợp: phân tích → cảm xúc tin tức → rủi ro → chiến lược →
-            thực thi
+            {agents.length || 23} agents · 5 nhóm phối hợp: nền tảng dữ liệu → nghiên
+            cứu → kiểm soát VETO → chủ tịch → thực thi
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -237,7 +237,8 @@ export function AgentsPanel() {
                       <span className="font-medium text-foreground">
                         Chu kỳ đa tác tử
                       </span>{" "}
-                      đang chạy: 3 agent phân tích → chiến lược → thực thi…
+                      đang chạy: 23 agents qua 5 nhóm — nền tảng dữ liệu → nghiên cứu
+                      → kiểm soát VETO → điều hành → học máy…
                     </p>
                   </li>
                 )}
