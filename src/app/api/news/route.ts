@@ -69,7 +69,11 @@ export async function POST() {
           error: "Vừa nạp tin cách đây dưới 60 giây — vui lòng đợi chút.",
           ...result,
         },
-        { status: 429 }
+        // F-210 (audit 19-b): header chuẩn Retry-After để client backoff đúng
+        {
+          status: 429,
+          headers: { "Retry-After": String(result.retryAfterSeconds ?? 60) },
+        }
       );
     }
     return NextResponse.json(result);

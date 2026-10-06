@@ -148,7 +148,7 @@ docs/                         # Tài liệu chi tiết (xem dưới)
 
 ## Tài liệu chi tiết
 
-- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (17 route), thiết kế 5 agent, realtime & mini-service market-engine
+- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (18 route, có fill/cancel engine), thiết kế 5 agent, realtime & mini-service market-engine
 - [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) — data dictionary 19 model, chính sách kiểu dữ liệu / PII / audit
 - [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) — kho kiểm kê nguồn dữ liệu S1–S6, field mapping, chiến lược fallback
 

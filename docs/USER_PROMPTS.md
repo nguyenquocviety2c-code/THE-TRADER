@@ -216,6 +216,15 @@
 | 7 | HNX/UPCOM + lịch Tết chính thức | Dải giá ±10%/±15%, lịch nghỉ lễ từng năm | ⬜ Pending (schema `Market` đã sẵn; hiện có bảng ước lượng 2026 trong `src/lib/market-session.ts`) |
 | 8 | Reuters/tin quốc tế | Bối cảnh Fed/DXY cho agent | ⬜ Pending (tuỳ chọn) |
 
+## Prompt — Vòng lặp Audit→Fix→Kiểm chứng đến khi sạch (2026-10-06)
+
+> **Người dùng:** "Tiến hành giao thức soát lỗi, tức là triển khai vòng lặp Rà soát lỗi -> Fix lỗi nếu có -> Kiểm chứng -> Xác định còn lỗi thì fix tiếp đến khi lặp lại bước soát lỗi mà không còn lỗi nào nữa thì dừng lại báo cáo và push code cho tôi"
+
+**Thực thi (Task 21-a/21-b → 22-a/22-b):**
+- **Vòng 1 fix:** Task 21-a (orchestrator) — tick route viết lại hoàn toàn: EOD rollover + ngân sách khối lượng ngày (F-103/105), **paper matching engine** khớp lệnh tự động + hủy lệnh endpoint + UI (F-206 100%), index AgentMessage (F-116), meta.mode động (F-117), lịch lễ + biên phiên giây (F-110/111), migration fix-eod-reset; Task 21-b (subagent) — 10 fix lib thuần (F-107/108/109/112/113/114/118/119/210/211/212/301), 48/48 test thuần.
+- **Vòng 2 soát lại từ đầu:** Task 22-a (subagent) vùng A/C/H ~130 mục — 100% PASS P0-P2, fill engine chứng minh đúng tiền tuyệt đối (cash replay 0 ₫ lệch; 4/4 vị thế khớp), phát hiện 3 P3 mới; Task 22-b (orchestrator) fix F-302/303/304 + vùng B/D/E/F/G/I (18 endpoint + browser E2E desktop/mobile console 0 lỗi + golden path 5/5 agent + nút Hủy E2E + VLM false-positive đã chứng minh bằng đo DOM).
+- **Hội tụ:** 33/33 findings đóng (5 P1 + 6 P2 + 19 P3 vòng 1 + 3 P3 vòng 2) — lượt soát cuối không còn lỗi mới. CODE_AUDIT.md nâng v0.3.0. Đủ điều kiện triển khai Giai đoạn 3 (PHASE3_BLUEPRINT).
+
 ---
 
 *File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + đồng bộ Phụ lục sau Giai đoạn 2) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*

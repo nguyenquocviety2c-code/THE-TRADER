@@ -1,5 +1,6 @@
 import { db } from "@/lib/db";
 import { markSource } from "@/lib/sources";
+import { vnDateIso } from "@/lib/market-session";
 
 /**
  * S6 — Alternative data: dòng khối ngoại ròng (DATA_SOURCES.md §4.4).
@@ -11,6 +12,10 @@ import { markSource } from "@/lib/sources";
  *
  * Mapping rủi ro: dòng ròng âm mạnh → RiskAlert WARNING
  * (metricKey "market.foreign_flow.net" — đúng theo tài liệu).
+ *
+ * F-109/F-211/F-212 (audit 19-b): quy mô dòng ròng ≈ 0.5–6% GTGD theo
+ * thanh khoản (hệ số seeded theo mã), clamp 2–80 tỷ VND; ranh giới ngày và
+ * asOf cố định theo ICT (15:00 của ngày tính) — deterministic trong ngày.
  */
 
 export interface ForeignFlowItem {
@@ -76,7 +81,9 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
     },
   });
 
-  const dateIso = new Date().toISOString().slice(0, 10);
+  // F-212 (audit 19-b): ranh giới ngày theo ICT (15:00 ICT lùi về 0h cùng ngày),
+  // không theo UTC — cùng 1 phiên cho ra cùng dateIso dù chạy trước/sau nửa đêm UTC
+  const dateIso = vnDateIso(new Date());
   const items: ForeignFlowItem[] = [];
   let totalBuy = 0;
   let totalSell = 0;
@@ -85,8 +92,10 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
     const q = inst.quotes[0];
     if (!q || q.last <= 0) continue;
     const turnover = q.volume * q.last; // giá trị giao dịch phiên
-    // Quy mô dòng ròng ≈ 0.5–6% thanh khoản, giới hạn 2–80 tỷ VND
-    const scale = Math.min(8e10, Math.max(2e9, turnover * 0.03));
+    // F-109 (audit 19-b): hệ số 0.5%–6% theo thanh khoản (doc §4.4), seeded theo (mã, ngày)
+    const pct = 0.005 + seededUnit(inst.symbol, dateIso) * 0.055; // 0.5%–6% theo thanh khoản (doc §4.4)
+    // Quy mô dòng ròng ≈ pct × thanh khoản, giới hạn 2–80 tỷ VND
+    const scale = Math.min(8e10, Math.max(2e9, turnover * pct));
     const unit = seededUnit(inst.symbol, dateIso) * 2 - 1; // [-1, 1)
     const net = Math.round(unit * scale);
     if (net >= 0) totalBuy += net;
@@ -98,7 +107,9 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
   const sortedAsc = [...items].sort((a, b) => b.netValue - a.netValue);
   const summary: FlowsSummary = {
     mode: "simulated",
-    asOf: new Date().toISOString(),
+    // F-211 (audit 19-b): asOf cố định = mốc đóng phiên 15:00 ICT của ngày tính —
+    // hai lần gọi cùng ngày cho cùng asOf (deterministic tuyệt đối)
+    asOf: `${dateIso}T08:00:00.000Z`, // 15:00 ICT (UTC+7)
     totalNet,
     totalBuy,
     totalSell,

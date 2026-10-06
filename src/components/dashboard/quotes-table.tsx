@@ -135,7 +135,7 @@ export function QuotesTable() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="h-9 w-36 pl-8 text-sm sm:w-48"
-                aria-label="Tìm kiếm mã chứng khoán"
+                aria-label="Tìm kiếm mã cổ phiếu, tên công ty hoặc ngành"
               />
             </div>
           </div>

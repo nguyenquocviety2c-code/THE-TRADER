@@ -464,7 +464,7 @@ async function main() {
         filledQuantity: o.filledQty,
         avgFillPrice: o.filledQty > 0 ? round100(o.price * (0.998 + rand() * 0.004)) : null,
         status: o.status,
-        fee: o.filledQty > 0 ? Math.round(o.filledQty * (o.price ?? 0) * 0.0015) : 0,
+        fee: o.filledQty > 0 ? Math.round(o.filledQty * o.price * 0.0015) : 0,
         note: o.useSignal ? 'Tự động từ tín hiệu agent' : 'Thủ công',
         submittedAt: createdAt,
         filledAt: o.status === 'FILLED' ? new Date(createdAt.getTime() + randInt(5, 50) * 60_000) : null,

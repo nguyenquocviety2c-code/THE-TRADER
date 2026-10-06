@@ -95,7 +95,7 @@ flowchart TB
     GW -. planned .-> API
 ```
 
-**Luồng dữ liệu:** SQLite → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt chu kỳ phân tích đa agent, sinh `AgentMessage`/`Signal`/`Order` giấy), `POST /api/market/tick` (tick giá S4), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`. Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
+**Luồng dữ liệu:** SQLite → Route Handlers (JSON, `BigInt` → `Number`) → TanStack Query cache → React components; ngoài luồng pull này còn **luồng push** từ mini-service `market-engine` qua WebSocket ghi thẳng vào cache (§6). Mutations hiện tại: `POST /api/agents/run` (kích hoạt chu kỳ phân tích đa agent, sinh `AgentMessage`/`Signal`/`Order` giấy), `POST /api/market/tick` (tick giá S4 + khớp lệnh giấy + EOD rollover), `POST /api/news` (crawler RSS S5), `POST /api/signals/[id]/convert`, `POST /api/watchlist/toggle`, `POST /api/orders/[id]/cancel` (hủy lệnh chờ khớp). Không dùng Server Actions — mọi đọc/ghi server đều qua Route Handler để tập trung validation + audit (§7).
 
 ---
 
@@ -137,7 +137,7 @@ Tất cả route là **Route Handlers** trả JSON; lỗi trả `{ "error": stri
 | Method | Route | Mục đích | Response (tóm tắt) |
 |---|---|---|---|
 | GET | `/api/market/quotes` | Toàn bộ VN30 + quote mới nhất (volume desc) **+ summary** (VN-Index proxy, bề rộng, thanh khoản, top gainer/loser) **+ meta nguồn** (`mode`/`asOf` — S4 stale marking) | `{ quotes: QuoteRow[], summary, meta }` |
-| POST | `/api/market/tick` | **Tick bảng giá S4** (engine mô phỏng): random-walk + mean-reversion 3% trên quote mới nhất từng mã, tuân thủ Q1 (bội 100) · Q2 (dải ±7%) · Q3 · Q5; `MARKET_STRICT_SESSION=true` thì chỉ chạy trong phiên (ngoài phiên trả `skipped: true`) | payload cùng shape `GET /api/market/quotes` + `ticked` |
+| POST | `/api/market/tick` | **Tick bảng giá S4** (engine mô phỏng): random-walk + mean-reversion 3% trên quote mới nhất từng mã, tuân thủ Q1 (bội 100) · Q2 (dải ±7%) · Q3 · Q5; **EOD rollover** khi sang ngày ICT mới (ghi Bar phiên cũ, refPrice/dải/volume mới — ngân sách ngày 0,3–9,2tr cp); **khớp lệnh giấy** PENDING/PARTIALLY_FILLED khi giá vượt điều kiện (BUY `last ≤ giá đặt` · SELL `last ≥ giá đặt`) — cập nhật Trade/Position/tiền mặt/equity + audit `ORDER_FILLED`; lệnh SELL vượt điều kiện nhưng không đủ vị thế → **tự REJECTED 1 lần** + audit `ORDER_REJECTED` (không retry); `MARKET_STRICT_SESSION=true` thì chỉ chạy trong phiên (ngoài phiên trả `skipped: true`) | payload cùng shape `GET /api/market/quotes` + `ticked`/`rolled`/`fills` |
 | GET | `/api/market/flows` | **Dòng khối ngoại ròng S6**: mode `simulated` — deterministic (FNV-1a hash theo mã+ngày), scale theo thanh khoản thật (2–80 tỷ VND); tổng bán ròng < −300 tỷ → RiskAlert WARNING `FOREIGN_FLOW_OUTFLOW` (dedupe 24h) | `{ mode, asOf, totalNet, totalBuy, totalSell, topNet[], topSell[], note }` |
 | GET | `/api/news?limit=12` | 12 tin RSS mới nhất (S5) + meta nguồn cho stale marking | `{ items[], meta: { total, mode, lastSuccessAt, stale, ageMinutes, providers } }` |
 | POST | `/api/news` | **Chạy crawler RSS 5 nguồn ngay** (rate-limit 60s giữa 2 lần nạp, audit `NEWS_INGESTED`) — nạp được thì `mode=live`, nguồn chết → `fallback` | `{ added, updated, total, mode, feeds[] }` · 429 nếu dồn lịch |
@@ -147,6 +147,7 @@ Tất cả route là **Route Handlers** trả JSON; lỗi trả `{ "error": stri
 | GET | `/api/instruments/bars?symbol=VCB&days=90` | Chuỗi OHLCV + SMA20 cho price chart (cap 90 ngày) | `{ symbol, name, last, change, changePct, bars[] }` |
 | GET | `/api/portfolio` | Sổ tài khoản demo (**accountNumber đã mask**) + positions P&L runtime + totals | `{ account, positions[], totals }` |
 | GET | `/api/orders` | 20 lệnh + 20 bút toán gần nhất (fee/tax dạng Number) | `{ orders[], trades[] }` |
+| POST | `/api/orders/[id]/cancel` | **Hủy lệnh đang chờ khớp** (chỉ PENDING/PARTIALLY_FILLED — phần chưa khớp; lệnh đã kết thúc → 409; không có → 404) + audit `ORDER_CANCELLED`; chạy đua an toàn với fill engine trong tick (claim có điều kiện) | `{ order }` · 404/409 |
 | GET | `/api/agents` | Trạng thái 5 agent (config parse, pendingTaskCount, lastRun) + 12 nhiệm vụ | `{ agents[], tasks[] }` |
 | POST | `/api/agents/run` | **Chu kỳ phân tích đa agent đầy đủ** (4 LLM call: 3 agent phân tích → strategist tổng hợp → execution giấy, xem §5.2; prompt giờ kèm `newsBlock` 10 tin RSS + `flowsBlock`) | `{ runId, messages[], signals[], order, failures[], durationMs }` |
 | GET | `/api/agents/messages?limit=30` | Feed tin broadcast gần nhất | `{ messages[] }` join `fromAgent` |
@@ -259,7 +260,7 @@ Query `XTransformPort` được socket.io gắn vào mọi request engine.io (pa
 | **API-only backend** | **Không dùng Server Actions** — mọi đọc/ghi qua Route Handlers: một cửa duy nhất để validate payload, kiểm soát rate, và ghi `AuditLog`. |
 | **Relative-path API calls** | Client chỉ `fetch('/api/...')` — không hard-code origin, tránh leak cross-origin và SSRF-style redirect; deploy được dưới bất kỳ reverse-proxy/domain nào. |
 | **LLM backend-only** | `z-ai-web-dev-sdk` chỉ import trong Route Handlers (`/api/agents/run`); SDK không bao giờ nằm trong dependency graph của client components → API key không expose. |
-| **Audit logging** | `AuditLog` ghi mọi hành động nhạy cảm: `ORDER_CREATED`, `SIGNAL_APPROVED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`, `RISK_ALERT_RAISED` (runtime: flows khối ngoại + stale escalate — audit 2026-10-06 F-206), `SIGNAL_REJECTED` (Giai đoạn 3) (kèm `before`/`after` JSON, `ip`). `ORDER_FILLED`/`ORDER_CANCELLED` sẽ do fill/cancel engine ghi — **pending Giai đoạn 3** (hiện chưa có luồng khớp/hủy runtime). |
+| **Audit logging** | `AuditLog` ghi mọi hành động nhạy cảm: `ORDER_CREATED`, **`ORDER_FILLED`** (fill engine trong tick — khớp lệnh giấy, kèm phí/thuế), **`ORDER_CANCELLED`** (POST /api/orders/[id]/cancel), **`ORDER_REJECTED`** (fill engine từ chối lệnh SELL không đủ vị thế — F-303, audit 22-a), `SIGNAL_APPROVED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`, `RISK_ALERT_RAISED` (runtime: flows khối ngoại + stale escalate) — đủ 12/12 action runtime (fix F-206 + F-303); `SIGNAL_REJECTED` sẽ thêm ở Giai đoạn 3 (kèm `before`/`after` JSON, `ip`). |
 | **Soft delete** | User/BrokerAccount/Instrument chỉ soft delete (`deletedAt`) — bảo toàn tính truy vết (xem [DB_SCHEMA.md §4.2](./DB_SCHEMA.md)). |
 | **SQL injection** | Toàn bộ truy vấn qua Prisma Client parameterized — không string-concat SQL. |
 

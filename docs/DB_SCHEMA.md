@@ -95,7 +95,7 @@ Query mặc định **không** lọc soft-deleted (Prisma không có global filt
 
 - `createdAt DateTime @default(now())` — có trên **mọi** model (append-only semantics).
 - `updatedAt DateTime @updatedAt` — có trên các model mutable: `User`, `BrokerAccount`, `Instrument`, `Bar`, `Agent`, `AgentTask`, `Signal`, `Order`, `Position`, `Watchlist`, `DataSourceStatus`.
-- Models append-only **không** có `updatedAt`: `Quote`, `AgentRun`, `AgentMessage`, `Trade`, `RiskAlert`, `AuditLog`, `WatchlistItem`, `NewsItem` (chỉ có `createdAt`, kèm `tradedAt`/`executedAt`/`addedAt`/`fetchedAt` theo ngữ cảnh).
+- Models append-only **không** có `updatedAt`: `AgentRun`, `AgentMessage`, `Trade`, `RiskAlert`, `AuditLog`, `WatchlistItem`, `NewsItem` (chỉ có `createdAt`, kèm `executedAt`/`addedAt`/`fetchedAt` theo ngữ cảnh). Riêng `Quote` cũng không có `updatedAt` nhưng **không hoàn toàn append-only**: mỗi mã giữ một row quote hiện hành được **cập nhật tại chỗ** mỗi tick (update-in-place — xem §6.4 và DATA_SOURCES.md Q4); lịch sử giá theo ngày nằm ở `Bar`.
 - `AuditLog` (§6.16) là audit trail nghiệp vụ tách bạch: ghi `before`/`after` JSON cho mỗi hành động nhạy cảm. Riêng `DataSourceStatus` là bảng trạng thái ghi đè liên tục (upsert theo `key`) — nó **chính là** audit cho tình trạng nguồn dữ liệu (§6.19).
 
 ---
@@ -342,7 +342,7 @@ Quy ước cột: **Constraints/Default** ghi ràng buộc Prisma; **Mô tả** 
 | `accountNumber` | String | **PII**, một phần `@@unique([broker, accountNumber])` | Số tài khoản tại môi giới (VD: `VD0029961828`) |
 | `accountType` | String | default `"basic"` | `basic` \| `margin` — ảnh hưởng hạn mức vay |
 | `cashBalance` | BigInt | default `0` | Số dư tiền khả dụng (VND, integer) |
-| `equity` | BigInt | default `0` | Tổng giá trị tài khoản = tiền + giá trị thị trường vị thế (VND) |
+| `equity` | BigInt | default `0` | Tổng giá trị tài khoản = tiền mặt + giá trị thị trường vị thế mở (VND) — **snapshot**: được chốt lại khi khớp lệnh (fill engine) và khi sang phiên mới (EOD rollover, fix F-105); giá trị live luôn do `/api/portfolio` tính runtime từ giá hiện tại |
 | `marginUsed` | BigInt | default `0` | Nợ margin đang sử dụng (VND) |
 | `currency` | String | default `"VND"` | Đồng tiền định khoản |
 | `status` | String | default `"ACTIVE"` | Trạng thái tài khoản tại broker |
@@ -382,6 +382,8 @@ Quy ước cột: **Constraints/Default** ghi ràng buộc Prisma; **Mô tả** 
 ### 6.4 `Quote` — Báo giá realtime (level-1)
 
 Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/snapshot từ nguồn thị trường. Hiện tại quote mới nhất được cập nhật bởi **tick engine mô phỏng** `POST /api/market/tick` (S4 — random-walk có mean-reversion, tuân thủ Q1–Q5, đánh dấu `mode="simulated"`); lộ trình nối feed VNDIRECT/VPS — xem [DATA_SOURCES.md §4.2](./DATA_SOURCES.md)).
+
+**Vòng đời phiên (EOD rollover — fix F-103):** tick đầu tiên của ngày ICT mới sẽ (1) ghi `Bar` OHLCV của phiên vừa đóng (chỉ ngày giao dịch T2–T6, bỏ lễ — Q7), (2) kéo `refPrice` về close phiên trước và mở dải trần/sàn mới ±7%, (3) reset `volume` về 0 với **ngân sách khối lượng ngày** 0,3–9,2 triệu cp/mã (FNV-1a theo `(mã, ngày)`) — khối lượng chỉ tăng trong phiên (Q3) và không tích luỹ vô hạn qua ngày. Cuối mỗi tick, **bộ khớp lệnh giấy** (fill engine) khớp lệnh `PENDING`/`PARTIALLY_FILLED` khi giá vượt điều kiện — xem §6.11 Order và DATA_SOURCES.md §4.2.
 
 | Field | Type | Constraints / Default | Mô tả |
 |---|---|---|---|
@@ -503,7 +505,8 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 
 **Indexes/constraints:**
 - `@@index([fromAgentId, createdAt(sort: Desc)])` — feed "agent này vừa nói gì";
-- `@@index([toAgentId, createdAt(sort: Desc)])` — inbox agent nhận.
+- `@@index([toAgentId, createdAt(sort: Desc)])` — inbox agent nhận;
+- `@@index([createdAt])` — feed broadcast toàn cục sort theo thời gian (fix F-116, audit 19-a: query feed cũ SCAN toàn bảng).
 
 **Retention:** giữ 30–90 ngày cho hoạt động phân tích; là dữ liệu lớn nhất của tầng agent (text LLM).
 
@@ -784,7 +787,7 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 - **30 mã VN30** (VCB, FPT, VHM…) kèm tên tiếng Việt, ngành, giá tham chiếu thực tế, độ biến động, khối lượng nền — tất cả `HOSE/STOCK`.
 - **90 ngày OHLCV mỗi mã** (2,700 bar): random-walk có mean-reversion, bỏ thứ 7/CN, giá làm tròn 100 VND; close cuối ép về giá tham chiếu.
 - **Quote mới nhất mỗi mã**: change/changePct so close trước, trần/sàn ±7%, bid/ask ±0.1% kèm khối lượng ngẫu nhiên.
-- **Demo user + tài khoản VNDIRECT margin** (số dư 486.5tr, equity 1.284tr, margin 92tr).
+- **Demo user + tài khoản VNDIRECT margin** (số dư 486,5tr; equity seed gốc 1,284tr đã được migration audit 2026-10-06 tính lại thành `cash + GTTH` ≈ 1,572tr và được fill engine/EOD rollover chốt liên tục; margin 92tr).
 - **5 agent** (config thật ở [TECHNICAL_BLUEPRINT.md §5](./TECHNICAL_BLUEPRINT.md)) + 6 AgentRun/agent, 9 AgentTask, 5 AgentMessage broadcast, 8 Signal, 7 Position, 7 Order + Trade (fee/tax đúng quy ước §8), 3 RiskAlert, 6 AuditLog, watchlist mặc định 8 mã.
 
 Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — chỉ chạy ở môi trường dev/demo. Chi tiết thuật toán sinh dữ liệu: [DATA_SOURCES.md §3](./DATA_SOURCES.md).
@@ -797,3 +800,4 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 |---|---|
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; đồng bộ 1-1 với `prisma/schema.prisma` (17 model, 12 enum) |
 | 2026-10-06 | **v0.2 — Giai đoạn 2:** thêm 2 model `NewsItem` (S5 RSS, dedupe theo `url`) + `DataSourceStatus` (S4 stale marking, singleton-theo-`key`) → tổng **19 model**; cập nhật ERD + dictionary §6.18/§6.19; ghi nhận quote được cập nhật bởi tick engine `POST /api/market/tick`; bổ sung action audit mới |
+| 2026-10-06 | **v0.3 — Audit vòng 1+2 (Task 21/22):** `AgentMessage` thêm `@@index([createdAt])` (F-116); §6.4 Quote bổ sung vòng đời phiên EOD rollover + fill engine; §6.2 `equity` ghi rõ chính sách snapshot (chốt khi khớp lệnh/EOD, live do `/api/portfolio` tính); §4.3 làm rõ Quote là update-in-place tại chỗ (không append-only — khớp DATA_SOURCES Q4); §9 cập nhật equity migration; thay lễ 2026-04-10 → 2026-04-27 trong lịch (ở `market-session.ts`) |

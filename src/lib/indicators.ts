@@ -28,6 +28,9 @@ export function rsi(closes: number[], period = 14): number | null {
     avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
     avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
   }
+  // F-118 (audit 19-b): chuỗi giá PHẲNG (avgGain=0 && avgLoss=0) không có
+  // xu hướng đo được → null; chỉ khi toàn gain (avgLoss=0, avgGain>0) mới là RSI 100 chuẩn Wilder
+  if (avgLoss === 0 && avgGain === 0) return null; // chuỗi phẳng — không có xu hướng đo được
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);

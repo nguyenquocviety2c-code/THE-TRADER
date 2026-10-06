@@ -41,6 +41,8 @@ export interface NewsIngestResult {
   mode: SourceMode;
   feeds: FeedResult[];
   ingestedAt: string;
+  /** F-210 (audit 19-b): số giây còn chờ khi đánh 429 — cho header Retry-After. */
+  retryAfterSeconds?: number;
 }
 
 /** Guard rate-limit trong bộ nhớ (một process Next.js duy nhất). */
@@ -48,6 +50,16 @@ let lastIngestAt = 0;
 
 const parser = new XMLParser({
   ignoreAttributes: true,
+  trimValues: true,
+  processEntities: true,
+});
+
+// F-108 (audit 19-b): parser riêng cho Atom — phải giữ attribute để đọc
+// <link href="..." rel="alternate"/> (parser phía trên bỏ attribute nên
+// Atom item mất href → bị bỏ qua). Parser RSS giữ nguyên để 5 feed chạy tốt.
+const atomParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
   trimValues: true,
   processEntities: true,
 });
@@ -63,14 +75,35 @@ function cleanText(raw: unknown, max = 320): string {
   return text.length > max ? text.slice(0, max).trimEnd() + "…" : text;
 }
 
+/** F-108 (audit 19-b): trích href từ một node link (string | object {@_href|href}). */
+function linkHref(raw: unknown): string | null {
+  if (typeof raw === "string") return raw.startsWith("http") ? raw : null;
+  if (raw !== null && typeof raw === "object") {
+    const href =
+      (raw as Record<string, unknown>)["@_href"] ??
+      (raw as Record<string, unknown>).href;
+    if (typeof href === "string" && href.startsWith("http")) return href;
+  }
+  return null;
+}
+
 function firstLink(item: Record<string, unknown>): string | null {
   const link = item.link;
+  // RSS 2.0: <link> là string thuần
   if (typeof link === "string" && link.startsWith("http")) return link;
-  // Atom: link là mảng object {href}
-  if (Array.isArray(link)) {
-    for (const l of link) {
-      const href = (l as { href?: unknown })?.href;
-      if (typeof href === "string" && href.startsWith("http")) return href;
+  // Atom: <link> là object hoặc mảng object {"@_href", "@_rel"} —
+  // ưu tiên rel="alternate" (bản tin gốc) hoặc không có rel, mới tới rel khác
+  if (link !== null && typeof link === "object") {
+    const list = Array.isArray(link) ? link : [link];
+    const alternates = list.filter((l) => {
+      const rel =
+        (l as Record<string, unknown>)["@_rel"] ??
+        (l as Record<string, unknown>).rel;
+      return rel === undefined || rel === "alternate";
+    });
+    for (const l of [...alternates, ...list]) {
+      const href = linkHref(l);
+      if (href) return href;
     }
   }
   const guid = item.guid;
@@ -89,7 +122,9 @@ function parseDate(item: Record<string, unknown>): Date {
 }
 
 function extractItems(xml: string): Record<string, unknown>[] {
-  const doc = parser.parse(xml) as Record<string, unknown>;
+  // F-108 (audit 19-b): Atom feed cần parser giữ attribute (atomParser)
+  const isAtom = /<feed[\s>]/i.test(xml);
+  const doc = (isAtom ? atomParser : parser).parse(xml) as Record<string, unknown>;
   const rss = doc.rss as Record<string, unknown> | undefined;
   const channel = (rss?.channel ?? doc.channel) as
     | Record<string, unknown>
@@ -118,14 +153,27 @@ function extractItems(xml: string): Record<string, unknown>[] {
 export async function ingestNews(): Promise<NewsIngestResult> {
   const now = Date.now();
   if (now - lastIngestAt < MIN_INGEST_INTERVAL_MS) {
-    const [total] = await Promise.all([db.newsItem.count()]);
+    // F-107 (audit 19-b): trả mode THẬT từ DB thay vì hardcode "live" —
+    // guard không crawl nên không được phép tự xoá nhãn fallback/stale.
+    const [total, status] = await Promise.all([
+      db.newsItem.count(),
+      db.dataSourceStatus.findUnique({
+        where: { key: "news" },
+        select: { mode: true },
+      }),
+    ]);
     return {
       added: 0,
       updated: 0,
       total,
-      mode: "live",
+      mode: (status?.mode as SourceMode) ?? "fallback",
       feeds: [],
       ingestedAt: new Date(lastIngestAt).toISOString(),
+      // F-210 (audit 19-b): đếm ngược còn lại cho client backoff
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((MIN_INGEST_INTERVAL_MS - (now - lastIngestAt)) / 1000)
+      ),
     };
   }
   lastIngestAt = now;

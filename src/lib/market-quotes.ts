@@ -5,37 +5,45 @@ import type { MarketSummary, QuoteRow, QuotesResponse } from "@/lib/types";
  * Builder chung cho payload bảng giá VN30 + summary — dùng bởi cả
  * GET /api/market/quotes và POST /api/market/tick (S4) để hai đường
  * trả về đúng cùng một shape cho UI và WebSocket broadcast.
+ * F-117 (audit): meta.mode lấy từ DataSourceStatus thật (market-quotes)
+ * thay vì hardcode "simulated" — trung thực với trạng thái nguồn.
  */
 export async function loadQuotesPayload(): Promise<
   QuotesResponse & { meta: { mode: string; asOf: string } }
 > {
-  const instruments = await db.instrument.findMany({
-    where: { isActive: true },
-    select: {
-      symbol: true,
-      name: true,
-      sector: true,
-      market: true,
-      quotes: {
-        orderBy: { tradedAt: "desc" },
-        take: 1,
-        select: {
-          last: true,
-          change: true,
-          changePct: true,
-          volume: true,
-          bidPrice: true,
-          askPrice: true,
-          bidVolume: true,
-          askVolume: true,
-          refPrice: true,
-          ceilingPrice: true,
-          floorPrice: true,
-          tradedAt: true,
+  const [instruments, sourceStatus] = await Promise.all([
+    db.instrument.findMany({
+      where: { isActive: true },
+      select: {
+        symbol: true,
+        name: true,
+        sector: true,
+        market: true,
+        quotes: {
+          orderBy: { tradedAt: "desc" },
+          take: 1,
+          select: {
+            last: true,
+            change: true,
+            changePct: true,
+            volume: true,
+            bidPrice: true,
+            askPrice: true,
+            bidVolume: true,
+            askVolume: true,
+            refPrice: true,
+            ceilingPrice: true,
+            floorPrice: true,
+            tradedAt: true,
+          },
         },
       },
-    },
-  });
+    }),
+    db.dataSourceStatus.findUnique({
+      where: { key: "market-quotes" },
+      select: { mode: true },
+    }),
+  ]);
 
   const quotes: QuoteRow[] = instruments
     .map((i) => {
@@ -86,14 +94,14 @@ export async function loadQuotesPayload(): Promise<
       q.changePct > (best?.changePct ?? -Infinity)
         ? { symbol: q.symbol, changePct: q.changePct, last: q.last }
         : best,
-    null
+    null,
   );
   const topLoser = quotes.reduce<MarketSummary["topLoser"]>(
     (worst, q) =>
       q.changePct < (worst?.changePct ?? Infinity)
         ? { symbol: q.symbol, changePct: q.changePct, last: q.last }
         : worst,
-    null
+    null,
   );
 
   const latestTradedAt = quotes.reduce<string>((max, q) => {
@@ -114,6 +122,6 @@ export async function loadQuotesPayload(): Promise<
       topGainer,
       topLoser,
     },
-    meta: { mode: "simulated", asOf: latestTradedAt },
+    meta: { mode: sourceStatus?.mode ?? "simulated", asOf: latestTradedAt },
   };
 }

@@ -9,11 +9,16 @@ import { db } from "@/lib/db";
  * - Clamped to [0, 100]
  *
  * Called after every AgentRun so `Agent.healthScore` reflects real telemetry.
+ *
+ * F-113 (audit 19-b): `excludeRunId` — loại run VỪA TẠO khỏi tập P50 vì
+ * updateAgentHealth được gọi sau khi persist run; nếu không loại, P50 tự
+ * tham chiếu chính run đó (đo lường lệch, run nhanh tự thưởng bản thân).
  */
 export async function updateAgentHealth(
   agentId: string,
   success: boolean,
-  durationMs: number | null
+  durationMs: number | null,
+  excludeRunId?: string
 ): Promise<number> {
   const [agent, priorRuns] = await Promise.all([
     db.agent.findUnique({
@@ -21,7 +26,11 @@ export async function updateAgentHealth(
       select: { healthScore: true },
     }),
     db.agentRun.findMany({
-      where: { agentId, taskStatus: "COMPLETED" },
+      where: {
+        agentId,
+        taskStatus: "COMPLETED",
+        ...(excludeRunId ? { id: { not: excludeRunId } } : {}),
+      },
       orderBy: { startedAt: "desc" },
       take: 10,
       select: { durationMs: true },

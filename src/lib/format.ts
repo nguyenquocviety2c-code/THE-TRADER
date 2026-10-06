@@ -5,6 +5,8 @@
  * - Compact volume: "1,8tr" / "2,4 tỷ"
  */
 
+import { isTradingSession } from "@/lib/market-session";
+
 const nf = new Intl.NumberFormat("vi-VN", {
   maximumFractionDigits: 0,
 });
@@ -113,19 +115,9 @@ export function formatDateTime(iso: string | null | undefined): string {
 /**
  * VN market session (Asia/Ho_Chi_Minh, Mon–Fri):
  * morning 09:15–11:30, afternoon 13:00–14:45.
+ * F-112 (audit 19-b): ủy quyền cho market-session.ts (pure, client-safe) —
+ * tôn trọng lịch nghỉ lễ VN thay vì tự tính session thủ công.
  */
 export function isMarketOpen(now: Date = new Date()): boolean {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(now);
-  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
-  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
-  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
-  if (["Sat", "Sun"].includes(weekday)) return false;
-  const t = hour * 60 + minute;
-  return (t >= 555 && t <= 690) || (t >= 780 && t <= 885);
+  return isTradingSession(now);
 }

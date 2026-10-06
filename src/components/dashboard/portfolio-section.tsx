@@ -1,10 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Wallet } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -16,7 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { useUiStore } from "@/lib/store";
 import {
   changeColor,
@@ -333,6 +335,24 @@ function OrderRowView({ order }: { order: OrderRow }) {
     label: order.status,
     className: "border-border bg-muted text-muted-foreground",
   };
+  const queryClient = useQueryClient();
+
+  // F-206 (audit): hủy lệnh đang chờ khớp (phần chưa khớp) — POST /api/orders/[id]/cancel
+  const cancelable = order.status === "PENDING" || order.status === "PARTIALLY_FILLED";
+  const cancelMutation = useMutation({
+    mutationFn: () =>
+      apiPost<{ order: { id: string; status: string } }>(
+        `/api/orders/${order.id}/cancel`
+      ),
+    onSuccess: () => {
+      toast.success(`Đã hủy lệnh ${order.symbol}`);
+      queryClient.invalidateQueries({ queryKey: ["orders"] });
+    },
+    onError: (err: Error) => {
+      toast.error(err.message ?? "Không hủy được lệnh.");
+    },
+  });
+
   return (
     <TableRow className="min-h-11">
       <TableCell className="tabular-nums whitespace-nowrap text-muted-foreground">
@@ -373,9 +393,24 @@ function OrderRowView({ order }: { order: OrderRow }) {
         )}
       </TableCell>
       <TableCell>
-        <Badge variant="outline" className={cn("whitespace-nowrap", status.className)}>
-          {status.label}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className={cn("whitespace-nowrap", status.className)}>
+            {status.label}
+          </Badge>
+          {cancelable ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 px-3 text-xs text-muted-foreground"
+              disabled={cancelMutation.isPending}
+              onClick={() => cancelMutation.mutate()}
+              aria-label={`Hủy lệnh ${order.side === "BUY" ? "mua" : "bán"} ${order.symbol}`}
+            >
+              {cancelMutation.isPending ? "Đang hủy…" : "Hủy"}
+            </Button>
+          ) : null}
+        </div>
       </TableCell>
     </TableRow>
   );

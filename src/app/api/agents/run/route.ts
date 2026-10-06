@@ -168,7 +168,7 @@ async function persistRun(
     where: { id: agentId },
     data: { status: success ? "IDLE" : "ERROR", lastRunAt: finishedAt },
   });
-  await updateAgentHealth(agentId, success, durationMs);
+  await updateAgentHealth(agentId, success, durationMs, run.id); // F-113: loại run vừa tạo khỏi P50
   return { id: run.id, durationMs };
 }
 
@@ -199,7 +199,13 @@ export async function POST() {
         error: `Chu kỳ agent trước đó chạy cách đây ${Math.floor(sinceLast / 1000)}s. Vui lòng đợi thêm chút để tránh tốn chi phí LLM.`,
         retryAfterSeconds: Math.ceil((CYCLE_COOLDOWN_MS - sinceLast) / 1000),
       },
-      { status: 429 }
+      // F-210b (audit 19-b): header chuẩn Retry-After để client backoff đúng
+      {
+        status: 429,
+        headers: {
+          "Retry-After": String(Math.ceil((CYCLE_COOLDOWN_MS - sinceLast) / 1000)),
+        },
+      }
     );
   }
   lastCycleStartedAt = now;

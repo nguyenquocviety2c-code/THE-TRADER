@@ -8,15 +8,34 @@ function vnShift(date: Date): Date {
   return new Date(date.getTime() + 7 * 3_600_000);
 }
 
+/** Ngày ISO (YYYY-MM-DD) theo Asia/Ho_Chi_Minh — ranh giới ngày luôn theo ICT (F-212). */
+export function vnDateIso(date: Date = new Date()): string {
+  return vnShift(date).toISOString().slice(0, 10);
+}
+
 /** Lịch nghỉ lễ Việt Nam (ước lượng, cập nhật hàng năm). */
 const VN_HOLIDAYS = new Set<string>([
   // 2026
   "2026-01-01", // Tết Dương lịch
   "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", // Tết Bính Ngọ
-  "2026-04-10", // Giỗ Tổ Hùng Vương (10/3 âm)
+  // F-110 (audit): Giỗ Tổ 10/3 âm = CN 26/04/2026 → thị trường nghỉ bù thứ Hai 27/04
+  "2026-04-27",
   "2026-04-30", "2026-05-01", // 30/4 & 1/5
   "2026-09-02", "2026-09-03", // Quốc khánh
 ]);
+
+// Biên phiên tính bằng GIÂY kể từ 00:00 ICT (F-111 — chính xác tới từng giây):
+// 09:15:00=33300 · 11:30:00=41400 · 13:00:00=46800 · 14:45:00=53100 · 15:00:00=54000
+const SEC_MORNING_OPEN = 9 * 3_600 + 15 * 60;
+const SEC_MORNING_CLOSE = 11 * 3_600 + 30 * 60;
+const SEC_PM_OPEN = 13 * 3_600;
+const SEC_PM_CLOSE = 14 * 3_600 + 45 * 60;
+const SEC_EOD = 15 * 3_600;
+
+function vnSeconds(date: Date): number {
+  const v = vnShift(date);
+  return v.getUTCHours() * 3_600 + v.getUTCMinutes() * 60 + v.getUTCSeconds();
+}
 
 export function isTradingDay(date: Date): boolean {
   const v = vnShift(date);
@@ -29,9 +48,11 @@ export function isTradingDay(date: Date): boolean {
 /** Phiên liên tục HOSE: 09:15–11:30 và 13:00–14:45 (ATC 14:45–15:00 tính riêng). */
 export function isTradingSession(date: Date): boolean {
   if (!isTradingDay(date)) return false;
-  const v = vnShift(date);
-  const m = v.getUTCHours() * 60 + v.getUTCMinutes();
-  return (m >= 555 && m <= 690) || (m >= 780 && m <= 885);
+  const t = vnSeconds(date);
+  return (
+    (t >= SEC_MORNING_OPEN && t <= SEC_MORNING_CLOSE) ||
+    (t >= SEC_PM_OPEN && t <= SEC_PM_CLOSE)
+  );
 }
 
 export type SessionPhase =
@@ -44,13 +65,12 @@ export type SessionPhase =
 
 export function sessionPhase(date: Date): SessionPhase {
   if (!isTradingDay(date)) return "closed";
-  const v = vnShift(date);
-  const m = v.getUTCHours() * 60 + v.getUTCMinutes();
-  if (m < 555) return "pre-open";
-  if (m <= 690) return "morning";
-  if (m < 780) return "lunch";
-  if (m <= 885) return "afternoon";
-  if (m <= 900) return "atc";
+  const t = vnSeconds(date);
+  if (t < SEC_MORNING_OPEN) return "pre-open";
+  if (t <= SEC_MORNING_CLOSE) return "morning";
+  if (t < SEC_PM_OPEN) return "lunch";
+  if (t <= SEC_PM_CLOSE) return "afternoon";
+  if (t <= SEC_EOD) return "atc";
   return "closed";
 }
 

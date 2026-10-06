@@ -290,6 +290,8 @@ model AgentMessage {
 
   @@index([fromAgentId, createdAt(sort: Desc)])
   @@index([toAgentId, createdAt(sort: Desc)])
+  // F-116 (audit 19-a): feed message toàn cục sort theo createdAt — thêm index riêng
+  @@index([createdAt])
 }
 
 // ─────────────────────────────────────────────────────────────────

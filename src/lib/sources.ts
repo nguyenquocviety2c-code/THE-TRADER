@@ -46,7 +46,6 @@ export async function markSource(
 ): Promise<void> {
   const def = SOURCE_DEFS.find((d) => d.key === key);
   const label = def?.label ?? key;
-  const existing = await db.dataSourceStatus.findUnique({ where: { key } });
   const now = new Date();
   await db.dataSourceStatus.upsert({
     where: { key },
@@ -65,7 +64,6 @@ export async function markSource(
       meta: patch.meta ? safeJson(patch.meta) : undefined,
     },
   });
-  void existing;
 }
 
 function safeJson(v: unknown): string {
@@ -145,8 +143,14 @@ export async function escalateStaleSources(): Promise<number> {
     const { stale, ageMinutes } = staleOf(s);
     if (!stale || ageMinutes == null || ageMinutes < 240) continue;
     const since = new Date(Date.now() - 24 * 3_600_000);
+    // F-119 (audit 19-b): dedupe THEO NGUỒN (code + metricKey) — trước đây chỉ
+    // theo code nên 2 nguồn cùng stale thì nguồn thứ 2 không bao giờ có alert
     const dup = await db.riskAlert.findFirst({
-      where: { code: "DATA_SOURCE_STALE", createdAt: { gte: since } },
+      where: {
+        code: "DATA_SOURCE_STALE",
+        metricKey: `source.${s.key}.stale_minutes`,
+        createdAt: { gte: since },
+      },
       select: { id: true },
     });
     if (dup) continue;
