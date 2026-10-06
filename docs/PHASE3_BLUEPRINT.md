@@ -1,7 +1,7 @@
 # The Trader — Blueprint Giai đoạn 3: Đội Agent & Trạm chỉ huy
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/PHASE3_BLUEPRINT.md` · **Version:** 0.1.0 (draft — chờ phê duyệt) · **Created:** 2026-10-06
+> **Document:** `docs/PHASE3_BLUEPRINT.md` · **Version:** 1.0.0 (**đã triển khai xong** — B1/B2/B3 verified E2E 2026-10-06, xem worklog Task 23–27) · **Created:** 2026-10-06
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (kiến trúc v0.3) · [DB_SCHEMA.md](./DB_SCHEMA.md) (data dictionary 19 models) · [DATA_SOURCES.md](./DATA_SOURCES.md) (nguồn dữ liệu) · [CODE_AUDIT.md](./CODE_AUDIT.md) (rà soát trước khi triển khai)
 > **Nguồn gốc:** góp ý người dùng + bản review theo persona CFO VNDIRECT (worklog Task 17): *thiếu module riêng cho đội Agents, không làm việc được với từng agent, dashboard chính sơ sài*
 
@@ -338,3 +338,4 @@ Mỗi prompt kết thúc bằng: *"Dữ liệu thị trường hiện mang nhãn
 | Ngày | Thay đổi |
 |---|---|
 | 2026-10-06 | Tạo bản draft 0.1.0 theo góp ý người dùng (Task 17 review CFO): 3 bước — App shell, Workspace Đội Agent (roster + chi tiết + chạy riêng + chat + phê duyệt/từ chối), nâng cấp dashboard (nến/RSI/volume, cột trần-sàn, donut tỷ trọng, sức mua ước tính, chip chi phí AI). Chờ phê duyệt trước khi triển khai. |
+| 2026-10-06 | **v1.0.0 — TRIỂN KHAI HOÀN TẤT** (Task 23–27): B1 app shell + nav workspace (Zustand, `?ws=` deep-link); B2 schema delta (`AgentMessage.direction`, `Signal.status` + migration backfill) + 4 API mới + stats/totals chi phí + workspace Đội Agent đầy đủ (roster/5 tab/chat/decision trong feed + panel); B3 nến+volume+RSI14+cột mở rộng+donut+% tỷ trọng+chip sức mua+chip chi phí AI. **Lệch đáng ghi nhận so với draft:** (1) chu kỳ đầy đủ giờ sinh signal ACTIVE **chờ phê duyệt** thay vì auto-order (điều kiện nghiệm thu §4.9 "Phê duyệt signal BUY → order PENDING" chỉ khả thi khi tín hiệu ACTIVE tồn tại — human-in-the-loop đúng tinh thần góp ý CFO); (2) chat là **tab thứ 5 của detail panel** thay vì cột riêng (mobile gọn hơn); (3) decision APPROVE sizing **5% NAV** đúng §4.5, convert giữ budget 50tr — cả hai dùng chung `src/lib/signal-execution.ts`; (4) thêm guard SELL nav5pct cần vị thế (tìm thấy khi E2E golden path — tránh lệnh bị fill engine REJECT). Kiểm chứng: tsc/lint sạch, console 0 error desktop+mobile, VLM audit ĐẠT, chi phí LLM kiểm thử ~$0.03. |

@@ -4,13 +4,13 @@ import * as React from "react";
 import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { vi } from "date-fns/locale";
-import { Activity, Database, ExternalLink, FileText } from "lucide-react";
+import { Activity, Database, ExternalLink, FileText, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { apiGet } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/lib/store";
 import type { QueryCache, QueryClient } from "@tanstack/react-query";
-import type { SystemStatusResponse } from "@/lib/types";
+import type { AgentsResponse, SystemStatusResponse } from "@/lib/types";
 
 /**
  * Sticky footer (blueprint §3): trạng thái nguồn dữ liệu động (S4 stale
@@ -74,6 +74,13 @@ function modeDotClass(mode: string, stale: boolean): string {
   }
 }
 
+/** Định dạng gọn số token (946.123 → "946K", 2.1M). */
+function formatTokensCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
+
 export function Footer() {
   const isFetching = useIsFetching() > 0;
   const realtimeConnected = useUiStore((s) => s.realtimeConnected);
@@ -86,6 +93,16 @@ export function Footer() {
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
+
+  // PHASE3 B3 §5.5 — chip chi phí AI (CFO phải thấy được đồng tiền):
+  // aggregate AgentRun từ GET /api/agents (B2 stats), tăng sau mỗi run/chat.
+  const { data: agents } = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => apiGet<AgentsResponse>("/api/agents"),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+  const aiCost = agents?.totals;
 
   const relativeLabel =
     lastUpdatedMs > 0 && nowMs > 0
@@ -127,6 +144,19 @@ export function Footer() {
             <Activity className="size-3" aria-hidden="true" />
             Realtime
           </Badge>
+
+          {/* PHASE3 B3 §5.5 — chi phí vận hành đội AI lũy kế */}
+          {aiCost && (
+            <Badge
+              variant="outline"
+              className="gap-1.5 px-2 py-0.5 text-[10px] text-muted-foreground"
+              title={`Tổng chi phí LLM glm-4.6 của 5 agent: ${aiCost.runCount} lượt chạy · ${aiCost.totalTokensIn.toLocaleString("vi-VN")} token vào · ${aiCost.totalTokensOut.toLocaleString("vi-VN")} token ra`}
+            >
+              <Sparkles className="size-3" aria-hidden="true" />
+              AI: ${aiCost.totalCostUsd.toFixed(2)} ·{" "}
+              {formatTokensCompact(aiCost.totalTokensIn + aiCost.totalTokensOut)} tokens
+            </Badge>
+          )}
 
           {/* Trạng thái từng nguồn dữ liệu (S4 stale marking) */}
           {status?.sources.map((s) => (

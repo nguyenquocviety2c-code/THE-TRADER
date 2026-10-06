@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
+import { mapSignalRow } from "@/lib/signal-execution";
 
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/signals — recent trading signals with instrument + agent info.
+ * PHASE3 B2 §4.1: map thêm status / rejectedAt / rejectNote.
  */
 export async function GET() {
   try {
@@ -20,23 +22,7 @@ export async function GET() {
 
     return NextResponse.json(
       toPlain({
-        signals: signals.map((s) => ({
-          id: s.id,
-          symbol: s.instrument.symbol,
-          name: s.instrument.name,
-          direction: s.direction,
-          confidence: s.confidence,
-          score: s.score,
-          rationale: s.rationale,
-          targetPrice: s.targetPrice,
-          stopLoss: s.stopLoss,
-          takeProfit: s.takeProfit,
-          agentName: s.agent?.name ?? null,
-          agentCode: s.agent?.code ?? null,
-          actedAt: s.actedAt,
-          expiresAt: s.expiresAt,
-          createdAt: s.createdAt,
-        })),
+        signals: signals.map(mapSignalRow),
       })
     );
   } catch (err) {

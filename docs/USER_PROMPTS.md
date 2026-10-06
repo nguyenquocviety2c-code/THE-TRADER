@@ -227,4 +227,20 @@
 
 ---
 
-*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + đồng bộ Phụ lục sau Giai đoạn 2) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*
+## Prompt — Triển khai Giai đoạn 3 (2026-10-06)
+
+> **Người dùng:** "Tiến hành triển khai giai đoạn 3 (PHASE3_BLUEPRINT: App shell → Agents workspace → Dashboard nâng cấp)."
+
+**Thực thi (Task 23–27, sau audit sạch lỗi):**
+- **Task 23 (B1 — orchestrator):** store.ts thêm `activeWorkspace` + `chartMode` + `quotesExpanded`; `nav.tsx` (tablist WAI-ARIA, mũi tên trái/phải, badge live); tách `overview-workspace.tsx` / `agents-workspace.tsx`; page.tsx thành AppShell (`?ws=` deep-link); header gắn WorkspaceNav + **chip Sức mua ước tính** (§5.4, tooltip công thức) — luôn kèm trong cùng task.
+- **Task 24 (B2 backend — subagent song song):** schema delta (`AgentMessage.direction` + `Signal.status/rejectedAt/rejectNote` + 2 index) + db:push + migration backfill 13 ACTED/3 ACTIVE; `agent-context.ts` (block builder dùng chung chu kỳ/single-run/chat) + `agent-ratelimit.ts` (DB-backed 60s/agent) + `signal-execution.ts` (**một nguồn duy nhất** cho toán tạo lệnh — convert refactor verify); 4 API mới ([id] hồ sơ / [id]/run / [id]/chat / signals/[id]/decision) + `/api/agents` stats+totals; **run route bỏ auto-order → signal ACTIVE chờ duyệt + audit SIGNAL_CREATED**; curl E2E đầy đủ (single-run thật $0.0014 + chat thật nhắc giá VCB 94.700 từ DB + decision APPROVE/REJECT + 429/409/404); tsc/lint sạch.
+- **Task 25 (B2 frontend — subagent song song):** `use-agent-actions.ts` (3 mutation + RateLimitError); roster-card (health bar + stats + nút Chạy riêng + đếm ngược 429); detail-panel 5 tab (Hồ sơ/Hoạt động+sparkline 7 ngày/Nhiệm vụ/Phát thanh/Chat); chat thread USER↔AGENT optimistic + auto-scroll + cảnh báo chi phí; agents-panel nâng cấp (nút ✅/⛔ trên tin strategist có signal ACTIVE, filter tin USER khỏi feed, badge stats); E2E browser REJECT signal VNM trọn chuỗi (click → toast → DB REJECTED) console 0 error.
+- **Task 26 (B3 — orchestrator):** price-chart viết lại — **nến Nhật qua recharts 3 Bar-shape probe** (domain tường minh, wick+thân xanh/đỏ) + volume histogram trục ẩn + **RSI14 Wilder panel** (~96px, guideline 30/70 amber, khớp chuỗi tính indicators.ts) + toggle Nến/Đường; quotes-table + cột mở rộng (Trần/Sàn/TC/Cao/Thấp ≥sm, mobile gọn ô Mã, dấu ⌃⌄ chạm trần/sàn) + API trả `high/low` (QuoteRow mở rộng); portfolio + cột % tỷ trọng + **donut ngành** (recharts Pie, md+) + ô ghép Biến động ngày/Realized P&L; footer + **chip chi phí AI** ($ + tokens compact).
+- **Task 27 (E2E — orchestrator):** agent-browser desktop 1440 + mobile 390: 180 nến render, RSI/donut/chip AI/chip sức mua/tab workspace đủ; **golden path §7.3 đầy đủ**: chat "VCB…" → trả lời dữ liệu thật → chạy riêng risk-manager → chu kỳ → signal MBB SELL ACTIVE → **Phê duyệt qua UI** (toast "Lệnh LIMIT BÁN 2.400 cp MBB @ 31.800 ₫" + audit chain SIGNAL_CREATED→SIGNAL_APPROVED→ORDER_CREATED) → **REJECT BID qua UI** (toast + REJECTED + rejectedAt); rate-limit 429 toast VN; mobile scrollW==clientW=390 (0 tràn ngang); console 0 error; VLM audit (a)(b)(c) ĐẠT. **Fix thêm trong E2E:** guard SELL nav5pct cần vị thế (APPROVE BID không vị thế → 400 thông báo rõ ràng thay vì lệnh bị fill engine REJECT).
+- **Docs sync (Task 28):** DB_SCHEMA v0.4.0 · TECHNICAL_BLUEPRINT v0.4 (23 route) · DATA_SOURCES S2 · README (tính năng G3) · PHASE3_BLUEPRINT v1.0.0 (ghi rõ 4 điểm lệch draft + lý do).
+
+**Trạng thái:** ✅ Hoàn thành — B1+B2+B3 triển khai & kiểm chứng E2E đầy đủ; chi phí LLM kiểm thử toàn Giai đoạn 3 ~$0.03.
+
+---
+
+*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*

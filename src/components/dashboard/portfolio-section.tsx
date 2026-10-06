@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/table";
 import { apiGet, apiPost } from "@/lib/api";
 import { useUiStore } from "@/lib/store";
+import { AllocationDonut } from "@/components/dashboard/allocation-donut";
 import {
   changeColor,
   formatDateTime,
@@ -107,11 +108,19 @@ export function PortfolioSection() {
               }
             />
             <Tile label="Tổng tài sản" value={formatVnd(p.totals.totalEquity)} />
+            {/* PHASE3 B3 §5.3 — ô ghép: Biến động ngày + Lãi/lỗ ĐÃ THỰC HIỆN (realized) */}
             <Tile
-              label="Biến động ngày"
+              label="Biến động ngày / LN thực hiện"
               value={
-                <span className={changeColor(p.totals.dayChangePct)}>
-                  {formatPct(p.totals.dayChangePct)}
+                <span className="flex flex-col leading-tight">
+                  <span className={changeColor(p.totals.dayChangePct)}>
+                    {formatPct(p.totals.dayChangePct)}
+                    <span className="text-[11px] font-normal text-muted-foreground"> ngày</span>
+                  </span>
+                  <span className={cn("text-xs", changeColor(p.totals.totalRealizedPnl))}>
+                    {formatSigned(p.totals.totalRealizedPnl)} ₫
+                    <span className="text-[11px] font-normal text-muted-foreground"> đã thực hiện</span>
+                  </span>
                 </span>
               }
             />
@@ -119,7 +128,9 @@ export function PortfolioSection() {
           </div>
         ) : null}
 
-        <Tabs value={portfolioTab} onValueChange={setPortfolioTab}>
+        {/* PHASE3 B3 §5.3 — Tabs + donut phân bổ ngành (desktop ≥ md) cạnh nhau */}
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <Tabs value={portfolioTab} onValueChange={setPortfolioTab} className="min-w-0 flex-1">
           <TabsList className="h-9">
             <TabsTrigger value="positions" className="text-xs sm:text-sm">
               Vị thế
@@ -150,6 +161,8 @@ export function PortfolioSection() {
                       <TableHead className="text-right">Giá vốn</TableHead>
                       <TableHead className="text-right">Giá HT</TableHead>
                       <TableHead className="text-right">Giá trị</TableHead>
+                      {/* PHASE3 B3 §5.3 — % tỷ trọng trong GTTH */}
+                      <TableHead className="text-right">% TH</TableHead>
                       <TableHead className="text-right">Lãi/lỗ</TableHead>
                       <TableHead className="text-right">%</TableHead>
                     </TableRow>
@@ -180,6 +193,13 @@ export function PortfolioSection() {
                         <TableCell className="tabular-nums text-right">
                           {formatVnd(pos.marketValue)}
                         </TableCell>
+                        {/* % tỷ trọng = marketValue / tổng GTTH (§5.3) */}
+                        <TableCell className="tabular-nums text-right font-medium">
+                          {p.totals.totalMarketValue > 0
+                            ? ((pos.marketValue / p.totals.totalMarketValue) * 100).toFixed(1)
+                            : "—"}
+                          %
+                        </TableCell>
                         <TableCell
                           className={cn("tabular-nums text-right", changeColor(pos.unrealizedPnl))}
                         >
@@ -208,6 +228,9 @@ export function PortfolioSection() {
                       <TableCell className="text-right">—</TableCell>
                       <TableCell className="tabular-nums text-right font-semibold">
                         {formatVnd(p.totals.totalMarketValue)}
+                      </TableCell>
+                      <TableCell className="tabular-nums text-right font-semibold">
+                        100,0%
                       </TableCell>
                       <TableCell
                         className={cn(
@@ -325,6 +348,15 @@ export function PortfolioSection() {
             )}
           </TabsContent>
         </Tabs>
+        {/* PHASE3 B3 §5.3 — donut phân bổ ngành: cạnh tabs ở xl, xuống dưới ở md/lg */}
+        <div className="w-full shrink-0 xl:w-auto">
+          <AllocationDonut
+            positions={p?.positions ?? []}
+            totalMarketValue={p?.totals.totalMarketValue ?? 0}
+            loading={portfolioQuery.isLoading}
+          />
+        </div>
+        </div>
       </CardContent>
     </Card>
   );

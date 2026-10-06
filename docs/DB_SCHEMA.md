@@ -1,7 +1,7 @@
 # The Trader — Data Dictionary & Database Schema
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.2.0 · **Updated:** 2026-10-06
+> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.4.0 · **Updated:** 2026-10-06
 > **Source of truth:** [`prisma/schema.prisma`](../prisma/schema.prisma) — tài liệu này mô tả đúng schema đã implement. Mọi thay đổi schema phải được phản ánh lại đây.
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface) · [DATA_SOURCES.md](./DATA_SOURCES.md) (field mapping theo nguồn dữ liệu)
 
@@ -495,9 +495,10 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 | Field | Type | Constraints / Default | Mô tả |
 |---|---|---|---|
 | `id` | String | PK, `cuid()` | Định danh duy nhất |
-| `fromAgentId` | String | FK → `Agent.id`, **Cascade** (relation `FromAgent`) | Agent gửi |
+| `fromAgentId` | String | FK → `Agent.id`, **Cascade** (relation `FromAgent`) | Agent gửi (với chat 1-1: agent **sở hữu** thread — kể cả tin của user cũng ghi `fromAgentId` = agent đó) |
 | `toAgentId` | String | nullable, FK → `Agent.id`, **SetNull** (relation `ToAgent`) | Agent nhận — null khi broadcast |
-| `broadcast` | Boolean | default `true` | `true` = tin broadcast cho cả orchestrator panel (mặc định của luồng hiện tại) |
+| `broadcast` | Boolean | default `true` | `true` = tin broadcast cho cả orchestrator panel (luồng chu kỳ); `false` = tin **chat 1-1** giữa trader và agent |
+| `direction` | String | default `"AGENT"` | `AGENT` \| `USER` — hướng của tin trong thread chat (Giai đoạn 3 §4.1); tin broadcast luôn `AGENT` |
 | `content` | String | — | Nội dung phân tích (tiếng Việt) — hiển thị trực tiếp trên multi-agent panel |
 | `reasoning` | String | nullable | Chuỗi lập luận/lead-up: chỉ báo, con số nền tảng của kết luận |
 | `sentiment` | String | nullable | `bullish` \| `bearish` \| `neutral` — chuẩn hóa cho News & Sentiment agent |
@@ -506,7 +507,8 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 **Indexes/constraints:**
 - `@@index([fromAgentId, createdAt(sort: Desc)])` — feed "agent này vừa nói gì";
 - `@@index([toAgentId, createdAt(sort: Desc)])` — inbox agent nhận;
-- `@@index([createdAt])` — feed broadcast toàn cục sort theo thời gian (fix F-116, audit 19-a: query feed cũ SCAN toàn bảng).
+- `@@index([createdAt])` — feed broadcast toàn cục sort theo thời gian (fix F-116, audit 19-a: query feed cũ SCAN toàn bảng);
+- `@@index([fromAgentId, broadcast, createdAt(sort: Desc)])` — truy vấn **thread chat 1-1** của agent (`broadcast=false`, asc) và feed broadcast riêng (Giai đoạn 3 §4.1).
 
 **Retention:** giữ 30–90 ngày cho hoạt động phân tích; là dữ liệu lớn nhất của tầng agent (text LLM).
 
@@ -524,15 +526,21 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 | `stopLoss` | Int | nullable | Giá cắt lỗ (VND) |
 | `takeProfit` | Int | nullable | Giá chốt lời (VND) |
 | `agentId` | String | nullable, FK → `Agent.id`, **SetNull** | Agent gốc — null nếu tổng hợp/hệ thống |
+| `status` | String | default `"ACTIVE"` | `ACTIVE` \| `ACTED` \| `REJECTED` \| `EXPIRED` — vòng đời phê duyệt của trader (Giai đoạn 3 §4.1); chu kỳ agent sinh signal → `ACTIVE` chờ duyệt |
 | `expiresAt` | DateTime | nullable | Hạn hiệu lực tín hiệu (mặc định +3 ngày) |
-| `actedAt` | DateTime | nullable | **Thời điểm được chuyển thành lệnh** — đánh dấu signal đã consumed |
+| `actedAt` | DateTime | nullable | **Thời điểm được chuyển thành lệnh** — đánh dấu signal đã consumed (`status=ACTED`) |
+| `rejectedAt` | DateTime | nullable | Thời điểm trader **từ chối** (`status=REJECTED`) |
+| `rejectNote` | String | nullable | Lý do từ chối (tuỳ chọn, tối đa 500 ký tự) |
 | `createdAt` / `updatedAt` | DateTime | `now()` / `@updatedAt` | Audit |
 
 **Relations:** `orders` (1-n, SetNull).
 
 **Indexes/constraints:**
 - `@@index([instrumentId, createdAt(sort: Desc)])` — lịch sử tín hiệu theo mã;
-- `@@index([direction, createdAt(sort: Desc)])` — lọc BUY/SELL cho bảng signals.
+- `@@index([direction, createdAt(sort: Desc)])` — lọc BUY/SELL cho bảng signals;
+- `@@index([status, createdAt(sort: Desc)])` — hàng đợi tín hiệu **ACTIVE chờ phê duyệt** (Giai đoạn 3 §4.1).
+
+**Vòng đời (Giai đoạn 3):** chu kỳ đầy đủ sinh Signal `ACTIVE` (không tự tạo lệnh — quyết định thuộc trader) → `POST /api/signals/[id]/decision` **APPROVE** → lệnh paper (sizing 5% NAV) + `ACTED` + audit `SIGNAL_APPROVED`/`ORDER_CREATED` · **REJECT** → `REJECTED` + `rejectedAt` + audit `SIGNAL_REJECTED`. Migration 2026-10-06: backfill actedAt≠null → `ACTED`, hết hạn → `EXPIRED`.
 
 **Retention:** hết hạn theo `expiresAt`; giữ để đánh giá chất lượng tín hiệu (hit-rate của agent).
 
@@ -649,7 +657,7 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 |---|---|---|---|
 | `id` | String | PK, `cuid()` | Định danh duy nhất |
 | `userId` | String | nullable, FK → `User.id`, **SetNull** | Người thực hiện (null = hệ thống) |
-| `action` | String | — | Hành động chuẩn hóa: `ORDER_CREATED`, `ORDER_FILLED`, `ORDER_CANCELLED`, `SIGNAL_APPROVED`, `RISK_ALERT_RAISED`, `AGENT_RUN_COMPLETED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`… |
+| `action` | String | — | Hành động chuẩn hóa: `ORDER_CREATED`, `ORDER_FILLED`, `ORDER_REJECTED`, `ORDER_CANCELLED`, `SIGNAL_CREATED` (chu kỳ sinh tín hiệu — Giai đoạn 3), `SIGNAL_APPROVED` (trader duyệt qua `/decision`), `SIGNAL_REJECTED` (Giai đoạn 3), `AGENT_RUN_COMPLETED` (kể cả `mode: single`), `AGENT_CHAT` (Giai đoạn 3), `RISK_ALERT_RAISED`, `NEWS_INGESTED`, `WATCHLIST_ADDED`/`WATCHLIST_REMOVED`, `LIVE_TRADING_BLOCKED`, `LIVE_ORDER_GATEWAY_UNAVAILABLE`, `DATA_SOURCE_STALE`… |
 | `entity` | String | — | Loại entity (VD: `"Order"`) |
 | `entityId` | String | nullable | ID entity bị ảnh hưởng |
 | `before` | String | nullable | Trạng thái trước (JSON) |
@@ -801,3 +809,4 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; đồng bộ 1-1 với `prisma/schema.prisma` (17 model, 12 enum) |
 | 2026-10-06 | **v0.2 — Giai đoạn 2:** thêm 2 model `NewsItem` (S5 RSS, dedupe theo `url`) + `DataSourceStatus` (S4 stale marking, singleton-theo-`key`) → tổng **19 model**; cập nhật ERD + dictionary §6.18/§6.19; ghi nhận quote được cập nhật bởi tick engine `POST /api/market/tick`; bổ sung action audit mới |
 | 2026-10-06 | **v0.3 — Audit vòng 1+2 (Task 21/22):** `AgentMessage` thêm `@@index([createdAt])` (F-116); §6.4 Quote bổ sung vòng đời phiên EOD rollover + fill engine; §6.2 `equity` ghi rõ chính sách snapshot (chốt khi khớp lệnh/EOD, live do `/api/portfolio` tính); §4.3 làm rõ Quote là update-in-place tại chỗ (không append-only — khớp DATA_SOURCES Q4); §9 cập nhật equity migration; thay lễ 2026-04-10 → 2026-04-27 trong lịch (ở `market-session.ts`) |
+| 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B2):** `AgentMessage.direction` (AGENT\|USER) + index `[fromAgentId, broadcast, createdAt desc]` cho thread chat 1-1; `Signal.status` (ACTIVE\|ACTED\|REJECTED\|EXPIRED) + `rejectedAt`/`rejectNote` + index `[status, createdAt desc]` — tín hiệu giờ chờ trader phê duyệt (chu kỳ không tự tạo lệnh); audit action mới `SIGNAL_CREATED`/`SIGNAL_APPROVED`(via decision)/`SIGNAL_REJECTED`/`AGENT_CHAT`; backfill migration `scripts/set-signal-status.ts` (13 ACTED · 3 ACTIVE); API mới: `GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision` (§4 TECHNICAL_BLUEPRINT) |

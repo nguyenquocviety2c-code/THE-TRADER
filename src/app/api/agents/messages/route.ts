@@ -28,6 +28,8 @@ export async function GET() {
             : null,
           toAgent: m.toAgent ? { code: m.toAgent.code, name: m.toAgent.name } : null,
           broadcast: m.broadcast,
+          // PHASE3 B2 §4.1 — AGENT | USER (chat 1-1 lưu fromAgentId = agent sở hữu thread)
+          direction: m.direction as "AGENT" | "USER",
           content: m.content,
           reasoning: m.reasoning,
           sentiment: m.sentiment,

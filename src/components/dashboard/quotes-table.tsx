@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Search, Star, StarOff } from "lucide-react";
+import { Search, Star, StarOff, TableProperties } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +29,9 @@ export function QuotesTable() {
   const setSelectedSymbol = useUiStore((s) => s.setSelectedSymbol);
   const watchlistOnly = useUiStore((s) => s.watchlistOnly);
   const setWatchlistOnly = useUiStore((s) => s.setWatchlistOnly);
+  // PHASE3 B3 §5.2 — toggle cột mở rộng (mặc định tắt, tránh tràn ngang mobile)
+  const quotesExpanded = useUiStore((s) => s.quotesExpanded);
+  const setQuotesExpanded = useUiStore((s) => s.setQuotesExpanded);
 
   const quotesQuery = useQuery({
     queryKey: ["quotes"],
@@ -104,7 +107,26 @@ export function QuotesTable() {
         </CardTitle>
         <CardDescription>Nhấp vào một mã để xem biểu đồ giá</CardDescription>
         <CardAction>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
+            {/* PHASE3 B3 §5.2 — cột mở rộng: Trần/Sàn/TC/Cao/Thấp */}
+            <div
+              className="flex items-center gap-2"
+              title="Thêm cột Trần · Sàn · Tham chiếu · Cao · Thấp (chỉ hiển thị từ màn hình sm trở lên)"
+            >
+              <Switch
+                id="quotes-expanded"
+                checked={quotesExpanded}
+                onCheckedChange={setQuotesExpanded}
+                aria-label="Bật cột mở rộng (trần, sàn, tham chiếu, cao, thấp)"
+              />
+              <Label
+                htmlFor="quotes-expanded"
+                className="hidden cursor-pointer items-center gap-1 text-xs text-muted-foreground md:flex"
+              >
+                <TableProperties className="size-3.5" aria-hidden="true" />
+                Cột mở rộng
+              </Label>
+            </div>
             <div
               className="flex items-center gap-2"
               title="Chỉ hiển thị các mã trong danh mục theo dõi mặc định"
@@ -155,7 +177,7 @@ export function QuotesTable() {
         ) : (
           <>
             <div className="max-h-96 overflow-y-auto custom-scrollbar">
-              <Table className="min-w-[600px]">
+              <Table className={cn(quotesExpanded ? "min-w-[900px]" : "min-w-[600px]")}>
                 <TableHeader className="sticky top-0 z-10 bg-card">
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="w-10 pl-6">
@@ -167,6 +189,12 @@ export function QuotesTable() {
                     <TableHead className="text-right">%</TableHead>
                     <TableHead className="text-right">KL</TableHead>
                     <TableHead className="pr-6 text-right">Bid/Ask</TableHead>
+                    {/* PHASE3 B3 §5.2 — cột mở rộng (chỉ ≥ sm) */}
+                    <TableHead className="hidden text-right sm:table-cell">Trần</TableHead>
+                    <TableHead className="hidden text-right sm:table-cell">Sàn</TableHead>
+                    <TableHead className="hidden text-right sm:table-cell">TC</TableHead>
+                    <TableHead className="hidden text-right sm:table-cell">Cao</TableHead>
+                    <TableHead className="hidden pr-6 text-right sm:table-cell">Thấp</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -217,11 +245,24 @@ export function QuotesTable() {
                       <TableCell className="py-2.5">
                         <p className="font-semibold">{q.symbol}</p>
                         <p className="max-w-[160px] truncate text-[11px] text-muted-foreground">
-                          {q.sector || q.name}
+                          {quotesExpanded
+                            ? `TC ${formatPrice(q.refPrice)} · C ${formatPrice(q.high)} · T ${formatPrice(q.low)}`
+                            : q.sector || q.name}
                         </p>
                       </TableCell>
                       <TableCell className="tabular-nums py-2.5 text-right font-medium">
-                        {formatPrice(q.last)}
+                        {/* Q2 HOSE: chạm trần ⌃ / chạm sàn ⌄ */}
+                        {q.ceilingPrice != null && q.last >= q.ceilingPrice ? (
+                          <span className="font-bold text-up">
+                            ⌃ {formatPrice(q.last)}
+                          </span>
+                        ) : q.floorPrice != null && q.last <= q.floorPrice ? (
+                          <span className="font-bold text-down">
+                            ⌄ {formatPrice(q.last)}
+                          </span>
+                        ) : (
+                          formatPrice(q.last)
+                        )}
                       </TableCell>
                       <TableCell className={`tabular-nums py-2.5 text-right ${changeColor(q.change)}`}>
                         {formatSigned(q.change)}
@@ -239,12 +280,28 @@ export function QuotesTable() {
                         <span className="text-muted-foreground"> / </span>
                         <span className="text-down">{formatPrice(q.askPrice)}</span>
                       </TableCell>
+                      {/* PHASE3 B3 §5.2 — hàng cột mở rộng (≥ sm) */}
+                      <TableCell className="hidden tabular-nums py-2.5 text-right font-semibold text-up sm:table-cell">
+                        {formatPrice(q.ceilingPrice)}
+                      </TableCell>
+                      <TableCell className="hidden tabular-nums py-2.5 text-right font-semibold text-down sm:table-cell">
+                        {formatPrice(q.floorPrice)}
+                      </TableCell>
+                      <TableCell className="hidden tabular-nums py-2.5 text-right text-muted-foreground sm:table-cell">
+                        {formatPrice(q.refPrice)}
+                      </TableCell>
+                      <TableCell className="hidden tabular-nums py-2.5 text-right sm:table-cell">
+                        {formatPrice(q.high)}
+                      </TableCell>
+                      <TableCell className="hidden tabular-nums py-2.5 pr-6 text-right sm:table-cell">
+                        {formatPrice(q.low)}
+                      </TableCell>
                     </TableRow>
                   ))}
                   {quotes.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={7}
+                        colSpan={12}
                         className="py-8 text-center text-sm text-muted-foreground"
                       >
                         Không tìm thấy mã phù hợp.
@@ -257,6 +314,7 @@ export function QuotesTable() {
             <p className="px-6 py-3 text-[11px] text-muted-foreground">
               Hiển thị {quotes.length}/{totalCount} mã{" "}
               {watchlistOnly ? "· danh mục theo dõi" : "· sắp xếp theo khối lượng"}
+              {quotesExpanded ? " · cột mở rộng: trần/sàn/TC/cao/thấp" : ""}
             </p>
           </>
         )}

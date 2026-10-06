@@ -66,15 +66,15 @@ Nguyên tắc chung: **mọi dữ liệu thị trường phải qua validate §5
 
 ### 3.2 S2 — LLM phân tích đa agent (glm-4.6, backend-only)
 
-**Endpoint tiêu thụ:** `POST /api/agents/run` (orchestrator — mô tả luồng đầy đủ ở [TECHNICAL_BLUEPRINT.md §5.2](./TECHNICAL_BLUEPRINT.md)).
+**Endpoint tiêu thụ:** `POST /api/agents/run` (orchestrator — mô tả luồng đầy đủ ở [TECHNICAL_BLUEPRINT.md §5.2](./TECHNICAL_BLUEPRINT.md)) · **Giai đoạn 3 thêm 2 lối gọi theo-agent:** `POST /api/agents/[id]/run` (chạy riêng) và `POST /api/agents/[id]/chat` (chat 1-1) — cùng snapshot builder `src/lib/agent-context.ts`, **rate-limit 60s/agent** (DB-backed qua `AgentRun` cuối, 429 + `Retry-After`).
 
 - **SDK:** `z-ai-web-dev-sdk` v0.0.18, model **`glm-4.6`** — chỉ import trong Route Handler, không bao giờ ở client (API key không expose).
 - **Input:** snapshot từ DB — quotes + 90-day bars của watchlist, positions + avgPrice, số dư tài khoản, risk alerts đang mở, **10 tin RSS mới nhất (S5) + dòng khối ngoại (S6)** — được pack vào role-prompt cho từng agent theo `Agent.config` (chi tiết phân bổ khối: [TECHNICAL_BLUEPRINT.md §5.2](./TECHNICAL_BLUEPRINT.md)).
 - **Output parsed & persisted:**
-  - `AgentMessage` (`content`, `reasoning`, `sentiment` bullish/bearish/neutral) — broadcast;
-  - `Signal` từ bước tổng hợp của Portfolio Strategist (`direction`, `confidence`, `score`, `rationale`, `targetPrice/stopLoss/takeProfit`);
-  - `Order` giấy từ Execution Manager (paper);
-  - `AgentRun` audit mỗi agent: `tokensIn/tokensOut`, `costUsd`, `durationMs`, `taskStatus`, `output` JSON.
+  - `AgentMessage` (`content`, `reasoning`, `sentiment` bullish/bearish/neutral) — broadcast; **chat 1-1 lưu `broadcast=false` + `direction` USER/AGENT trong thread của agent (G3)**;
+  - `Signal` từ bước tổng hợp của Portfolio Strategist (`direction`, `confidence`, `score`, `rationale`, `targetPrice/stopLoss/takeProfit`) — **G3: sinh ra `ACTIVE` chờ trader phê duyệt** (APPROVE → lệnh, REJECT → `rejectedAt`);
+  - `Order` giấy chỉ tạo khi trader **APPROVE** (`/api/signals/[id]/decision`, sizing 5% NAV) hoặc **convert** (budget 50tr) — `src/lib/signal-execution.ts`;
+  - `AgentRun` audit mỗi agent: `tokensIn/tokensOut`, `costUsd`, `durationMs`, `taskStatus`, `output` JSON (chat: `output` = câu hỏi gốc; audit `AGENT_CHAT`).
 - **Tần suất:** on-demand khi trader bấm **Run agents**; đã có sẵn scheduler tự động trong mini-service market-engine (`AGENT_CYCLE_MINUTES`, **mặc định 0 = TẮT** để tiết kiệm chi phí LLM — xem [TECHNICAL_BLUEPRINT.md §6](./TECHNICAL_BLUEPRINT.md)).
 - **Fallback:** nếu SDK/LLM lỗi hoặc timeout → run đánh dấu `FAILED` với `error`, agent chuyển `ERROR`, UI vẫn hiển thị `AgentMessage` cũ (last cached) kèm nhãn stale; có thể sinh `RiskAlert` (severity INFO/WARNING) "agent pipeline unavailable".
 

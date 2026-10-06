@@ -1,19 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
-import { getTradingMode, liveTradingGate } from "@/lib/trading-mode";
-import { markSource } from "@/lib/sources";
+import { createPaperOrderFromSignal } from "@/lib/signal-execution";
 
 export const dynamic = "force-dynamic";
-
-/** Round down to board lot of 100 shares (HOSE). */
-function roundLot(qty: number): number {
-  return Math.max(0, Math.floor(qty / 100) * 100);
-}
 
 /**
  * POST /api/signals/[id]/convert — convert a BUY/SELL signal into a
  * PENDING limit order on the VNDIRECT account.
+ *
+ * PHASE3 B2 §4.5: toàn bộ toán tạo lệnh đã gom về
+ * src/lib/signal-execution.ts (một nguồn duy nhất) — route này chỉ là
+ * wrapper với sizing "budget50m" (giữ nguyên response shape + status code).
  */
 export async function POST(
   _req: NextRequest,
@@ -22,201 +19,22 @@ export async function POST(
   try {
     const { id } = await params;
 
-    const signal = await db.signal.findUnique({
-      where: { id },
-      include: {
-        instrument: {
-          select: {
-            id: true,
-            symbol: true,
-            quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true, floorPrice: true, ceilingPrice: true } },
-          },
-        },
-        agent: { select: { code: true, name: true } },
-      },
-    });
-
-    if (!signal) {
-      return NextResponse.json(
-        { error: "Không tìm thấy tín hiệu." },
-        { status: 404 }
-      );
+    const result = await createPaperOrderFromSignal(id, { sizing: "budget50m" });
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: result.status });
     }
-    if (signal.actedAt) {
-      return NextResponse.json(
-        { error: "Tín hiệu này đã được chuyển thành lệnh trước đó." },
-        { status: 409 }
-      );
-    }
-    // F-207 (audit 19-b): tín hiệu đã có lệnh trong sổ (dù actedAt thiếu) → chặn tạo trùng
-    const existingOrder = await db.order.findFirst({
-      where: { signalId: signal.id },
-      select: { id: true, status: true },
-    });
-    if (existingOrder) {
-      return NextResponse.json(
-        { error: "Tín hiệu này đã có lệnh liên quan trong sổ lệnh." },
-        { status: 409 }
-      );
-    }
-    if (signal.direction === "HOLD") {
-      return NextResponse.json(
-        { error: "Tín hiệu GIỮ KHÔNG thể chuyển thành lệnh." },
-        { status: 400 }
-      );
-    }
-
-    // ── S3: cổng giao dịch thật (LIVE_TRADING flag — DATA_SOURCES.md §4.1) ──
-    // Paper mode (mặc định): tiếp tục tạo lệnh giấy nội bộ bên dưới.
-    // Live mode chưa cấu hình đủ: từ chối + audit, không tự ý gửi lệnh thật.
-    const gate = liveTradingGate();
-    if (gate.mode === "live-unconfigured") {
-      const [user] = await Promise.all([
-        db.user.findFirst({ where: { isActive: true }, select: { id: true } }),
-      ]);
-      await db.auditLog.create({
-        data: {
-          userId: user?.id ?? null,
-          action: "LIVE_TRADING_BLOCKED",
-          entity: "Signal",
-          entityId: signal.id,
-          after: JSON.stringify({ symbol: signal.instrument.symbol, reason: gate.error }),
-        },
-      });
-      return NextResponse.json({ error: gate.error }, { status: 503 });
-    }
-    if (gate.mode === "live") {
-      // Đường gửi lệnh thật cần gateway VNDIRECT mini-service (roadmap §8) —
-      // hiện chặn với thông báo rõ ràng + audit để không có side-effect mù.
-      await db.auditLog.create({
-        data: {
-          action: "LIVE_ORDER_GATEWAY_UNAVAILABLE",
-          entity: "Signal",
-          entityId: signal.id,
-          after: JSON.stringify({ symbol: signal.instrument.symbol, side: signal.direction }),
-        },
-      });
-      return NextResponse.json(
-        { error: "Gateway VNDIRECT chưa kết nối trong môi trường này — lệnh thật tạm bị chặn (audit đã ghi)." },
-        { status: 501 }
-      );
-    }
-
-    const [user, account] = await Promise.all([
-      db.user.findFirst({ where: { isActive: true }, select: { id: true } }),
-      db.brokerAccount.findFirst({
-        where: { deletedAt: null },
-        select: { id: true },
-      }),
-    ]);
-    if (!user || !account) {
-      return NextResponse.json(
-        { error: "Không tìm thấy người dùng hoặc tài khoản môi giới." },
-        { status: 404 }
-      );
-    }
-
-    const side = signal.direction; // BUY | SELL
-    const quote = signal.instrument.quotes[0];
-    const rawPrice = signal.targetPrice ?? quote?.last ?? 0;
-    if (rawPrice <= 0) {
-      return NextResponse.json(
-        { error: "Không xác định được giá đặt cho lệnh." },
-        { status: 400 }
-      );
-    }
-    // F-202 (audit 19-b): giá lệnh luôn nằm trong dải trần/sàn ±7% (Q2), bội 100 ₫
-    const roundTo100 = (v: number) => Math.max(0, Math.round(v / 100) * 100);
-    const bandLow = quote?.floorPrice ?? roundTo100(rawPrice * 0.93);
-    const bandHigh = quote?.ceilingPrice ?? roundTo100(rawPrice * 1.07);
-    const price = Math.max(bandLow, Math.min(roundTo100(rawPrice), bandHigh));
-
-    // Sizing: BUY → ~50tr VND budget; SELL → half of existing position
-    let quantity: number;
-    if (side === "BUY") {
-      quantity = roundLot(50_000_000 / price);
-    } else {
-      const position = await db.position.findFirst({
-        where: {
-          brokerAccountId: account.id,
-          instrumentId: signal.instrument.id,
-          status: "OPEN",
-        },
-        select: { quantity: true },
-      });
-      if (!position || position.quantity < 100) {
-        return NextResponse.json(
-          { error: "Không có vị thế phù hợp để đặt lệnh BÁN." },
-          { status: 400 }
-        );
-      }
-      quantity = Math.max(100, roundLot(position.quantity / 2));
-    }
-
-    if (quantity < 100) {
-      return NextResponse.json(
-        { error: "Khối lượng tính toán nhỏ hơn 1 lot (100 cổ phiếu)." },
-        { status: 400 }
-      );
-    }
-
-    const order = await db.order.create({
-      data: {
-        userId: user.id,
-        brokerAccountId: account.id,
-        signalId: signal.id,
-        instrumentId: signal.instrument.id,
-        side,
-        type: "LIMIT",
-        quantity,
-        price,
-        fee: BigInt(Math.round(0.0015 * price * quantity)), // F-201 (audit 19-b): phí môi giới 0,15% notional
-        status: "PENDING",
-        note: `Từ tín hiệu ${side === "BUY" ? "MUA" : "BÁN"} ${signal.instrument.symbol}${
-          signal.agent ? ` (agent ${signal.agent.name})` : ""
-        }`,
-      },
-    });
-
-    await db.signal.update({
-      where: { id: signal.id },
-      data: { actedAt: new Date() },
-    });
-
-    await db.auditLog.create({
-      data: {
-        userId: user.id,
-        action: "ORDER_CREATED",
-        entity: "Order",
-        entityId: order.id,
-        after: JSON.stringify({
-          symbol: signal.instrument.symbol,
-          side,
-          quantity,
-          price,
-          signalId: signal.id,
-          mode: getTradingMode().mode,
-        }),
-      },
-    });
-
-    await markSource("trading", {
-      mode: "paper",
-      success: true,
-      meta: { lastOrder: order.id, symbol: signal.instrument.symbol },
-    });
 
     return NextResponse.json(
       toPlain({
         order: {
-          id: order.id,
-          symbol: signal.instrument.symbol,
-          side: order.side,
-          type: order.type,
-          quantity: order.quantity,
-          price: order.price,
-          status: order.status,
-          createdAt: order.createdAt,
+          id: result.order.id,
+          symbol: result.order.symbol,
+          side: result.order.side,
+          type: result.order.type,
+          quantity: result.order.quantity,
+          price: result.order.price,
+          status: result.order.status,
+          createdAt: result.order.createdAt,
         },
       })
     );

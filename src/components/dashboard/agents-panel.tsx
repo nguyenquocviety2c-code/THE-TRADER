@@ -1,10 +1,12 @@
 "use client";
 
 import * as React from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { vi } from "date-fns/locale";
 import {
+  ArrowRight,
   Brain,
   ChartCandlestick,
   CircleCheck,
@@ -25,8 +27,11 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
 import { useRunAgents } from "@/hooks/use-run-agents";
+import { useSignalDecision } from "@/hooks/use-agent-actions";
+import { agentSuccessPct } from "@/components/dashboard/agent-roster-card";
+import { useUiStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import type { AgentMessageRow, AgentsResponse } from "@/lib/types";
+import type { AgentMessageRow, AgentsResponse, SignalRow } from "@/lib/types";
 
 const ROLE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   MARKET_ANALYST: ChartCandlestick,
@@ -43,6 +48,16 @@ const STATUS_DOT: Record<string, { className: string; label: string }> = {
   ERROR: { className: "bg-down", label: "Lỗi" },
 };
 
+/** Badge hướng tín hiệu cho khối phê duyệt/từ chối (PHASE3 B2 §4.5). */
+const DIRECTION: Record<string, { label: string; className: string }> = {
+  BUY: { label: "MUA", className: "bg-up/15 text-up hover:bg-up/15" },
+  SELL: { label: "BÁN", className: "bg-down/15 text-down hover:bg-down/15" },
+  HOLD: {
+    label: "GIỮ",
+    className: "border border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  },
+};
+
 export function AgentsPanel() {
   const runAgents = useRunAgents();
 
@@ -57,12 +72,23 @@ export function AgentsPanel() {
       apiGet<{ messages: AgentMessageRow[] }>("/api/agents/messages"),
     staleTime: 30_000,
   });
+  // PHASE3 B2: signals ACTIVE để gắn nút Phê duyệt / Từ chối vào tin strategist.
+  const signalsQuery = useQuery({
+    queryKey: ["signals"],
+    queryFn: () => apiGet<{ signals: SignalRow[] }>("/api/signals"),
+    staleTime: 30_000,
+  });
 
   const isRunning = runAgents.isPending;
 
   const agents = agentsQuery.data?.agents ?? [];
   const tasks = agentsQuery.data?.tasks ?? [];
-  const messages = messagesQuery.data?.messages ?? [];
+  const totals = agentsQuery.data?.totals;
+  // Feed chỉ hiển thị tin của agent (bỏ tin USER chat 1-1 — §4.1 direction).
+  const messages = (messagesQuery.data?.messages ?? []).filter(
+    (m) => m.direction !== "USER"
+  );
+  const signals = signalsQuery.data?.signals ?? [];
 
   return (
     <section aria-label="Hệ thống đa tác tử" className="flex flex-col gap-4">
@@ -82,7 +108,7 @@ export function AgentsPanel() {
           {agentsQuery.isLoading ? (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
               {Array.from({ length: 5 }).map((_, i) => (
-                <Skeleton key={i} className="h-40 w-full rounded-xl" />
+                <Skeleton key={i} className="h-44 w-full rounded-xl" />
               ))}
             </div>
           ) : agentsQuery.isError ? (
@@ -103,6 +129,14 @@ export function AgentsPanel() {
             <div className="text-xs text-muted-foreground">
               Tổng cộng {agents.length} agent · mô hình nền tảng{" "}
               <span className="font-mono">glm-4.6</span>
+              {totals ? (
+                <>
+                  {" · chi phí AI lũy kế "}
+                  <span className="tabular-nums font-medium text-foreground">
+                    ${totals.totalCostUsd.toFixed(2)}
+                  </span>
+                </>
+              ) : null}
             </div>
             <Button
               onClick={() => runAgents.mutate()}
@@ -206,7 +240,7 @@ export function AgentsPanel() {
                   </li>
                 )}
                 {messages.map((m) => (
-                  <MessageItem key={m.id} message={m} />
+                  <MessageItem key={m.id} message={m} signals={signals} />
                 ))}
                 {messages.length === 0 && !isRunning && (
                   <li className="py-6 text-sm text-muted-foreground">
@@ -227,6 +261,7 @@ function AgentCardView({
 }: {
   agent: AgentsResponse["agents"][number];
 }) {
+  const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
   const RoleIcon = ROLE_ICONS[agent.role] ?? Brain;
   const dot = STATUS_DOT[agent.status] ?? STATUS_DOT.IDLE;
   const health = Math.max(0, Math.min(100, agent.healthScore));
@@ -293,19 +328,84 @@ function AgentCardView({
         )}
       </div>
 
-      <p className="text-[11px] text-muted-foreground">
-        {agent.lastRunAt
-          ? `Chạy cách đây ${formatDistanceToNow(new Date(agent.lastRunAt), {
-              locale: vi,
-            })}`
-          : "Chưa từng chạy"}
-      </p>
+      {/* PHASE3 B2 §4.2 — stats mini: runs · success rate · chi phí */}
+      {agent.stats ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="secondary" className="tabular-nums text-[10px]">
+            {agent.stats.runCount} lần chạy
+          </Badge>
+          <Badge variant="secondary" className="tabular-nums text-[10px]">
+            thành công {agentSuccessPct(agent.stats.successRate)}%
+          </Badge>
+          <Badge variant="secondary" className="tabular-nums text-[10px]">
+            ${agent.stats.totalCostUsd.toFixed(2)}
+          </Badge>
+        </div>
+      ) : null}
+
+      <div className="mt-auto flex items-center justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground">
+          {agent.lastRunAt
+            ? `Chạy cách đây ${formatDistanceToNow(new Date(agent.lastRunAt), {
+                locale: vi,
+              })}`
+            : "Chưa từng chạy"}
+        </p>
+        <Button
+          variant="ghost"
+          size="xs"
+          className="gap-1 text-xs text-muted-foreground"
+          onClick={() => setActiveWorkspace("agents")}
+          aria-label="Mở workspace Đội Agent"
+          title="Mở workspace Đội Agent (hồ sơ, chạy riêng, chat)"
+        >
+          Chi tiết
+          <ArrowRight className="size-3" aria-hidden="true" />
+        </Button>
+      </div>
     </div>
   );
 }
 
-function MessageItem({ message }: { message: AgentMessageRow }) {
+/**
+ * Một tin broadcast trong feed — tái dùng trong tab "Phát thanh" của
+ * AgentDetailPanel. Khi có signals ACTIVE, tin strategist hiển thị nút
+ * Phê duyệt / Từ chối (PHASE3 B2 §4.5).
+ */
+export function MessageItem({
+  message,
+  signals = [],
+}: {
+  message: AgentMessageRow;
+  /** Danh sách tín hiệu (AgentDetailPanel không truyền → ẩn nút quyết định). */
+  signals?: SignalRow[];
+}) {
   const RoleIcon = ROLE_ICONS[message.fromAgent?.role ?? ""] ?? Brain;
+  const decision = useSignalDecision();
+
+  // Tín hiệu ACTIVE của strategist sinh SAU tin broadcast này (cùng chu kỳ) —
+  // chọn tín hiệu MỚI NHẤT khớp để phê duyệt/từ chối.
+  const strategistSignal = useMemo(() => {
+    if (message.fromAgent?.code !== "portfolio-strategist" || !message.broadcast) {
+      return null;
+    }
+    const msgTime = new Date(message.createdAt).getTime();
+    const candidates = signals.filter(
+      (s) =>
+        s.status === "ACTIVE" &&
+        s.agentCode === "portfolio-strategist" &&
+        new Date(s.createdAt).getTime() >= msgTime
+    );
+    if (candidates.length === 0) return null;
+    return candidates.reduce((latest, s) =>
+      new Date(s.createdAt).getTime() > new Date(latest.createdAt).getTime()
+        ? s
+        : latest
+    );
+  }, [message, signals]);
+
+  const pending = decision.isPending;
+
   return (
     <li className="flex gap-3 py-3">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-muted">
@@ -337,8 +437,79 @@ function MessageItem({ message }: { message: AgentMessageRow }) {
             {message.reasoning}
           </blockquote>
         )}
+
+        {strategistSignal && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-2">
+            <SignalSummary signal={strategistSignal} />
+            <div className="ml-auto flex items-center gap-1.5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 border-up/40 text-up hover:bg-up/10"
+                disabled={
+                  pending || strategistSignal.direction === "HOLD"
+                }
+                title={
+                  strategistSignal.direction === "HOLD"
+                    ? "Tín hiệu GIỮ không thể chuyển lệnh"
+                    : "Phê duyệt và đặt lệnh paper LIMIT"
+                }
+                aria-label={`Phê duyệt tín hiệu ${strategistSignal.direction} ${strategistSignal.symbol}`}
+                onClick={() =>
+                  decision.mutate({
+                    signalId: strategistSignal.id,
+                    action: "APPROVE",
+                  })
+                }
+              >
+                {pending && decision.variables?.action === "APPROVE" ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <CircleCheck className="size-3.5" aria-hidden="true" />
+                )}
+                Phê duyệt
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-9 gap-1.5 border-down/40 text-down hover:bg-down/10"
+                disabled={pending}
+                title="Từ chối tín hiệu — không tạo lệnh"
+                aria-label={`Từ chối tín hiệu ${strategistSignal.direction} ${strategistSignal.symbol}`}
+                onClick={() =>
+                  decision.mutate({
+                    signalId: strategistSignal.id,
+                    action: "REJECT",
+                  })
+                }
+              >
+                {pending && decision.variables?.action === "REJECT" ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <CircleX className="size-3.5" aria-hidden="true" />
+                )}
+                Từ chối
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </li>
+  );
+}
+
+function SignalSummary({ signal }: { signal: SignalRow }) {
+  const dir = DIRECTION[signal.direction] ?? DIRECTION.HOLD;
+  return (
+    <>
+      <Badge className={cn("text-[10px]", dir.className)}>{dir.label}</Badge>
+      <span className="text-xs font-bold tracking-tight">{signal.symbol}</span>
+      <span className="tabular-nums text-[11px] text-muted-foreground">
+        điểm {signal.score.toFixed(0)}/100
+      </span>
+    </>
   );
 }
 
@@ -362,7 +533,7 @@ function SentimentBadge({ sentiment }: { sentiment: string }) {
   );
 }
 
-function TaskStatusIcon({ status }: { status: string }) {
+export function TaskStatusIcon({ status }: { status: string }) {
   switch (status) {
     case "RUNNING":
       return <Loader2 className="size-4 shrink-0 animate-spin text-amber-500" aria-label="Đang chạy" />;
@@ -375,7 +546,7 @@ function TaskStatusIcon({ status }: { status: string }) {
   }
 }
 
-function PriorityBadge({ priority }: { priority: string }) {
+export function PriorityBadge({ priority }: { priority: string }) {
   if (priority === "high")
     return (
       <Badge variant="outline" className="border-down/40 text-down">

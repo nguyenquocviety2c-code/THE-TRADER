@@ -10,15 +10,19 @@
 
 ## Tính năng chính
 
-- **Bảng giá VN30 realtime** — 30 mã HOSE, tick mô phỏng mỗi 10 giây qua mini-service `market-engine` (WebSocket), tuân thủ quy tắc sàn: bội 100 VND, dải trần/sàn ±7%.
-- **5 AI agent** — Market Analyst · News & Sentiment · Risk Manager · Portfolio Strategist · Execution Manager — chạy chu kỳ phân tích bằng glm-4.6, broadcast kết luận kèm sentiment, health score động.
+- **App shell 2 workspace** — tab Tổng quan ⇄ **Đội Agent** (Zustand, không reload trang, realtime không đứt; deep-link `?ws=agents`).
+- **Bảng giá VN30 realtime** — 30 mã HOSE, tick mô phỏng mỗi 10 giây qua mini-service `market-engine` (WebSocket), tuân thủ quy tắc sàn: bội 100 VND, dải trần/sàn ±7%; **toggle cột mở rộng** (trần/sàn/tham chiếu/cao/thấp, dấu ⌃⌄ khi chạm trần/sàn).
+- **Biểu đồ nến Nhật + RSI14** — nến custom (xanh=đóng≥mở) + volume histogram màu phiên + panel RSI Wilder (guideline 30/70, vùng quá mua/bán); toggle Nến/Đường, khung 30/60/90 phiên.
+- **5 AI agent — làm việc trực tiếp** — Market Analyst · News & Sentiment · Risk Manager · Portfolio Strategist · Execution Manager: **chạy riêng từng agent**, **chat 1-1** (AgentMessage.direction USER/AGENT), hồ sơ chi phí token/$ từng agent + sparkline 7 ngày, rate-limit 60s/agent có đếm ngược.
+- **Human-in-the-loop phê duyệt** — chu kỳ sinh tín hiệu **ACTIVE chờ duyệt**; trader **✅ Phê duyệt** (lệnh paper LIMIT 5% NAV) hoặc **⛔ Từ chối** ngay trong feed tin nhắn / tab Tín hiệu; đầy đủ audit `SIGNAL_CREATED`/`SIGNAL_APPROVED`/`SIGNAL_REJECTED`.
 - **Tin tức RSS thật** — crawler 5 nguồn Việt Nam (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet), dedupe theo URL, nạp tay hoặc tự động mỗi 15 phút.
 - **Dòng khối ngoại (S6)** — mô phỏng deterministic theo thanh khoản thật + cảnh báo `FOREIGN_FLOW_OUTFLOW` khi bán ròng mạnh.
-- **Tín hiệu → lệnh giấy** — Signal từ strategist, chuyển lệnh PENDING (phí 0.15%, thuế TNCN 0.1% khi bán), danh mục vị thế + PnL runtime.
+- **Tín hiệu → lệnh giấy** — Signal → APPROVE/convert → lệnh PENDING (phí 0.15%, thuế TNCN 0.1% khi bán), fill engine tự khớp, danh mục vị thế + PnL runtime + **donut phân bổ ngành + cột % tỷ trọng**.
+- **Chip CFO** — **Sức mua (ước tính)** công thức minh bạch ở header (cash + equity×0.5 − marginUsed); **chip chi phí AI lũy kế** (tổng $ + tokens) ở footer.
 - **Watchlist cá nhân** — thêm/gỡ mã bằng cột sao, chuyển đổi nhanh VN30 ⇄ danh mục theo dõi.
 - **Minh bạch nguồn dữ liệu** — mỗi nguồn gắn nhãn `live`/`simulated`/`fallback`/`paper` + stale marking, hiển thị trực tiếp trên footer.
-- **Audit trail đầy đủ** — `AgentRun` (token/chi phí/thời lượng), `AgentMessage`, `AuditLog` mọi hành động nhạy cảm.
-- **Dark terminal UI tiếng Việt** — quy ước màu xanh tăng/đỏ giảm (chuẩn thị trường VN), số liệu thẳng cột (tabular-nums).
+- **Audit trail đầy đủ** — `AgentRun` (token/chi phí/thời lượng), `AgentMessage`, `AuditLog` mọi hành động nhạy cảm (kể cả chat).
+- **Dark terminal UI tiếng Việt** — quy ước màu xanh tăng/đỏ giảm (chuẩn thị trường VN), số liệu thẳng cột (tabular-nums), responsive mobile-first.
 
 ---
 
@@ -148,7 +152,7 @@ docs/                         # Tài liệu chi tiết (xem dưới)
 
 ## Tài liệu chi tiết
 
-- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (18 route, có fill/cancel engine), thiết kế 5 agent, realtime & mini-service market-engine
+- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (**23 route** — có agents/[id] + run/chat + decision), thiết kế 5 agent, realtime & mini-service market-engine
 - [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) — data dictionary 19 model, chính sách kiểu dữ liệu / PII / audit
 - [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) — kho kiểm kê nguồn dữ liệu S1–S6, field mapping, chiến lược fallback
 

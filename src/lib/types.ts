@@ -6,6 +6,9 @@ export interface QuoteRow {
   sector: string;
   market: string;
   last: number;
+  /** PHASE3 B3 §5.2 — cao/thấp phiên hiện tại (cột mở rộng bảng giá). */
+  high: number | null;
+  low: number | null;
   change: number;
   changePct: number;
   volume: number;
@@ -162,11 +165,36 @@ export interface AgentCard {
     tokensOut: number;
     costUsd: number;
   } | null;
+  /** PHASE3 B2 §4.2 — stats chi phí/độ tin cậy mỗi agent. */
+  stats: AgentStats;
+}
+
+/** PHASE3_BLUEPRINT §4.2 — thống kê vận hành mỗi agent (GET /api/agents). */
+export interface AgentStats {
+  runCount: number;
+  /** COMPLETED / tổng run (0 khi chưa có run nào). */
+  successRate: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  totalCostUsd: number;
+  lastError: string | null;
+  /** Số tin chat 1-1 (broadcast=false) của agent. */
+  chatCount: number;
+}
+
+/** Tổng chi phí AI cả đội (footer chip + workspace Đội Agent). */
+export interface AgentsTotals {
+  runCount: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  totalCostUsd: number;
 }
 
 export interface AgentsResponse {
   agents: AgentCard[];
   tasks: AgentTaskRow[];
+  /** PHASE3 B2: tổng hợp chi phí AI toàn đội (§5.5 — chip chi phí AI). */
+  totals: AgentsTotals;
 }
 
 export interface AgentMessageRow {
@@ -174,10 +202,94 @@ export interface AgentMessageRow {
   fromAgent: { code: string; name: string; role: string } | null;
   toAgent: { code: string; name: string } | null;
   broadcast: boolean;
+  /** PHASE3 B2 §4.1 — AGENT | USER (chat 1-1 lưu từAgentId = agent sở hữu thread). */
+  direction: "AGENT" | "USER";
   content: string;
   reasoning: string | null;
   sentiment: string | null;
   createdAt: string;
+}
+
+/** PHASE3_BLUEPRINT §4.2 — dòng AgentRun trong hồ sơ chi tiết agent. */
+export interface AgentRunRow {
+  id: string;
+  taskStatus: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+  error: string | null;
+}
+
+/** Tin chat 1-1 trong thread của agent (broadcast=false). */
+export interface AgentChatMessageRow {
+  id: string;
+  direction: "AGENT" | "USER";
+  content: string;
+  createdAt: string;
+}
+
+/** PHASE3_BLUEPRINT §4.2 — GET /api/agents/[id] hồ sơ chi tiết. */
+export interface AgentDetailResponse {
+  agent: AgentCard;
+  runs: AgentRunRow[];
+  tasks: AgentTaskRow[];
+  /** Thread chat 1-1 (broadcast=false, asc). */
+  chat: AgentChatMessageRow[];
+  /** 20 tin broadcast gần nhất (desc). */
+  broadcastFeed: AgentMessageRow[];
+  /** Tín hiệu mở của agent này (status ACTIVE). */
+  signals: SignalRow[];
+}
+
+/** PHASE3_BLUEPRINT §4.3 — POST /api/agents/[id]/run (chạy riêng 1 agent). */
+export interface AgentSingleRunResponse {
+  agent: { id: string; code: string; name: string };
+  message: {
+    id: string;
+    content: string;
+    reasoning: string | null;
+    sentiment: string | null;
+  } | null;
+  run: {
+    id: string;
+    tokensIn: number;
+    tokensOut: number;
+    costUsd: number;
+    durationMs: number | null;
+    taskStatus: string;
+  };
+}
+
+/** PHASE3_BLUEPRINT §4.4 — POST /api/agents/[id]/chat (chat trực tiếp). */
+export interface AgentChatResponse {
+  userMessage: AgentChatMessageRow;
+  reply: AgentChatMessageRow | null;
+  run: {
+    tokensIn: number;
+    tokensOut: number;
+    costUsd: number;
+    durationMs: number | null;
+  } | null;
+  threadLength: number;
+  /** Lỗi SDK → 200 kèm reply null + error VN (tin user đã lưu không mất). */
+  error?: string;
+}
+
+/** PHASE3_BLUEPRINT §4.5 — POST /api/signals/[id]/decision. */
+export interface SignalDecisionResponse {
+  signal: SignalRow;
+  /** Chỉ có khi APPROVE thành công. */
+  order: {
+    id: string;
+    symbol: string;
+    side: "BUY" | "SELL";
+    quantity: number;
+    price: number | null;
+    status: string;
+  } | null;
 }
 
 export interface AgentRunResult {
@@ -247,6 +359,10 @@ export interface SignalRow {
   actedAt: string | null;
   expiresAt: string | null;
   createdAt: string;
+  /** PHASE3 B2 §4.1 — ACTIVE | ACTED | REJECTED | EXPIRED. */
+  status: string;
+  rejectedAt: string | null;
+  rejectNote: string | null;
 }
 
 export interface RiskAlertRow {

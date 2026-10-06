@@ -3,10 +3,12 @@
 import * as React from "react";
 import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
-import { Loader2, Moon, Play, Radio, RefreshCw, Sun, TrendingUp } from "lucide-react";
+import { Loader2, Moon, Play, Radio, RefreshCw, Sun, TrendingUp, Wallet } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { WorkspaceNav } from "@/components/dashboard/nav";
 import { apiGet } from "@/lib/api";
 import { useRunAgents } from "@/hooks/use-run-agents";
 import { useUiStore } from "@/lib/store";
@@ -58,6 +60,17 @@ export function Header() {
   const isRefreshing = useIsFetching() > 0;
 
   const open = now ? isMarketOpen(now) : false;
+
+  // PHASE3_BLUEPRINT §5.4 — chip Sức mua (ước tính, minh bạch công thức):
+  //   buyingPower = cash + marginRoom,  marginRoom = equity × RATIO − marginUsed
+  //   MARGIN_ROOM_RATIO default 0.5 (giả lập ký quỹ 50% — KHÔNG phải hạn mức thật VNDIRECT)
+  const MARGIN_ROOM_RATIO = 0.5;
+  const cash = portfolio?.account.cashBalance ?? 0;
+  const equity = portfolio?.account.equity ?? 0;
+  const marginUsed = portfolio?.account.marginUsed ?? 0;
+  const marginRoom = Math.round(equity * MARGIN_ROOM_RATIO - marginUsed);
+  const buyingPower = cash + marginRoom;
+  const overMargin = marginRoom < 0;
 
   async function handleRefresh() {
     try {
@@ -156,6 +169,54 @@ export function Header() {
             </div>
           </div>
 
+          {/* PHASE3 B3: chip Sức mua (ước tính) — công thức minh bạch qua tooltip */}
+          <TooltipProvider delayDuration={200}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div
+                  className={cn(
+                    "hidden items-center gap-2 rounded-lg border px-3 py-1.5 lg:flex",
+                    overMargin && "border-down/50 bg-down/5"
+                  )}
+                >
+                  <Wallet
+                    className={cn("size-4 shrink-0", overMargin ? "text-down" : "text-muted-foreground")}
+                    aria-hidden="true"
+                  />
+                  <div className="leading-tight">
+                    <p className="text-[11px] text-muted-foreground">
+                      Sức mua <span className="text-[10px]">(ước tính)</span>
+                      {overMargin && (
+                        <span className="ml-1 rounded-sm bg-down/15 px-1 font-medium text-down">
+                          Vượt hạn mức ước tính
+                        </span>
+                      )}
+                    </p>
+                    <p className="tabular-nums text-sm font-semibold">
+                      {portfolio ? formatVnd(buyingPower) : "— ₫"}
+                    </p>
+                  </div>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-72 text-left">
+                <p className="mb-1 text-xs font-semibold">Công thức sức mua (ước tính)</p>
+                <ul className="space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+                  <li>Tiền mặt: {formatVnd(cash)}</li>
+                  <li>
+                    Phòng ký quỹ ước tính: {formatVnd(marginRoom)}
+                    <br />= {formatVnd(equity)} × {MARGIN_ROOM_RATIO} − {formatVnd(marginUsed)}
+                  </li>
+                  <li className="font-medium text-foreground">
+                    Sức mua = {formatVnd(buyingPower)}
+                  </li>
+                  <li className="pt-1 text-amber-600 dark:text-amber-400">
+                    Giả lập hệ số 0.5 — không phải hạn mức thật của VNDIRECT.
+                  </li>
+                </ul>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+
           {/* Run agents (blueprint §3 — header action) */}
           <Button
             onClick={() => runAgents.mutate()}
@@ -206,6 +267,9 @@ export function Header() {
           </Button>
         </div>
       </div>
+
+      {/* PHASE3 B1: thanh tab workspace — hàng dưới thanh logo (§3.2) */}
+      <WorkspaceNav />
     </header>
   );
 }

@@ -2,10 +2,14 @@ import { NextResponse } from "next/server";
 import ZAI from "z-ai-web-dev-sdk";
 import { db } from "@/lib/db";
 import { toPlain } from "@/lib/serialize";
-import { pctChange, rsi, sma, latestVsMean } from "@/lib/indicators";
 import { updateAgentHealth } from "@/lib/health";
-import { latestNewsForContext } from "@/lib/news";
-import { getForeignFlows, flowsPromptBlock } from "@/lib/flows";
+import {
+  ROLE_PROMPTS,
+  buildMarketBlock,
+  buildNewsBlock,
+  buildFlowsBlock,
+  buildOpenSignalsBlock,
+} from "@/lib/agent-context";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -15,11 +19,13 @@ export const maxDuration = 120;
  * (TECHNICAL_BLUEPRINT §5.2):
  *
  *  1. Snapshot: quotes, 90-day bars (top liquid), positions, account, risk alerts
- *  2. Build role prompts from each Agent.config
+ *     — qua các builder src/lib/agent-context.ts (PHASE3_BLUEPRINT §4.6)
+ *  2. Role prompts dùng chung ROLE_PROMPTS (single-run & chat cùng nguồn)
  *  3. Run 3 analysis agents in parallel (market / news / risk) → AgentMessage + AgentRun
  *  4. Portfolio Strategist consolidates → AgentMessage + AgentRun + Signal
- *  5. Execution Manager (deterministic) → paper Order + AgentMessage + AgentRun
- *  6. AuditLog: SIGNAL_APPROVED · ORDER_CREATED · AGENT_RUN_COMPLETED
+ *  5. Execution Manager (deterministic) → ghi nhận tín hiệu, KHÔNG tự tạo lệnh —
+ *     tín hiệu để status ACTIVE chờ trader phê duyệt (PHASE3_BLUEPRINT §4.5/§4.9)
+ *  6. AuditLog: SIGNAL_CREATED · AGENT_RUN_COMPLETED
  */
 
 const ANALYST_CODES = ["market-analyst", "news-sentiment", "risk-manager"] as const;
@@ -30,9 +36,6 @@ const ALL_CODES = [...ANALYST_CODES, STRATEGIST_CODE, EXECUTOR_CODE] as const;
 /** F-203 (audit 19-b): rate-limit chu kỳ — chống spam chi phí LLM không giới hạn. */
 const CYCLE_COOLDOWN_MS = 60_000;
 let lastCycleStartedAt = 0;
-
-/** Position sizing for the paper execution step: 5% of equity, board lots of 100. */
-const POSITION_SIZE_PCT = 0.05;
 
 function round100(v: number): number {
   return Math.max(0, Math.round(v / 100) * 100);
@@ -182,6 +185,7 @@ async function persistMessage(
     data: {
       fromAgentId: agentId,
       broadcast: true,
+      direction: "AGENT", // PHASE3_BLUEPRINT §4.1 — tin chu kỳ luôn do agent phát
       content,
       reasoning: reasoning || null,
       sentiment: sentiment ?? null,
@@ -233,225 +237,34 @@ export async function POST() {
   });
 
   try {
-    // ── 1. Snapshot ────────────────────────────────────────────────
-    const [instruments, positions, alerts, account] = await Promise.all([
-      db.instrument.findMany({
-        where: { isActive: true },
-        select: {
-          id: true,
-          symbol: true,
-          sector: true,
-          quotes: {
-            orderBy: { tradedAt: "desc" },
-            take: 1,
-            select: { last: true, change: true, changePct: true, volume: true, floorPrice: true, ceilingPrice: true },
-          },
-        },
-      }),
-      db.position.findMany({
-        where: { status: "OPEN" },
-        include: {
-          instrument: {
-            select: {
-              symbol: true,
-              sector: true,
-              quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true, changePct: true } },
-            },
-          },
-        },
-      }),
-      db.riskAlert.findMany({
-        orderBy: { createdAt: "desc" },
-        take: 5,
-        select: { severity: true, message: true },
-      }),
-      db.brokerAccount.findFirst({
-        where: { deletedAt: null },
-        select: { id: true, cashBalance: true, equity: true, marginUsed: true },
-      }),
+    // ── 1. Snapshot — builder dùng chung (PHASE3_BLUEPRINT §4.6) ────
+    const [market, newsBlock, flowsBlock, openSignalsBlock] = await Promise.all([
+      buildMarketBlock(),
+      buildNewsBlock(),
+      buildFlowsBlock(),
+      buildOpenSignalsBlock(),
     ]);
+    const marketBlock = market.block;
 
-    // ── S5/S6 context — news RSS + foreign flows (DATA_SOURCES.md §4.3/§4.4) ──
-    const [newsItems, flows] = await Promise.all([
-      latestNewsForContext(10),
-      getForeignFlows().catch(() => null),
-    ]);
-
-    const quoteRows = instruments
-      .map((i) => {
-        const q = i.quotes[0];
-        return q
-          ? { id: i.id, symbol: i.symbol, sector: i.sector, ...q }
-          : null;
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => b.volume - a.volume);
-
-    const advancing = quoteRows.filter((r) => r.changePct > 0).length;
-    const declining = quoteRows.filter((r) => r.changePct < 0).length;
-    const avgChangePct = quoteRows.length
-      ? quoteRows.reduce((s, r) => s + r.changePct, 0) / quoteRows.length
-      : 0;
-    const totalVolume = quoteRows.reduce((s, r) => s + r.volume, 0);
-    const gainers = [...quoteRows].sort((a, b) => b.changePct - a.changePct).slice(0, 5);
-    const losers = [...quoteRows].sort((a, b) => a.changePct - b.changePct).slice(0, 5);
-
-    // ── Technical indicators for the top-10 liquid symbols ─────────
-    const top10 = quoteRows.slice(0, 10);
-    const barRows = await db.bar.findMany({
-      where: { instrumentId: { in: top10.map((t) => t.id) } },
-      orderBy: { date: "asc" },
-      select: { instrumentId: true, close: true, volume: true },
-    });
-    const barsByInstrument = new Map<string, { closes: number[]; volumes: number[] }>();
-    for (const b of barRows) {
-      let entry = barsByInstrument.get(b.instrumentId);
-      if (!entry) {
-        entry = { closes: [], volumes: [] };
-        barsByInstrument.set(b.instrumentId, entry);
-      }
-      entry.closes.push(b.close);
-      entry.volumes.push(b.volume);
-    }
-    const lastById = new Map(quoteRows.map((r) => [r.id, r.last]));
-    const floorById = new Map(quoteRows.map((r) => [r.id, r.floorPrice ?? 0]));
-    const ceilingById = new Map(quoteRows.map((r) => [r.id, r.ceilingPrice ?? 0]));
-    const indicatorLines = top10.map((t) => {
-      const bars = barsByInstrument.get(t.id);
-      const closes = bars?.closes ?? [];
-      const last = lastById.get(t.id) ?? (closes.length ? closes[closes.length - 1] : 0);
-      const sma20 = sma(closes, 20);
-      const sma50 = sma(closes, 50);
-      const rsi14 = rsi(closes, 14);
-      const chg5d = closes.length >= 6 ? pctChange(closes[closes.length - 6], last) : null;
-      const volRatio = bars ? latestVsMean(bars.volumes, 20) : null;
-      return [
-        `${t.symbol} (${t.sector ?? "—"})`,
-        `giá ${last.toLocaleString("vi-VN")}`,
-        `HG ${t.changePct >= 0 ? "+" : ""}${t.changePct.toFixed(2)}%`,
-        `SMA20 ${sma20 != null ? Math.round(sma20).toLocaleString("vi-VN") : "—"}`,
-        `SMA50 ${sma50 != null ? Math.round(sma50).toLocaleString("vi-VN") : "—"}`,
-        `RSI14 ${rsi14 != null ? rsi14.toFixed(0) : "—"}`,
-        `5 phiên ${chg5d != null ? (chg5d >= 0 ? "+" : "") + chg5d.toFixed(2) + "%" : "—"}`,
-        `KL/TL20 ${volRatio ?? "—"}`,
-      ].join(" · ");
-    });
-
-    const positionLines = positions.map((p) => {
-      const last = p.instrument.quotes[0]?.last ?? p.avgPrice;
-      const pnl = (last - p.avgPrice) * p.quantity;
-      const pnlPct = p.avgPrice > 0 ? ((last - p.avgPrice) / p.avgPrice) * 100 : 0;
-      return `- ${p.instrument.symbol} (${p.instrument.sector ?? "—"}): ${p.quantity} cp @ ${p.avgPrice.toLocaleString("vi-VN")} → ${last.toLocaleString("vi-VN")} ₫ | Lãi/lỗ: ${Math.round(pnl).toLocaleString("vi-VN")} ₫ (${pnlPct.toFixed(2)}%)`;
-    });
-
-    // F-102 (audit 19-a): tổng tài sản = tiền mặt + GTTH vị thế mở (equity trong DB chỉ là snapshot seed)
-    const positionsMv = positions.reduce(
-      (s, p) => s + (p.instrument.quotes[0]?.last ?? p.avgPrice) * p.quantity,
-      0
-    );
-    const equity = account
-      ? Number(account.cashBalance) + positionsMv
-      : 0;
-    const sectorWeights = new Map<string, number>();
-    for (const p of positions) {
-      const last = p.instrument.quotes[0]?.last ?? p.avgPrice;
-      const mv = last * p.quantity;
-      sectorWeights.set(
-        p.instrument.sector ?? "Khác",
-        (sectorWeights.get(p.instrument.sector ?? "Khác") ?? 0) + mv
-      );
-    }
-    const sectorLines = [...sectorWeights.entries()]
-      .map(([sector, mv]) => {
-        const pct = equity > 0 ? (mv / equity) * 100 : 0;
-        return `- ${sector}: ${Math.round(mv).toLocaleString("vi-VN")} ₫ (~${pct.toFixed(1)}% NAV)`;
-      })
-      .sort((a, b) => b.localeCompare(a));
-
-    const marketBlock = [
-      "SNAPSHOT THỊ TRƯỜNG VN30 (HOSE) — PHIÊN HIỆN TẠI",
-      `- Số mã: ${quoteRows.length} | Tăng: ${advancing} | Giảm: ${declining} | Biến động TB: ${avgChangePct.toFixed(2)}%`,
-      `- Tổng khối lượng: ${totalVolume.toLocaleString("vi-VN")} cp`,
-      `- Top tăng: ${gainers.map((g) => `${g.symbol} +${g.changePct.toFixed(2)}%`).join(", ")}`,
-      `- Top giảm: ${losers.map((g) => `${g.symbol} ${g.changePct.toFixed(2)}%`).join(", ")}`,
-      "",
-      "BẢNG CHỈ BÁO KỸ THUẬT (10 mã thanh khoản cao nhất, 90 phiên):",
-      ...indicatorLines,
-      "",
-      "DANH MỤC ĐANG NẮM GIỮ:",
-      positionLines.length ? positionLines.join("\n") : "- (trống)",
-      "",
-      "TỶ TRỌNG NGÀNH (theo NAV):",
-      ...sectorLines,
-      "",
-      "TÀI KHOẢN VNDIRECT (paper):",
-      `- Giá trị tài sản: ${equity.toLocaleString("vi-VN")} ₫ | Tiền mặt: ${account ? Number(account.cashBalance).toLocaleString("vi-VN") : 0} ₫ | Margin: ${account ? Number(account.marginUsed).toLocaleString("vi-VN") : 0} ₫`,
-      "",
-      "CẢNH BÁO RỦI RO GẦN NHẤT:",
-      alerts.length ? alerts.map((a) => `- [${a.severity}] ${a.message}`).join("\n") : "- (không có)",
-    ].join("\n");
-
-    // ── S5 news block + S6 flows block (đưa vào prompt đúng agent) ──
-    const newsAge = (d: Date) => {
-      const h = Math.max(0, Math.round((Date.now() - d.getTime()) / 3_600_000));
-      return h <= 0 ? "vừa xong" : h < 24 ? `${h}h trước` : `${Math.round(h / 24)} ngày trước`;
-    };
-    const newsBlock = newsItems.length
-      ? [
-          `TIN TỨC THỊ TRƯỜNG MỚI NHẤT (S5 · RSS ${[...new Set(newsItems.map((n) => n.source))].join(", ")}):`,
-          ...newsItems.map(
-            (n) =>
-              `- [${n.source} · ${newsAge(n.publishedAt)}] ${n.title}${n.summary ? ` — ${n.summary.slice(0, 140)}` : ""}`
-          ),
-        ].join("\n")
-      : "TIN TỨC THỊ TRƯỜNG: (chưa nạp được tin mới — nếu dùng, khai báo rõ 'no new data' và không bịa tin)";
-    const flowsBlock = flows
-      ? flowsPromptBlock(flows)
-      : "DÒNG KHỐI NGOẠI: (nguồn không khả dụng — bỏ metric này khỏi phân tích)";
-
-    // ── 2. Role prompts (from Agent.config) ───────────────────────
-    const cfg = (code: string): Record<string, unknown> => {
-      try {
-        return JSON.parse(byCode.get(code)?.config ?? "{}") as Record<string, unknown>;
-      } catch {
-        return {};
-      }
-    };
-    const lookback = (cfg("market-analyst").lookbackDays as number) ?? 90;
-    const indicatorsList = ((cfg("market-analyst").indicators as string[]) ?? [
-      "SMA20",
-      "SMA50",
-      "RSI14",
-    ]).join(", ");
-    const riskCfg = cfg("risk-manager");
-
+    // ── 2. Role prompts (ROLE_PROMPTS — cùng nguồn với single-run/chat) ──
     const prompts: Record<string, { system: string; user: string }> = {
       "market-analyst": {
-        system: `Bạn là agent "Market Analyst" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
-Nhiệm vụ: phân tích kỹ thuật bảng chỉ báo OHLCV VN30 (${lookback} phiên, chỉ báo: ${indicatorsList}).
-Yêu cầu: trả lời bằng TIẾNG VIỆT, 2–4 câu đúng trọng tâm; đánh giá xu hướng tổng thể và nêu 2–3 mã nổi bật nhất kèm số liệu cụ thể; KHÔNG bịa số liệu ngoài bảng.
-Trả về duy nhất một khối JSON hợp lệ: {"content": "<phân tích 2-4 câu>", "reasoning": "<1 câu cơ sở kỹ thuật>"}`,
+        system: ROLE_PROMPTS["market-analyst"].system,
         user: [marketBlock, flowsBlock].join("\n\n"),
       },
       "news-sentiment": {
-        system: `Bạn là agent "News & Sentiment" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
-QUAN TRỌNG: nguồn tin tức ngoài (RSS VnEconomy/CafeF/VNExpress/Tuổi Trẻ/VietnamNet) ĐÃ được tích hợp — khối TIN TỨC THỊ TRƯỜNG MỚI NHẤT nằm ở cuối prompt người dùng; hãy chấm cảm xúc chung của dòng tin (bullish/bearish/neutral) và nêu 1–2 tin ảnh hưởng lớn nhất tới VN30. Nếu khối tin ghi "chưa nạp được" → khai báo rõ "no new data" và chỉ suy luận hạn chế từ số liệu nội tại. Tuyệt đối không bịa tin tức.
-Trả lời TIẾNG VIỆT, 2–3 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "...", "sentiment": "bullish" | "bearish" | "neutral"}`,
+        system: ROLE_PROMPTS["news-sentiment"].system,
         user: [marketBlock, newsBlock, flowsBlock].join("\n\n"),
       },
       "risk-manager": {
-        system: `Bạn là agent "Risk Manager" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
-Nhiệm vụ: đối chiếu danh mục với giới hạn rủi ro: drawdown tối đa ${riskCfg.maxDrawdownPct ?? 15}%, tỷ trọng ngành tối đa ${riskCfg.maxSectorWeightPct ?? 40}%, vị thế đơn tối đa ${riskCfg.maxPositionPct ?? 25}% NAV, lỗ ngày tối đa ${((riskCfg.dailyLossLimitVnd as number) ?? 50000000).toLocaleString("vi-VN")} ₫.
-Kiểm tra từng giới hạn, nêu rõ vi phạm (nếu có), và kết luận mức rủi ro tổng thể của danh mục.
-Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<cơ sở tính toán>"}`,
+        system: ROLE_PROMPTS["risk-manager"].system,
         user: [marketBlock, flowsBlock].join("\n\n"),
       },
       "portfolio-strategist": {
-        system: `Bạn là agent "Portfolio Strategist" (điểm hợp lưu) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
-Nhiệm vụ: tổng hợp 3 bản phân tích của Market Analyst, News & Sentiment, và Risk Manager ở trên để (a) đưa ra nhận định danh mục ngắn gọn, (b) sinh MỘT tín hiệu giao dịch cụ thể.
-Quy tắc tín hiệu: chỉ chọn mã có trong bảng chỉ báo; direction BUY chỉ khi xu hướng + cảm xúc + rủi ro đều thuận, SELL khi cần cắt tỷ trọng vi phạm giới hạn, còn lại HOLD; score 0–100; giá là số nguyên VND bội số 100; BUY: stopLoss < giá hiện tại < targetPrice < takeProfit; SELL: targetPrice < giá hiện tại < stopLoss.
-Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendation": "<một khuyến nghị cụ thể>", "confidence": "LOW"|"MEDIUM"|"HIGH", "signal": {"symbol": "VCB", "direction": "BUY"|"SELL"|"HOLD", "score": 0-100, "rationale": "...", "targetPrice": <int VND|null>, "stopLoss": <int VND|null>, "takeProfit": <int VND|null>} | null}`,
-        user: [marketBlock, newsBlock, flowsBlock].join("\n\n"),
+        system: ROLE_PROMPTS["portfolio-strategist"].system,
+        user: [marketBlock, newsBlock, flowsBlock, `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`].join(
+          "\n\n"
+        ),
       },
     };
 
@@ -550,10 +363,7 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
     // ── 4. Portfolio Strategist consolidation ─────────────────────
     const strategistAgent = byCode.get(STRATEGIST_CODE)!;
     const strategistUserPrompt = [
-      marketBlock,
-      "",
-      newsBlock,
-      flowsBlock,
+      prompts[STRATEGIST_CODE].user,
       "",
       "KẾT QUẢ TỪ 3 AGENT PHÂN TÍCH (để tổng hợp):",
       `- Market Analyst: ${analyses["market-analyst"]?.content ?? "(agent lỗi — bỏ qua)"}`,
@@ -665,7 +475,10 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
       ).catch(() => undefined);
     }
 
-    // ── 5. Execution Manager — deterministic paper order ─────────
+    // ── 5. Execution Manager — ghi nhận tín hiệu, chờ phê duyệt ────
+    // PHASE3_BLUEPRINT §4.5/§4.9: chu kỳ KHÔNG còn tự tạo Order — tín hiệu
+    // BUY/SELL để status ACTIVE, trader phê duyệt/từ chối qua
+    // POST /api/signals/[id]/decision.
     const executorAgent = byCode.get(EXECUTOR_CODE)!;
     let createdSignal: {
       id: string;
@@ -674,32 +487,21 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
       score: number;
       confidence: string;
     } | null = null;
-    let createdOrder: {
-      id: string;
-      symbol: string;
-      side: string;
-      quantity: number;
-      price: number | null;
-      status: string;
-    } | null = null;
     let executionRunId = "";
     let signalExpiresAt: Date | null = null;
 
-    const validSymbol = strategist?.signal
-      ? quoteRows.find(
-          (r) => r.symbol === strategist.signal?.symbol
-        )
+    const validInstrumentId = strategist?.signal
+      ? market.instrumentIdBySymbol.get(strategist.signal.symbol)
       : undefined;
 
-    if (strategist?.signal && validSymbol) {
+    if (strategist?.signal && validInstrumentId) {
       const sig = strategist.signal;
-      const lastPrice = lastById.get(validSymbol.id) ?? 0;
       const expiresAt = new Date(Date.now() + 3 * 86_400_000);
       signalExpiresAt = expiresAt;
 
       const signalRow = await db.signal.create({
         data: {
-          instrumentId: validSymbol.id,
+          instrumentId: validInstrumentId,
           direction: sig.direction,
           confidence: sig.confidence,
           score: sig.score,
@@ -709,6 +511,7 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
           stopLoss: sig.direction === "BUY" ? sig.stopLoss : null,
           takeProfit: sig.direction === "BUY" ? sig.takeProfit : null,
           expiresAt,
+          status: "ACTIVE", // chờ phê duyệt của trader (mặc định schema)
         },
       });
       createdSignal = {
@@ -718,9 +521,10 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
         score: sig.score,
         confidence: sig.confidence,
       };
+      // Audit đổi từ SIGNAL_APPROVED → SIGNAL_CREATED (§4.5: phê duyệt là việc của trader)
       await db.auditLog.create({
         data: {
-          action: "SIGNAL_APPROVED",
+          action: "SIGNAL_CREATED",
           entity: "Signal",
           entityId: signalRow.id,
           after: JSON.stringify({
@@ -731,75 +535,19 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
         },
       });
 
-      // Paper order for BUY/SELL signals (5% of equity, board lots of 100)
-      let executionContent = "";
-      if (sig.direction !== "HOLD" && lastPrice > 0 && equity > 0) {
-        const rawQty = Math.floor((equity * POSITION_SIZE_PCT) / lastPrice);
-        const quantity = Math.max(100, Math.floor(rawQty / 100) * 100);
-        // F-202 (audit 19-b): giá lệnh luôn nằm trong dải trần/sàn ±7% (Q2) + bội 100 ₫
-        const bandLow = floorById.get(validSymbol.id) || round100(lastPrice * 0.93);
-        const bandHigh = ceilingById.get(validSymbol.id) || round100(lastPrice * 1.07);
-        const basePrice = sig.targetPrice && sig.targetPrice > 0
-          ? sig.direction === "BUY"
-            ? Math.min(sig.targetPrice, round100(lastPrice * 1.01))
-            : Math.max(sig.targetPrice, round100(lastPrice * 0.99))
-          : round100(lastPrice);
-        const orderPrice = Math.max(bandLow, Math.min(basePrice, bandHigh));
-
-        const [user] = await db.user.findMany({
-          where: { isActive: true },
-          select: { id: true },
-          take: 1,
-        });
-        const brokerAccount = await db.brokerAccount.findFirst({
-          where: { deletedAt: null },
-          select: { id: true },
-        });
-
-        const order = await db.order.create({
-          data: {
-            userId: user?.id ?? "system",
-            brokerAccountId: brokerAccount?.id ?? null,
-            signalId: signalRow.id,
-            instrumentId: validSymbol.id,
-            side: sig.direction,
-            type: "LIMIT",
-            quantity,
-            price: orderPrice,
-            fee: BigInt(Math.round(0.0015 * orderPrice * quantity)), // F-201 (audit 19-b): phí môi giới 0,15% notional
-            status: "PENDING",
-            note: "Tự động từ chu kỳ agent",
-          },
-        });
-        await db.signal.update({
-          where: { id: signalRow.id },
-          data: { actedAt: new Date() },
-        });
-        await db.auditLog.create({
-          data: {
-            userId: user?.id ?? null,
-            action: "ORDER_CREATED",
-            entity: "Order",
-            entityId: order.id,
-            after: JSON.stringify({
-              symbol: sig.symbol,
-              side: sig.direction,
-              quantity,
-              price: orderPrice,
-            }),
-          },
-        });
-        createdOrder = {
-          id: order.id,
-          symbol: sig.symbol,
-          side: sig.direction,
-          quantity,
-          price: orderPrice,
-          status: "PENDING",
-        };
-        executionContent = `Nhận tín hiệu ${sig.direction === "BUY" ? "MUA" : "BÁN"} ${sig.symbol} (điểm ${sig.score}/100, tin cậy ${sig.confidence}). Đã đặt lệnh giấy LIMIT ${orderPrice.toLocaleString("vi-VN")} ₫ × ${quantity.toLocaleString("vi-VN")} cp (~${(POSITION_SIZE_PCT * 100).toFixed(0)}% NAV, làm tròn lô 100) — trạng thái PENDING, chờ khớp mô phỏng.`;
+      // Nội dung execution manager: ghi nhận tín hiệu — KHÔNG tự đặt lệnh
+      let executionContent: string;
+      let executionReasoning: string;
+      let execOutput: Record<string, unknown>;
+      if (sig.direction !== "HOLD") {
+        executionContent = `Nhận tín hiệu ${sig.direction === "BUY" ? "MUA" : "BÁN"} ${sig.symbol} (điểm ${sig.score}/100, tin cậy ${sig.confidence}). Đã ghi nhận tín hiệu — chờ phê duyệt của trader (nút Phê duyệt/từ chối ở luồng tin nhắn hoặc tab Tín hiệu).`;
+        executionReasoning =
+          "Tín hiệu ghi nhận ở trạng thái ACTIVE — chờ trader phê duyệt trước khi tạo lệnh.";
+        execOutput = { signalId: signalRow.id, awaitingApproval: true };
       } else {
-        executionContent = `Nhận tín hiệu ${sig.direction === "HOLD" ? "GIỮ" : sig.direction} ${sig.symbol} (điểm ${sig.score}/100). Không tạo lệnh mới${sig.direction === "HOLD" ? " (tín hiệu GIỮ)" : ""}.`;
+        executionContent = `Nhận tín hiệu GIỮ ${sig.symbol} (điểm ${sig.score}/100). Không tạo lệnh mới (tín hiệu GIỮ).`;
+        executionReasoning = "Tín hiệu GIỮ — không tạo lệnh.";
+        execOutput = { signalId: signalRow.id, direction: "HOLD" };
       }
 
       const execStart = Date.now();
@@ -809,21 +557,21 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
         execStart,
         0,
         0,
-        JSON.stringify({ signalId: signalRow.id, order: createdOrder?.id ?? null }),
+        JSON.stringify(execOutput),
         null
       );
       executionRunId = execRun.id;
       const execMessage = await persistMessage(
         executorAgent.id,
         executionContent,
-        `Sizing ${(POSITION_SIZE_PCT * 100).toFixed(0)}% NAV · lô 100 cp · LIMIT`,
+        executionReasoning,
         null
       );
       createdMessages.push({
         id: execMessage.id,
         fromAgentId: executorAgent.id,
         content: executionContent,
-        reasoning: `Sizing ${(POSITION_SIZE_PCT * 100).toFixed(0)}% NAV · lô 100 cp · LIMIT`,
+        reasoning: executionReasoning,
         sentiment: null,
       });
     } else {
@@ -851,7 +599,7 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
         after: JSON.stringify({
           messages: createdMessages.length,
           signal: createdSignal?.symbol ?? null,
-          order: createdOrder?.symbol ?? null,
+          order: null, // §4.9 — chu kỳ không còn tự tạo lệnh
           durationMs: cycleDurationMs,
           failures,
         }),
@@ -881,7 +629,7 @@ Trả về duy nhất JSON: {"summary": "<2-4 câu tổng hợp>", "recommendati
               },
             ]
           : [],
-        order: createdOrder,
+        order: null, // giữ trường cho client cũ — lệnh chỉ tạo khi trader phê duyệt
         failures,
         durationMs: cycleDurationMs,
       })

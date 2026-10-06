@@ -283,6 +283,9 @@ model AgentMessage {
   toAgentId String?
   toAgent Agent? @relation("ToAgent", fields: [toAgentId], references: [id], onDelete: SetNull)
   broadcast Boolean @default(true) // true = orchestrator broadcast
+  // PHASE3_BLUEPRINT §4.1 — AGENT | USER (chat 1-1: fromAgentId = agent sở hữu thread,
+  // kể cả tin USER gửi cho agent đó)
+  direction String @default("AGENT")
   content String
   reasoning String?
   sentiment String? // bullish | bearish | neutral (for news agent)
@@ -292,6 +295,8 @@ model AgentMessage {
   @@index([toAgentId, createdAt(sort: Desc)])
   // F-116 (audit 19-a): feed message toàn cục sort theo createdAt — thêm index riêng
   @@index([createdAt])
+  // PHASE3_BLUEPRINT §4.1 — truy vấn thread chat 1-1 của agent (broadcast=false)
+  @@index([fromAgentId, broadcast, createdAt(sort: Desc)])
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -313,6 +318,10 @@ model Signal {
   agent Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
   expiresAt DateTime?
   actedAt DateTime? // khi được chuyển thành lệnh
+  // PHASE3_BLUEPRINT §4.1 — vòng đời tín hiệu: ACTIVE | ACTED | REJECTED | EXPIRED
+  status String @default("ACTIVE")
+  rejectedAt DateTime?
+  rejectNote String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -320,6 +329,8 @@ model Signal {
 
   @@index([instrumentId, createdAt(sort: Desc)])
   @@index([direction, createdAt(sort: Desc)])
+  // PHASE3_BLUEPRINT §4.1 — lọc tín hiệu đang mở cho prompt + tab Tín hiệu
+  @@index([status, createdAt(sort: Desc)])
 }
 
 model Order {

@@ -24,6 +24,8 @@ export async function loadQuotesPayload(): Promise<
           take: 1,
           select: {
             last: true,
+            high: true,
+            low: true,
             change: true,
             changePct: true,
             volume: true,
@@ -54,6 +56,9 @@ export async function loadQuotesPayload(): Promise<
         sector: i.sector ?? "",
         market: i.market,
         last: q?.last ?? 0,
+        // PHASE3 B3 §5.2 — Cao/Thấp phiên hiện tại cho cột mở rộng bảng giá
+        high: q?.high ?? null,
+        low: q?.low ?? null,
         change: q?.change ?? 0,
         changePct: q?.changePct ?? 0,
         volume: q?.volume ?? 0,
