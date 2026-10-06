@@ -16,6 +16,10 @@ import {
 } from "@/lib/agent-context";
 import { AGENT_ROSTER } from "@/lib/agent-roster";
 import { runServiceAgent, type ServiceRunResult } from "@/lib/agent-service-runs";
+import { buildEvidenceBundle, type LlmVoteInput } from "@/lib/bayes/evidence";
+import { synthesizeMarketAssessment } from "@/lib/bayes/synthesis";
+import { saveMarketAssessment, attachCycleRunId } from "@/lib/bayes/persist";
+import type { CycleAssessmentSummary, MarketAssessmentView } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 // 300s: 6 LLM tuần tự × timeout 45s (llm.ts) + 17 service ~0.5s + biên độ —
@@ -23,7 +27,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 /**
- * POST /api/agents/run — chu kỳ phân tích đầy đủ 23 AGENTS (mở rộng Gen-1 §4.1):
+ * POST /api/agents/run — chu kỳ phân tích đầy đủ 23 AGENTS, 6 ĐỢT (phiên #34):
  *
  *  ĐỢT A · Nền tảng dữ liệu (4 service, song song — 0 LLM):
  *    data-collector · notification-officer · feature-store · data-integrity
@@ -31,11 +35,17 @@ export const maxDuration = 300;
  *    service song song (8): ml-forecast · backtest · learning-rag · rl-gym ·
  *    rl-policy · dl-trainer · rl-trainer · model-registry
  *    LLM tuần tự (4): market-analyst · fair-value · news-sentiment · liquidity
+ *    (mỗi agent LLM trả thêm assessment JSON {direction, confidence, evidence})
  *  ĐỢT C · Ủy ban Kiểm soát (VETO): risk-manager (LLM) + exposure · compliance
  *    (service, chạy song song với risk-manager)
- *  ĐỢT D · Chủ tịch Hội đồng: portfolio-strategist (LLM) tổng hợp TOÀN BỘ
- *    báo cáo 20 agents ở trên → MỘT tín hiệu
- *  ĐỢT E · Thực thi & hậu cần: execution-manager (ghi nhận tín hiệu, KHÔNG tự
+ *  ĐỢT D · BỘ TỔNG HỢP BAYES (mới — phiên #34, 0 LLM ~1-2s): buildEvidenceBundle
+ *    (breadth/lexicon tin 24h/flows/Holt/regime + assessment JSON của 5 agent
+ *    LLM) → synthesizeMarketAssessment (log-odds 3 bậc nhân quả) → lưu bảng
+ *    MarketAssessment. Lỗi tổng hợp KHÔNG làm hỏng chu kỳ (log + bỏ qua).
+ *  ĐỢT E · Chủ tịch Hội đồng: portfolio-strategist (LLM) tổng hợp TOÀN BỘ
+ *    báo cáo 20 agents + khối "BỘ TỔNG HỢP BAYES" (con số định lượng — phải
+ *    nhất quán) → MỘT tín hiệu
+ *  ĐỢT F · Thực thi & hậu cần: execution-manager (ghi nhận tín hiệu, KHÔNG tự
  *    tạo lệnh — chờ trader phê duyệt §4.5/§4.9) + settlement · cash-management
  *
  *  LLM provider: src/lib/llm.ts — Opencode Zen space-bunny-free khi có key
@@ -79,10 +89,51 @@ function parseJsonBlock<T extends Record<string, unknown>>(raw: string): Partial
   }
 }
 
+/**
+ * Trích trường "assessment" từ JSON response LLM (phiên #34):
+ * {direction: UP|DOWN|FLAT, confidence: 0..1, evidence: [chuỗi ngắn]}.
+ * Parse thất bại → fallback từ sentiment (bullish→UP 0.6, bearish→DOWN 0.6,
+ * neutral→FLAT 0.6); không có gì → null (agent không tham gia phiếu).
+ */
+function parseAssessment(
+  parsed: Record<string, unknown> | null | undefined,
+  sentiment: AgentAnalysis["sentiment"]
+): AgentAssessment | null {
+  const raw = parsed?.assessment;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const a = raw as Record<string, unknown>;
+    const dir = typeof a.direction === "string" ? a.direction.trim().toUpperCase() : "";
+    if (dir === "UP" || dir === "DOWN" || dir === "FLAT") {
+      const confNum = Number(a.confidence);
+      const confidence = Number.isFinite(confNum) ? Math.max(0, Math.min(1, confNum)) : 0.6;
+      const evidence = Array.isArray(a.evidence)
+        ? a.evidence
+            .filter((e): e is string => typeof e === "string" && e.trim().length > 0)
+            .slice(0, 5)
+            .map((e) => e.trim().slice(0, 120))
+        : [];
+      return { direction: dir, confidence, evidence };
+    }
+  }
+  if (sentiment === "bullish") return { direction: "UP", confidence: 0.6, evidence: [] };
+  if (sentiment === "bearish") return { direction: "DOWN", confidence: 0.6, evidence: [] };
+  if (sentiment === "neutral") return { direction: "FLAT", confidence: 0.6, evidence: [] };
+  return null;
+}
+
 interface AgentAnalysis {
   content: string;
   reasoning: string;
   sentiment: "bullish" | "bearish" | "neutral" | null;
+  /** Phiên #34 — assessment JSON có cấu trúc từ LLM (bằng chứng cho Bộ tổng hợp Bayes). */
+  assessment: AgentAssessment | null;
+}
+
+/** Assessment định lượng của agent LLM (đầu vào Bayes evidence). */
+interface AgentAssessment {
+  direction: "UP" | "DOWN" | "FLAT";
+  confidence: number;
+  evidence: string[];
 }
 
 interface StrategistSignal {
@@ -153,6 +204,40 @@ async function persistMessage(
       sentiment: sentiment ?? null,
     },
   });
+}
+
+/**
+ * Khối prompt "BỘ TỔNG HỢP BAYES" cho Chủ tịch (phiên #34 — Đợt E):
+ * pUp/pDown/pFlat %, marketDirection, confidence, disagreement, 3 driver mạnh
+ * nhất, top-3 mã theo |pUp − pDown| kèm pUp% + forecast CI, forecast5d, veto.
+ */
+function buildBayesPromptBlock(view: MarketAssessmentView): string {
+  const fmt = (n: number) => `${(n * 100).toFixed(1).replace(".", ",")}%`;
+  const driverLines = view.drivers
+    .filter((d) => d.deltaLogOdds !== 0)
+    .slice(0, 3)
+    .map(
+      (d, i) =>
+        `${i + 1}) ${d.agentName} (${d.source}): ${d.direction} — ${d.note} [Δlog-odds ${d.deltaLogOdds > 0 ? "+" : ""}${d.deltaLogOdds}]`
+    );
+  const topSymbols = [...view.symbols]
+    .sort((a, b) => Math.abs(b.pUp - b.pDown) - Math.abs(a.pUp - a.pDown))
+    .slice(0, 3)
+    .map(
+      (s) =>
+        `${s.symbol} (pTăng ${fmt(s.pUp)}${s.forecast ? `, dự báo 5 phiên ${s.forecast.expectedPct >= 0 ? "+" : ""}${s.forecast.expectedPct}% · CI ${s.forecast.lowPct}%…${s.forecast.highPct}%` : ""})`
+    );
+  return [
+    "BỘ TỔNG HỢP BAYES (con số định lượng — hãy nhất quán với các con số này khi ra tín hiệu):",
+    `- Xác suất thị trường 5 phiên tới: TĂNG ${fmt(view.pUp)} · GIẢM ${fmt(view.pDown)} · ĐI NGANG ${fmt(view.pFlat)} → hướng ${view.marketDirection}`,
+    `- Độ tin cậy mô hình: ${fmt(view.confidence)} · Mức bất đồng agents: ${fmt(view.disagreement)}`,
+    `- Driver mạnh nhất: ${driverLines.length ? driverLines.join(" ; ") : "(không có)"}`,
+    `- Top cơ hội/rủi ro theo |pTăng − pGiảm|: ${topSymbols.length ? topSymbols.join(" ; ") : "(không có)"}`,
+    view.forecast5d
+      ? `- Dự báo rổ 5 phiên (Holt): ${view.forecast5d.expectedPct >= 0 ? "+" : ""}${view.forecast5d.expectedPct}% (CI80 ${view.forecast5d.lowPct}%…${view.forecast5d.highPct}%)`
+      : "- Dự báo rổ 5 phiên: (chưa đủ dữ liệu)",
+    `- VETO: ${view.veto.blocked ? `ĐANG CHẶN — ${view.veto.reason}` : "không có"}`,
+  ].join("\n");
 }
 
 export async function POST() {
@@ -266,6 +351,7 @@ export async function POST() {
         content: result.content,
         reasoning: result.reasoning,
         sentiment: result.sentiment,
+        assessment: null, // service agents không có assessment JSON (phiên #34)
       });
       return result;
     } catch (err) {
@@ -341,6 +427,7 @@ export async function POST() {
           content: unknown;
           reasoning: unknown;
           sentiment: unknown;
+          assessment: unknown;
         }>(raw);
         const content =
           typeof parsed?.content === "string" && parsed.content.trim()
@@ -354,6 +441,8 @@ export async function POST() {
           sentimentRaw === "bullish" || sentimentRaw === "bearish" || sentimentRaw === "neutral"
             ? (sentimentRaw as AgentAnalysis["sentiment"])
             : null;
+        // Phiên #34 — assessment JSON làm bằng chứng Bayes (fallback từ sentiment)
+        const assessment = parseAssessment(parsed, sentiment);
 
         await persistRun(
           agent.id,
@@ -361,7 +450,7 @@ export async function POST() {
           startedAt,
           tokensIn,
           tokensOut,
-          JSON.stringify({ content, reasoning, sentiment }),
+          JSON.stringify({ content, reasoning, sentiment, assessment }),
           null
         );
         const message = await persistMessage(agent.id, content, reasoning, sentiment);
@@ -372,7 +461,7 @@ export async function POST() {
           reasoning: reasoning || null,
           sentiment,
         });
-        analyses.set(code, { content, reasoning, sentiment });
+        analyses.set(code, { content, reasoning, sentiment, assessment });
       } catch (err) {
         failures.push(code);
         console.error(`[api/agents/run] agent ${code} failed:`, err);
@@ -418,20 +507,26 @@ export async function POST() {
             prompts[code].system,
             prompts[code].user
           );
-          const parsed = parseJsonBlock<{ content: unknown; reasoning: unknown }>(raw);
+          const parsed = parseJsonBlock<{
+            content: unknown;
+            reasoning: unknown;
+            assessment: unknown;
+          }>(raw);
           const content =
             typeof parsed?.content === "string" && parsed.content.trim()
               ? parsed.content.trim()
               : raw.trim();
           const reasoning =
             typeof parsed?.reasoning === "string" ? parsed.reasoning.trim() : "";
+          // Phiên #34 — risk-manager cũng trả assessment (phiếu cho Bayes)
+          const assessment = parseAssessment(parsed, null);
           await persistRun(
             agent.id,
             true,
             startedAt,
             tokensIn,
             tokensOut,
-            JSON.stringify({ content, reasoning }),
+            JSON.stringify({ content, reasoning, assessment }),
             null
           );
           const message = await persistMessage(agent.id, content, reasoning, null);
@@ -442,7 +537,7 @@ export async function POST() {
             reasoning: reasoning || null,
             sentiment: null,
           });
-          analyses.set(code, { content, reasoning, sentiment: null });
+          analyses.set(code, { content, reasoning, sentiment: null, assessment });
         } catch (err) {
           failures.push(code);
           console.error(`[api/agents/run] agent ${code} failed:`, err);
@@ -482,7 +577,63 @@ export async function POST() {
     );
     const vetoBlocked = vetoExposure || vetoCompliance;
 
-    // ══ ĐỢT D · Chủ tịch Hội đồng — tổng hợp 20 agents ═════════════
+    // ══ ĐỢT D · BỘ TỔNG HỢP BAYES (phiên #34 — 0 LLM, deterministic ~1-2s) ══
+    // Sau Ủy ban Kiểm soát, TRƯỚC Chủ tịch: tổng hợp mọi bằng chứng định lượng
+    // (breadth/lexicon/flows/Holt/regime + assessment JSON của 5 agent LLM) theo
+    // log-odds 3 bậc nhân quả → posterior + drivers + narrative → lưu bảng
+    // MarketAssessment. Lỗi tổng hợp KHÔNG được làm hỏng chu kỳ (spec #34):
+    // log + assessment = null, Chủ tịch vẫn đọc digest text như cũ.
+    let assessmentSummary: CycleAssessmentSummary | null = null;
+    let bayesView: MarketAssessmentView | null = null;
+    try {
+      const llmVotes: LlmVoteInput[] = [...WAVE_B_LLM_CODES, ...WAVE_C_LLM_CODES].flatMap(
+        (code) => {
+          const an = analyses.get(code);
+          if (!an?.assessment) return [];
+          return [
+            {
+              code,
+              direction: an.assessment.direction,
+              confidence: an.assessment.confidence,
+              evidence: an.assessment.evidence,
+            },
+          ];
+        }
+      );
+      const bundle = await buildEvidenceBundle({
+        llmVotes,
+        veto: vetoBlocked
+          ? {
+              blocked: true,
+              reason: vetoCompliance
+                ? "Compliance A8 VETO — biên margin/chế độ giao dịch hiện không đạt"
+                : "Exposure A7 VETO — danh mục vượt hạn mức phơi nhiễm",
+            }
+          : { blocked: false, reason: null },
+      });
+      const draft = synthesizeMarketAssessment(bundle);
+      bayesView = await saveMarketAssessment(bundle, draft, { source: "cycle" });
+      assessmentSummary = {
+        id: bayesView.id,
+        pUp: bayesView.pUp,
+        pDown: bayesView.pDown,
+        pFlat: bayesView.pFlat,
+        marketDirection: bayesView.marketDirection,
+        confidence: bayesView.confidence,
+        disagreement: bayesView.disagreement,
+        evidenceCount: bayesView.evidenceCount,
+        narrative: bayesView.narrative,
+      };
+    } catch (bayesErr) {
+      console.error(
+        "[api/agents/run] Bộ tổng hợp Bayes lỗi (chu kỳ tiếp tục, không assessment):",
+        bayesErr
+      );
+      assessmentSummary = null;
+      bayesView = null;
+    }
+
+    // ══ ĐỢT E · Chủ tịch Hội đồng — tổng hợp 20 agents + Bayes ══════
     const digestLines = AGENT_ROSTER.filter((a) => analyses.has(a.code)).map((a) => {
       const an = analyses.get(a.code)!;
       const truncated =
@@ -506,6 +657,8 @@ export async function POST() {
     const strategistUserPrompt = [
       [marketBlock, newsBlock, flowsBlock, valuationBlock, liquidityBlock].join("\n\n"),
       `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`,
+      // Phiên #34 — khối Bayes: con số định lượng, Chủ tịch PHẢI nhất quán
+      ...(bayesView ? ["", buildBayesPromptBlock(bayesView)] : []),
       "",
       `BÁO CÁO TỪ ${digestLines.length} AGENTS CỦA HỘI ĐỒNG (để tổng hợp):`,
       ...digestLines,
@@ -588,6 +741,10 @@ export async function POST() {
         null
       );
       strategistRunId = run.id;
+      // Phiên #34 — gắn AgentRun id của Chủ tịch vào assessment Bayes của chu kỳ
+      if (bayesView) {
+        await attachCycleRunId(bayesView.id, run.id).catch(() => undefined);
+      }
       const message = await persistMessage(
         strategistAgent.id,
         summary,
@@ -615,7 +772,7 @@ export async function POST() {
       ).catch(() => undefined);
     }
 
-    // ══ ĐỢT E · Thực thi & hậu cần ═════════════════════════════════
+    // ══ ĐỢT F · Thực thi & hậu cần ═════════════════════════════════
     // Execution Manager — ghi nhận tín hiệu, chờ phê duyệt (PHASE3_BLUEPRINT
     // §4.5/§4.9): chu kỳ KHÔNG tự tạo Order — tín hiệu BUY/SELL giữ status
     // ACTIVE, trader phê duyệt/từ chối qua POST /api/signals/[id]/decision.
@@ -789,6 +946,14 @@ export async function POST() {
           order: null, // §4.9 — chu kỳ không còn tự tạo lệnh
           durationMs: cycleDurationMs,
           failures,
+          // Phiên #34 — tóm tắt Bộ tổng hợp Bayes của chu kỳ (null khi tổng hợp lỗi)
+          assessment: assessmentSummary
+            ? {
+                pUp: Number(assessmentSummary.pUp.toFixed(4)),
+                marketDirection: assessmentSummary.marketDirection,
+                evidenceCount: assessmentSummary.evidenceCount,
+              }
+            : null,
         }),
       },
     });
@@ -832,6 +997,8 @@ export async function POST() {
             (executionRunId ? 1 : 0) +
             WAVE_E_SERVICE_CODES.length,
         },
+        // Phiên #34 — tóm tắt Bộ tổng hợp Bayes (đợt D) chạy giữa Control & Chủ tịch
+        assessment: assessmentSummary,
       })
     );
   } catch (err) {

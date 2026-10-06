@@ -354,6 +354,8 @@ export interface RunCycleResponse {
     control: number;
     executive: number;
   };
+  /** Phiên #34 — tóm tắt Bộ tổng hợp Bayes chạy giữa Ủy ban Kiểm soát và Chủ tịch. */
+  assessment?: CycleAssessmentSummary | null;
 }
 
 /** Back-compat alias (older single-agent response shape). */
@@ -492,4 +494,192 @@ export interface WatchlistToggleResponse {
   symbol: string;
   inWatchlist: boolean;
   count: number;
+}
+
+/* ═══════════════ Phiên #34 — Module Cài đặt + Bộ tổng hợp Bayes ═══════════════ */
+
+/** Chế độ nguồn dữ liệu thị trường (env MARKET_DATA_MODE có thể bị AppSetting ghi đè). */
+export type MarketDataMode = "real-eod" | "realtime-vndirect" | "simulated";
+
+/** GET /api/settings — secrets đã mask (4 ký tự đầu + ····). */
+export interface VndirectSettings {
+  consumerKey: string;
+  consumerSecret: string;
+  accessToken: string;
+  accountNumber: string;
+  /** Đã nhập đủ credential để bật realtime chưa. */
+  configured: boolean;
+  lastTestAt: string | null;
+  lastTestOk: boolean | null;
+  lastTestMessage: string | null;
+}
+
+export interface SettingsResponse {
+  vndirect: VndirectSettings;
+  marketData: {
+    mode: MarketDataMode;
+    /** Mode thực tế sau fallback (vd: realtime-vndirect nhưng credential hỏng → real-eod). */
+    effectiveMode: MarketDataMode;
+    strictSession: boolean;
+    eodSyncAt: string;
+    /** Lần fetch realtime cuối có OK không (null = chưa từng fetch). */
+    realtimeOk: boolean | null;
+    lastRealtimeAt: string | null;
+  };
+  llm: LlmInfo;
+  risk: {
+    maxSectorWeightPct: number;
+    maxPositionPct: number;
+    maxDrawdownPct: number;
+  };
+  bayes: {
+    enabled: boolean;
+    lastAssessmentAt: string | null;
+  };
+  updatedAt: string;
+}
+
+/** PUT /api/settings — trường nào omit thì giữ nguyên; chuỗi rỗng "" nghĩa là xoá. */
+export interface UpdateSettingsPayload {
+  vndirect?: {
+    consumerKey?: string;
+    consumerSecret?: string;
+    accessToken?: string;
+    accountNumber?: string;
+  };
+  marketData?: { mode?: MarketDataMode };
+}
+
+/** POST /api/settings/test — kiểm tra kết nối VNDIRECT (dùng creds vừa nhập hoặc đã lưu). */
+export interface SettingsTestResponse {
+  ok: boolean;
+  message: string;
+  details: {
+    authTried: boolean;
+    authOk: boolean;
+    authMessage: string | null;
+    finfoOk: boolean;
+    finfoMessage: string | null;
+    latencyMs: number;
+    sampleQuote: { symbol: string; last: number; changePct: number } | null;
+  };
+}
+
+/** Một bằng chứng trong mô hình nhân quả Bayes — đóng góp vào log-odds posterior. */
+export interface BayesDriver {
+  /** Nguồn phát sinh: "feature-store.rsi" | "news-lexicon" | "market-analyst" | "ml-forecast"… */
+  source: string;
+  agentName: string;
+  gen1: string;
+  /** Bậc nhân quả: thị trường hay cổ phiếu. */
+  level: "market" | "symbol";
+  symbol: string | null;
+  direction: "UP" | "DOWN" | "FLAT";
+  /** Độ tin cậy nguồn 0..1 (healthScore/successRate của agent hoặc confidence thuật toán). */
+  weight: number;
+  /** Likelihood ratio P(E|H)/P(E|¬H). */
+  likelihoodRatio: number;
+  /** Đóng góp vào log-odds = weight × ln(LR) — key sắp xếp drivers. */
+  deltaLogOdds: number;
+  note: string;
+}
+
+/** Dự đoán một mã sau bước nhân quả: thị trường → ngành → cổ phiếu. */
+export interface SymbolAssessment {
+  symbol: string;
+  name: string;
+  sector: string;
+  last: number;
+  changePct: number;
+  pUp: number;
+  pDown: number;
+  pFlat: number;
+  stance: "BUY" | "SELL" | "HOLD";
+  zScore: number | null;
+  rsi14: number | null;
+  momentum5d: number | null;
+  /** Dự báo định lượng (Holt) kèm khoảng tin cậy %. */
+  forecast: {
+    horizonDays: number;
+    expectedPct: number;
+    lowPct: number;
+    highPct: number;
+  } | null;
+  drivers: string[];
+}
+
+/** Bộ tổng hợp Bayes — khung nhìn đầy đủ cho UI module Tổng hợp. */
+export interface MarketAssessmentView {
+  id: string;
+  createdAt: string;
+  source: "cycle" | "manual";
+  cycleRunId: string | null;
+  pUp: number;
+  pDown: number;
+  pFlat: number;
+  marketDirection: "BULLISH" | "BEARISH" | "NEUTRAL";
+  confidence: number;
+  disagreement: number;
+  evidenceCount: number;
+  prior: {
+    pUp: number;
+    pDown: number;
+    pFlat: number;
+    baseRateNote: string;
+  };
+  /** Drivers sắp xếp theo |deltaLogOdds| giảm dần. */
+  drivers: BayesDriver[];
+  /** Bậc 2 — posterior theo nhóm ngành. */
+  sectors: {
+    sector: string;
+    symbolCount: number;
+    avgMomentum5d: number;
+    pUp: number;
+    stance: "UP" | "DOWN" | "FLAT";
+  }[];
+  /** Bậc 3 — posterior từng mã (top thanh khoản, sắp theo |pUp − pDown| giảm dần). */
+  symbols: SymbolAssessment[];
+  market: {
+    advancing: number;
+    declining: number;
+    unchanged: number;
+    regime: string;
+    netForeignFlowVnd: number | null;
+    newsSentimentScore: number | null;
+    /** Breadth = (tăng − giảm) / tổng, −1..+1. */
+    breadth: number;
+  };
+  /** Dự báo rổ 5 phiên (% expected + khoảng tin cậy). */
+  forecast5d: { expectedPct: number; lowPct: number; highPct: number } | null;
+  veto: { blocked: boolean; reason: string | null };
+  /** Tường thuật tiếng Việt tự sinh từ posterior. */
+  narrative: string;
+  /** Các agent có bằng chứng được dùng trong lần tổng hợp này. */
+  agentsConsidered: string[];
+}
+
+/** GET /api/assessment — bản mới nhất + lịch sử (30 bản gần nhất). */
+export interface AssessmentResponse {
+  assessment: MarketAssessmentView | null;
+  history: {
+    createdAt: string;
+    pUp: number;
+    pDown: number;
+    pFlat: number;
+    marketDirection: string;
+    confidence: number;
+  }[];
+}
+
+/** Tóm tắt assessment nhúng vào response chu kỳ POST /api/agents/run. */
+export interface CycleAssessmentSummary {
+  id: string;
+  pUp: number;
+  pDown: number;
+  pFlat: number;
+  marketDirection: string;
+  confidence: number;
+  disagreement: number;
+  evidenceCount: number;
+  narrative: string;
 }

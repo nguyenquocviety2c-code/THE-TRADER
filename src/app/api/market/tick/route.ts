@@ -10,6 +10,8 @@ import {
   vnDateIso,
   isTradingDay,
 } from "@/lib/market-session";
+import { getRealtimeRuntime, markRealtimeAttempt } from "@/lib/settings";
+import { fetchFinfoLastPrices, type FinfoQuote } from "@/lib/vndirect";
 
 export const dynamic = "force-dynamic";
 
@@ -26,9 +28,16 @@ export const dynamic = "force-dynamic";
  * Nguồn được đánh dấu mode="simulated" trong DataSourceStatus (không giả mạo
  * "live"). WebSocket mini-service gọi endpoint này định kỳ và broadcast.
  *
+ * Phiên #34 — mode runtime từ AppSetting "market-data" (PUT /api/settings,
+ * cache in-process 5s — lib/settings.ts): mode=realtime-vndirect và đã nhập
+ * credential → TRONG PHIÊN tick kéo giá cuối THẬT từ finfo-api VNDIRECT
+ * (throttle ≥30s/lần fetch, cache module-level giữa 2 lần fetch; thất bại →
+ * fall back random-walk quanh ref EOD thật, KHÔNG bỏ tick để paper matching
+ * engine vẫn chạy) và đánh dấu market-quotes mode="real" provider finfo-vndirect.
+ *
  * F-103 (audit 19-a) — EOD rollover: tick đầu tiên của ngày ICT mới sẽ
  *   (1) ghi Bar OHLCV của phiên vừa đóng (chỉ ngày giao dịch, bỏ T7/CN/lễ — Q7)
- *       — CHỈ khi MARKET_DATA_MODE=simulated; mặc định real-eod: bar EOD do
+ *       — CHỈ khi mode=simulated; real-eod/realtime-vndirect: bar EOD do
  *       đồng bộ dchart VNDIRECT sở hữu (POST /api/market/eod-sync), tick
  *       KHÔNG ghi bar synthetic đè lên dữ liệu thật,
  *   (2) kéo refPrice về close phiên trước, mở dải trần/sàn mới ±7%,
@@ -52,13 +61,47 @@ const TAX_RATE = 0.001; // thuế TNCN 0,1% — chỉ lệnh BÁN
 
 /**
  * real-eod (mặc định): Bar EOD thuộc về nguồn THẬT dchart VNDIRECT — tick chỉ
- * mô phỏng intraday quanh ref thật. Đặt MARKET_DATA_MODE=simulated để quay lại
- * hành vi cũ (tick tự ghi bar synthetic khi sang ngày mới).
+ * mô phỏng intraday quanh ref thật. Đặt MARKET_DATA_MODE=simulated (hoặc đổi
+ * qua PUT /api/settings) để quay lại hành vi cũ (tick tự ghi bar synthetic
+ * khi sang ngày mới).
+ *
+ * Phiên #34: mode runtime đọc từ AppSetting "market-data" (ghi đè env —
+ * lib/settings.ts, cache in-process 5s). mode=realtime-vndirect → trong phiên
+ * tick kéo giá cuối THẬT từ finfo-api VNDIRECT (throttle ≥30s/lần fetch,
+ * giữa 2 lần fetch dùng cache module-level) và KHÔNG ghi bar synthetic khi
+ * rollover (bar EOD vẫn do dchart eod-sync sở hữu).
  */
-const REAL_EOD_MODE = (process.env.MARKET_DATA_MODE ?? "real-eod") !== "simulated";
 
 /** AUD-CODE #18: mutex in-process — mọi POST /api/market/tick chạy tuần tự. */
 let tickMutex: Promise<NextResponse> = Promise.resolve(null as unknown as NextResponse);
+
+/** Phiên #34 — khoảng cách tối thiểu giữa 2 lần fetch finfo realtime (tick 10s/lần chỉ áp dụng cache). */
+const REALTIME_FETCH_INTERVAL_MS = 30_000;
+
+/** Số mã tối đa mỗi lần gọi finfo lastprice (VN30 đủ dùng, tôn trọng nguồn). */
+const REALTIME_MAX_SYMBOLS = 30;
+
+/** Timeout mỗi lần fetch finfo trong tick (tick mutex vẫn tuần tự — không chồng lấn). */
+const REALTIME_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * Phiên #34 — cache realtime finfo module-level (chia sẻ giữa các tick trong
+ * cùng process; dev hot-reload reset về rỗng — an toàn vì ok=null ép fetch lại).
+ * ok=false → mọi tick trước lần fetch kế tiếp fall back random-walk quanh ref
+ * EOD thật (KHÔNG bỏ tick — paper matching engine vẫn chạy).
+ */
+interface RealtimeCacheState {
+  lastFetchAt: number;
+  quotes: Map<string, FinfoQuote>;
+  ok: boolean | null;
+  lastError: string | null;
+}
+const realtimeCache: RealtimeCacheState = {
+  lastFetchAt: 0,
+  quotes: new Map(),
+  ok: null,
+  lastError: null,
+};
 
 function round100(v: number): number {
   return Math.max(100, Math.round(v / 100) * 100);
@@ -334,11 +377,16 @@ async function fillOrder(
 /** AUD-CODE #18: thân tick gốc — chỉ chạy tuần tự qua tickMutex. */
 async function runTick(): Promise<NextResponse> {
   try {
+    // Phiên #34 — mode runtime từ AppSetting (cache 5s) + bối cảnh realtime
+    const rt = await getRealtimeRuntime();
+    const mode = rt.mode;
+    const realAnchor = mode !== "simulated"; // real-eod | realtime-vndirect: bảng giá neo close thật
+
     if (!shouldGenerateTicks()) {
-      // REAL_EOD_MODE: ngoài phiên, bảng giá đang neo ở mức đóng cửa THẬT
-      // (eod-sync dchart) — đánh dấu mode "real" thay vì "simulated" cho đúng
-      // sự thật hiển thị; trong phiên khi tick chạy sẽ trở lại "simulated".
-      if (REAL_EOD_MODE) {
+      // real-eod/realtime-vndirect: ngoài phiên, bảng giá đang neo ở mức đóng cửa
+      // THẬT (eod-sync dchart) — đánh dấu mode "real" thay vì "simulated" cho đúng
+      // sự thật hiển thị; trong phiên khi tick chạy sẽ trở lại nguồn tương ứng mode.
+      if (realAnchor) {
         await markSource("market-quotes", {
           mode: "real",
           success: true,
@@ -346,6 +394,9 @@ async function runTick(): Promise<NextResponse> {
             anchoredTo: "real-eod (dchart VNDIRECT)",
             note: "Ngoài phiên — bảng giá neo ở mức đóng cửa thật của phiên cuối",
             strictSession: true,
+            ...(mode === "realtime-vndirect"
+              ? { realtimePending: "đợi phiên giao dịch — sẽ fetch finfo realtime" }
+              : {}),
           },
         });
       }
@@ -389,7 +440,42 @@ async function runTick(): Promise<NextResponse> {
     const todayIso = vnDateIso(now);
     let ticked = 0;
     let rolled = 0;
+    let realtimeUsed = 0; // số mã lấy giá THẬT từ finfo trong tick này
     const lastByInstrument = new Map<string, number>();
+
+    // ── Phiên #34: mode realtime-vndirect + đã configured → fetch finfo ──
+    // Throttle ≥30s giữa 2 lần fetch; giữa 2 lần fetch các tick 10s/lần chỉ
+    // áp dụng cache module-level. Thất bại → markRealtimeAttempt(false) +
+    // fall back random-walk (không bỏ tick — paper matching vẫn chạy).
+    let rtQuotes: Map<string, FinfoQuote> | null = null;
+    let rtFetchAttempted = false;
+    if (rt.active) {
+      rtFetchAttempted = Date.now() - realtimeCache.lastFetchAt >= REALTIME_FETCH_INTERVAL_MS;
+      if (rtFetchAttempted) {
+        const symbols = instruments
+          .map((i) => i.symbol)
+          .slice(0, REALTIME_MAX_SYMBOLS);
+        const res = await fetchFinfoLastPrices(
+          symbols,
+          rt.accessToken || undefined,
+          REALTIME_FETCH_TIMEOUT_MS
+        );
+        realtimeCache.lastFetchAt = Date.now();
+        if (res.ok && res.quotes.length > 0) {
+          realtimeCache.quotes = new Map(res.quotes.map((fq) => [fq.symbol, fq]));
+          realtimeCache.ok = true;
+          realtimeCache.lastError = null;
+          await markRealtimeAttempt(true);
+        } else {
+          realtimeCache.ok = false;
+          realtimeCache.lastError = res.ok
+            ? "finfo phản hồi 200 nhưng không có dòng giá nào"
+            : (res.message ?? "lỗi finfo không xác định");
+          await markRealtimeAttempt(false);
+        }
+      }
+      rtQuotes = realtimeCache.ok === true ? realtimeCache.quotes : null;
+    }
 
     for (const inst of instruments) {
       const q = inst.quotes[0];
@@ -406,10 +492,11 @@ async function runTick(): Promise<NextResponse> {
 
       if (isRollover) {
         // Ghi Bar OHLCV của phiên vừa đóng — chỉ ngày giao dịch (Q7: bỏ T7/CN/lễ)
-        // REAL_EOD_MODE: bar EOD thuộc về nguồn THẬT dchart (eod-sync 15:45 ICT
-        // upsert bar thật) — tick không ghi bar synthetic đè lên lịch sử thật
+        // real-eod/realtime-vndirect: bar EOD thuộc về nguồn THẬT dchart
+        // (eod-sync 15:45 ICT upsert bar thật) — tick không ghi bar synthetic
+        // đè lên lịch sử thật; chỉ mode "simulated" mới tự ghi bar.
         const barDate = new Date(`${prevIso}T15:00:00.000Z`);
-        if (!REAL_EOD_MODE && isTradingDay(barDate)) {
+        if (mode === "simulated" && isTradingDay(barDate)) {
           await db.bar.upsert({
             where: { instrumentId_date: { instrumentId: inst.id, date: barDate } },
             create: {
@@ -445,30 +532,52 @@ async function runTick(): Promise<NextResponse> {
         volumeBase = q.volume;
       }
 
-      // Random-walk + mean-reversion nhẹ về giá tham chiếu (giữ giá dao động
-      // quanh biên độ hợp lý khi simulator chạy nhiều giờ liền)
-      const meanPull = ref > 0 ? ((ref - q.last) / ref) * 0.03 : 0;
-      const drift = meanPull + (Math.random() * 2 - 1) * TICK_DRIFT;
-      let next = q.last * (1 + drift);
-      next = Math.min(Math.max(next, floor), ceiling);
-      next = round100(next);
+      // ── Phiên #34: chọn nguồn giá — finfo THẬT khi có, random-walk fallback ──
+      const rtq = rtQuotes?.get(inst.symbol);
+      let next: number;
+      let nextVolume: number;
+      if (rtq && Number.isFinite(rtq.last) && rtq.last > 0) {
+        // Giá cuối THẬT từ finfo — CLAMP vào dải [floorPrice, ceilingPrice]
+        // hiện có (±7% quanh ref EOD thật) rồi làm tròn bội 100₫ (Q1/Q2).
+        let candidate = rtq.last;
+        if (floor > 0 && ceiling > floor) {
+          candidate = Math.min(Math.max(candidate, floor), ceiling);
+        }
+        next = round100(candidate);
+        // KLGD dồn phiên THẬT từ finfo (accumulatedVol — Q3: chỉ tăng, không âm)
+        nextVolume =
+          rtq.volume != null && Number.isFinite(rtq.volume) && rtq.volume >= 0
+            ? Math.max(volumeBase, Math.round(rtq.volume))
+            : volumeBase;
+        realtimeUsed++;
+      } else {
+        // Random-walk + mean-reversion nhẹ về giá tham chiếu (giữ giá dao động
+        // quanh biên độ hợp lý khi simulator chạy nhiều giờ liền)
+        const meanPull = ref > 0 ? ((ref - q.last) / ref) * 0.03 : 0;
+        const drift = meanPull + (Math.random() * 2 - 1) * TICK_DRIFT;
+        let walk = q.last * (1 + drift);
+        walk = Math.min(Math.max(walk, floor), ceiling);
+        next = round100(walk);
+
+        // F-103: khối lượng có ngân sách ngày — không tích luỹ vô hạn (Q3: chỉ tăng)
+        const target = dailyVolumeTarget(inst.symbol, todayIso);
+        const cap = Math.max(0, target - volumeBase);
+        const baseAdd = target / expectedTicksPerDay();
+        const volAdd = Math.min(
+          cap,
+          Math.max(0, Math.round(baseAdd * (0.4 + Math.random() * 1.2)))
+        );
+        nextVolume = volumeBase + volAdd;
+      }
 
       const change = next - ref;
       const changePct = ref > 0 ? Number(((change / ref) * 100).toFixed(2)) : 0;
-
-      // F-103: khối lượng có ngân sách ngày — không tích luỹ vô hạn (Q3: chỉ tăng)
-      const target = dailyVolumeTarget(inst.symbol, todayIso);
-      const cap = Math.max(0, target - volumeBase);
-      const baseAdd = target / expectedTicksPerDay();
-      const volAdd = Math.min(
-        cap,
-        Math.max(0, Math.round(baseAdd * (0.4 + Math.random() * 1.2)))
-      );
 
       const spread = Math.max(100, round100(next * 0.001));
       const bidPrice = Math.max(floor, next - spread);
       const askPrice = Math.min(ceiling, next + spread);
 
+      // High/low dồn phiên (PHASE3 B3) — realtime và random-walk cùng pattern
       await db.quote.update({
         where: { id: q.id },
         data: {
@@ -481,7 +590,7 @@ async function runTick(): Promise<NextResponse> {
           last: next,
           change,
           changePct,
-          volume: volumeBase + volAdd,
+          volume: nextVolume,
           bidPrice,
           askPrice,
           bidVolume: jitter(q.bidVolume),
@@ -553,24 +662,73 @@ async function runTick(): Promise<NextResponse> {
       });
     }
 
-    await markSource("market-quotes", {
-      mode: "simulated",
-      success: true,
-      meta: {
-        ticked,
-        rolled,
-        fills,
-        engine: REAL_EOD_MODE
-          ? "random-walk quanh ref EOD thật (intraday mô phỏng)"
-          : "random-walk+eod-rollover",
-        anchoredTo: REAL_EOD_MODE ? "real-eod (dchart VNDIRECT)" : "synthetic-seed",
-        band: "±7%",
-        strictSession: process.env.MARKET_STRICT_SESSION === "true",
-      },
-    });
+    // ── Phiên #34: đánh dấu nguồn bảng giá theo mode thực sự dùng ──
+    if (rt.active) {
+      if (realtimeUsed > 0) {
+        // Giá THẬT từ finfo realtime (hoặc cache ≤30s của nó)
+        await markSource("market-quotes", {
+          mode: "real",
+          success: true,
+          meta: {
+            provider: "finfo-vndirect",
+            engine: "finfo realtime VNDIRECT (giá cuối phiên thật)",
+            realtimeSymbols: realtimeUsed,
+            simulatedFallback: ticked - realtimeUsed,
+            fetchAttempted: rtFetchAttempted,
+            cacheAgeSec: Math.max(
+              0,
+              Math.round((Date.now() - realtimeCache.lastFetchAt) / 1000)
+            ),
+            lastError: realtimeCache.lastError,
+            band: "±7%",
+            strictSession: process.env.MARKET_STRICT_SESSION === "true",
+          },
+        });
+      } else {
+        // Fetch finfo thất bại (hoặc trả 0 dòng) → KHÔNG bỏ tick, fall back
+        // random-walk quanh ref EOD thật — đánh dấu fallback để UI minh bạch.
+        await markSource("market-quotes", {
+          mode: "fallback",
+          success: false,
+          lastError:
+            realtimeCache.lastError ?? "finfo realtime không trả báo giá nào",
+          meta: {
+            provider: "finfo-vndirect",
+            note: "Fetch realtime thất bại — tick fall back random-walk quanh ref EOD thật (paper matching vẫn chạy)",
+            fetchAttempted: rtFetchAttempted,
+            fallbackEngine: "random-walk quanh ref EOD thật",
+            band: "±7%",
+          },
+        });
+      }
+    } else {
+      await markSource("market-quotes", {
+        mode: "simulated",
+        success: true,
+        meta: {
+          ticked,
+          rolled,
+          fills,
+          engine:
+            mode === "real-eod"
+              ? "random-walk quanh ref EOD thật (intraday mô phỏng)"
+              : "random-walk+eod-rollover",
+          anchoredTo:
+            mode === "simulated" ? "synthetic-seed" : "real-eod (dchart VNDIRECT)",
+          band: "±7%",
+          strictSession: process.env.MARKET_STRICT_SESSION === "true",
+        },
+      });
+    }
 
     const payload = await loadQuotesPayload();
-    return NextResponse.json({ ...payload, ticked, rolled, fills });
+    return NextResponse.json({
+      ...payload,
+      ticked,
+      rolled,
+      fills,
+      ...(rt.active ? { realtime: { used: realtimeUsed, fetchAttempted: rtFetchAttempted } } : {}),
+    });
   } catch (err) {
     console.error("[api/market/tick]", err);
     return NextResponse.json(

@@ -3,28 +3,52 @@
 import * as React from "react";
 import { Header } from "@/components/dashboard/header";
 import { OverviewWorkspace } from "@/components/dashboard/overview-workspace";
+import { MarketWorkspace } from "@/components/dashboard/market-workspace";
+import { PortfolioWorkspace } from "@/components/dashboard/portfolio-workspace";
+import { SignalsWorkspace } from "@/components/dashboard/signals-workspace";
 import { AgentsWorkspace } from "@/components/dashboard/agents-workspace";
+import { SynthesisWorkspace } from "@/components/dashboard/synthesis-workspace";
+import { SettingsWorkspace } from "@/components/dashboard/settings-workspace";
 import { Footer } from "@/components/dashboard/footer";
 import { useRealtimeMarket } from "@/hooks/use-realtime";
-import { useUiStore } from "@/lib/store";
+import { useUiStore, type Workspace } from "@/lib/store";
 
 /**
  * PHASE3_BLUEPRINT §3 — App shell (single route `/`):
  * header + workspace nav + workspace switch (Zustand) + sticky footer.
  *
+ * Phiên #34 — module "Tổng quan" quá tải được chia thành 7 workspace:
+ * overview (gọn) · market · portfolio · signals · agents · synthesis · settings.
+ *
  * WebSocket realtime (market-engine) gắn MỘT lần ở cấp trang — đặt ngoài
- 2 workspace component nên đổi tab KHÔNG đứt kết nối realtime.
+ * workspace component nên đổi tab KHÔNG đứt kết nối realtime.
  */
+
+/** Các giá trị ?ws= hợp lệ — ngoài danh sách này → "overview". */
+const WORKSPACES: readonly Workspace[] = [
+  "overview",
+  "market",
+  "portfolio",
+  "signals",
+  "agents",
+  "synthesis",
+  "settings",
+] as const;
+
+function isWorkspace(value: string | null): value is Workspace {
+  return value != null && (WORKSPACES as readonly string[]).includes(value);
+}
+
 export default function Page() {
   useRealtimeMarket();
 
   const activeWorkspace = useUiStore((s) => s.activeWorkspace);
   const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
 
-  // ?ws=agents|overview — deep-link đọc MỘT lần khi mount (vẫn route `/`)
+  // ?ws=<id> — deep-link đọc MỘT lần khi mount (vẫn route `/`)
   React.useEffect(() => {
     const ws = new URLSearchParams(window.location.search).get("ws");
-    if (ws === "agents" || ws === "overview") setActiveWorkspace(ws);
+    if (isWorkspace(ws)) setActiveWorkspace(ws);
   }, [setActiveWorkspace]);
 
   return (
@@ -37,8 +61,18 @@ export default function Page() {
 
         {activeWorkspace === "overview" ? (
           <OverviewWorkspace />
-        ) : (
+        ) : activeWorkspace === "market" ? (
+          <MarketWorkspace />
+        ) : activeWorkspace === "portfolio" ? (
+          <PortfolioWorkspace />
+        ) : activeWorkspace === "signals" ? (
+          <SignalsWorkspace />
+        ) : activeWorkspace === "agents" ? (
           <AgentsWorkspace />
+        ) : activeWorkspace === "synthesis" ? (
+          <SynthesisWorkspace />
+        ) : (
+          <SettingsWorkspace />
         )}
       </main>
       <Footer />

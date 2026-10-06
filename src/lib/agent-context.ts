@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { pctChange, rsi, sma, latestVsMean } from "@/lib/indicators";
 import { latestNewsForContext } from "@/lib/news";
 import { getForeignFlows, flowsPromptBlock } from "@/lib/flows";
+import { loadLatestAssessment } from "@/lib/bayes/persist";
 
 /**
  * Khối ngữ cảnh + role-prompt DÙNG CHUNG cho single-run & chat
@@ -429,7 +430,8 @@ export const ROLE_PROMPTS: Record<
     system: `Bạn là agent "Market Analyst" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 Nhiệm vụ: phân tích kỹ thuật bảng chỉ báo OHLCV VN30 (90 phiên, chỉ báo: SMA20, SMA50, RSI14, MACD, BOLL).
 Yêu cầu: trả lời bằng TIẾNG VIỆT, 2–4 câu đúng trọng tâm; đánh giá xu hướng tổng thể và nêu 2–3 mã nổi bật nhất kèm số liệu cụ thể; KHÔNG bịa số liệu ngoài bảng.
-Trả về duy nhất một khối JSON hợp lệ: {"content": "<phân tích 2-4 câu>", "reasoning": "<1 câu cơ sở kỹ thuật>"}
+Trường "assessment" là quan điểm thị trường CHUNG 5 phiên tới (direction UP/DOWN/FLAT) kèm độ tin cậy 0..1 và 1–3 lý do ngắn — sẽ được Bộ tổng hợp Bayes dùng làm bằng chứng định lượng.
+Trả về duy nhất một khối JSON hợp lệ: {"content": "<phân tích 2-4 câu>", "reasoning": "<1 câu cơ sở kỹ thuật>", "assessment": {"direction": "UP"|"DOWN"|"FLAT", "confidence": <0..1>, "evidence": ["<chuỗi ngắn>", ...]}}
 ${SOURCE_MODE_DECLARATION}`,
     systemCompact: `Bạn là agent "Market Analyst" của hệ thống The Trader (VNDIRECT) — chuyên gia phân tích kỹ thuật VN30.
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu, bám sát dữ liệu thị trường được cung cấp; KHÔNG bịa số liệu ngoài dữ liệu.
@@ -438,7 +440,8 @@ ${SOURCE_MODE_DECLARATION}`,
   "news-sentiment": {
     system: `Bạn là agent "News & Sentiment" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 QUAN TRỌNG: nguồn tin tức ngoài (RSS VnEconomy/CafeF/VNExpress/Tuổi Trẻ/VietnamNet) ĐÃ được tích hợp — khối TIN TỨC THỊ TRƯỜNG MỚI NHẤT nằm ở cuối prompt người dùng; hãy chấm cảm xúc chung của dòng tin (bullish/bearish/neutral) và nêu 1–2 tin ảnh hưởng lớn nhất tới VN30. Nếu khối tin ghi "chưa nạp được" → khai báo rõ "no new data" và chỉ suy luận hạn chế từ số liệu nội tại. Tuyệt đối không bịa tin tức.
-Trả lời TIẾNG VIỆT, 2–3 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "...", "sentiment": "bullish" | "bearish" | "neutral"}
+Trường "assessment" là quan điểm thị trường CHUNG 5 phiên tới (direction UP/DOWN/FLAT) kèm độ tin cậy 0..1 và 1–3 lý do ngắn — sẽ được Bộ tổng hợp Bayes dùng làm bằng chứng định lượng.
+Trả lời TIẾNG VIỆT, 2–3 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "...", "sentiment": "bullish" | "bearish" | "neutral", "assessment": {"direction": "UP"|"DOWN"|"FLAT", "confidence": <0..1>, "evidence": ["<chuỗi ngắn>", ...]}}
 ${SOURCE_MODE_DECLARATION}`,
     systemCompact: `Bạn là agent "News & Sentiment" của hệ thống The Trader (VNDIRECT) — chuyên gia tin tức & cảm xúc thị trường.
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; chấm cảm xúc chung (bullish/bearish/neutral) khi phù hợp; KHÔNG bịa tin tức hay số liệu ngoài dữ liệu được cung cấp.
@@ -448,7 +451,8 @@ ${SOURCE_MODE_DECLARATION}`,
     system: `Bạn là agent "Risk Manager" của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 Nhiệm vụ: đối chiếu danh mục với giới hạn rủi ro: drawdown tối đa 15%, tỷ trọng ngành tối đa 40%, vị thế đơn tối đa 25% NAV, lỗ ngày tối đa 50.000.000 ₫.
 Kiểm tra từng giới hạn, nêu rõ vi phạm (nếu có), và kết luận mức rủi ro tổng thể của danh mục.
-Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<cơ sở tính toán>"}
+Trường "assessment" là quan điểm về HƯỚNG THỊ TRƯỜNG chung 5 phiên tới (direction UP/DOWN/FLAT — rủi ro cao nghiêng DOWN) kèm độ tin cậy 0..1 và 1–3 lý do ngắn — sẽ được Bộ tổng hợp Bayes dùng làm bằng chứng định lượng.
+Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<cơ sở tính toán>", "assessment": {"direction": "UP"|"DOWN"|"FLAT", "confidence": <0..1>, "evidence": ["<chuỗi ngắn>", ...]}}
 ${SOURCE_MODE_DECLARATION}`,
     systemCompact: `Bạn là agent "Risk Manager" của hệ thống The Trader (VNDIRECT) — quản trị rủi ro danh mục.
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; kiểm tra hạn mức (drawdown, tập trung ngành, tổn thất) dựa trên dữ liệu được cung cấp; KHÔNG bịa số liệu.
@@ -458,7 +462,8 @@ ${SOURCE_MODE_DECLARATION}`,
     system: `Bạn là agent "Fair Value Analyst" (A3) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 Nhiệm vụ: đọc khối DẢI ĐỊNH GIÁ 90 PHIÊN (min/max/giá TB ± độ lệch chuẩn, z-score, % so đỉnh/đáy) và xác định các mã đang ĐẮT/RẺ bất thường so lịch sử; nêu 2–3 mã lệch định giá lớn nhất kèm z-score cụ thể và ý nghĩa giao dịch (điểm mua giá rẻ / chốt lời giá đắt).
 Lưu ý: kho dữ liệu KHÔNG có chỉ số tài chính cơ bản (P/E, EPS) — định giá chỉ theo dải giá lịch sử, tuyệt đối không bịa các chỉ số đó.
-Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<1 câu cơ sở định giá>"}
+Trường "assessment" là quan điểm thị trường CHUNG 5 phiên tới (direction UP/DOWN/FLAT) kèm độ tin cậy 0..1 và 1–3 lý do ngắn — sẽ được Bộ tổng hợp Bayes dùng làm bằng chứng định lượng.
+Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<1 câu cơ sở định giá>", "assessment": {"direction": "UP"|"DOWN"|"FLAT", "confidence": <0..1>, "evidence": ["<chuỗi ngắn>", ...]}}
 ${SOURCE_MODE_DECLARATION}`,
     systemCompact: `Bạn là agent "Fair Value Analyst" của hệ thống The Trader (VNDIRECT) — chuyên gia định giá hợp lý theo dải giá lịch sử 90 phiên.
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; bám sát dữ liệu dải giá được cung cấp; KHÔNG bịa P/E hay chỉ số tài chính ngoài dữ liệu.
@@ -467,7 +472,8 @@ ${SOURCE_MODE_DECLARATION}`,
   "liquidity": {
     system: `Bạn là agent "Liquidity Analyst" (A5) của hệ thống giao dịch đa tác tử The Trader (VNDIRECT, Việt Nam).
 Nhiệm vụ: đọc khối THANH KHOẢN GIAO DỊCH (KL/TL20, ADTV 20 phiên, chênh lệch bid-ask, dòng khối ngoại) và đánh giá khả năng hấp thụ lệnh; nêu 2–3 mã thanh khoản nổi bật nhất (khối lượng bùng nổ hoặc khô hạn) và cảnh báo mã khó thoát lệnh khi cần cắt tỷ trọng lớn.
-Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<1 câu cơ sở thanh khoản>"}
+Trường "assessment" là quan điểm thị trường CHUNG 5 phiên tới (direction UP/DOWN/FLAT) kèm độ tin cậy 0..1 và 1–3 lý do ngắn — sẽ được Bộ tổng hợp Bayes dùng làm bằng chứng định lượng.
+Trả lời TIẾNG VIỆT, 2–4 câu. Trả về duy nhất JSON: {"content": "...", "reasoning": "<1 câu cơ sở thanh khoản>", "assessment": {"direction": "UP"|"DOWN"|"FLAT", "confidence": <0..1>, "evidence": ["<chuỗi ngắn>", ...]}}
 ${SOURCE_MODE_DECLARATION}`,
     systemCompact: `Bạn là agent "Liquidity Analyst" của hệ thống The Trader (VNDIRECT) — chuyên gia thanh khoản giao dịch.
 Trả lời tự do bằng TIẾNG VIỆT, 2–5 câu; bám sát dữ liệu khối lượng/bid-ask/dòng khối ngoại được cung cấp; KHÔNG bịa số liệu.
@@ -668,33 +674,64 @@ export async function buildSingleRunPrompt(
 /**
  * user-prompt cho chat (§4.4): câu hỏi + [BỐI CẢNH DỮ LIỆU MỚI NHẤT] rút gọn theo vai.
  * Service agents (mở rộng 23) dùng mặc định market compact — prompt vai mô tả chuyên môn.
+ *
+ * Phiên #34 (Nhiệm vụ 5): nếu có Bộ tổng hợp Bayes trong 6h qua, thêm 1 dòng
+ * "Bộ tổng hợp Bayes gần nhất: <direction> (pUp X%)" vào cuối khối ngữ cảnh —
+ * 1 truy vấn DB rẻ, bọc try/catch để không bao giờ làm hỏng chat.
  */
 export async function buildChatUserPrompt(code: string, question: string): Promise<string> {
+  const [context, bayesLine] = await Promise.all([
+    buildChatContextBlock(code),
+    latestBayesContextLine(),
+  ]);
+  const contextBlock = [context, bayesLine].filter(Boolean).join("\n");
+  return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${contextBlock}`;
+}
+
+/** Khối ngữ cảnh chat theo vai (switch của buildChatUserPrompt trước #34). */
+async function buildChatContextBlock(code: string): Promise<string> {
   switch (code) {
     case "news-sentiment": {
       const [market, news] = await Promise.all([buildMarketBlock(), buildNewsBlock()]);
-      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, news].join("\n\n")}`;
+      return [market.compact, news].join("\n\n");
     }
     case "portfolio-strategist": {
       const [market, openSignals] = await Promise.all([
         buildMarketBlock(),
         buildOpenSignalsBlock(),
       ]);
-      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, `TÍN HIỆU ĐANG MỞ:\n${openSignals}`].join("\n\n")}`;
+      return [market.compact, `TÍN HIỆU ĐANG MỞ:\n${openSignals}`].join("\n\n");
     }
     case "fair-value": {
       const [market, valuation] = await Promise.all([buildMarketBlock(), buildValuationBlock()]);
-      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, valuation].join("\n\n")}`;
+      return [market.compact, valuation].join("\n\n");
     }
     case "liquidity": {
       const [market, liquidity] = await Promise.all([buildMarketBlock(), buildLiquidityBlock()]);
-      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${[market.compact, liquidity].join("\n\n")}`;
+      return [market.compact, liquidity].join("\n\n");
     }
-    case "market-analyst":
-    case "risk-manager":
     default: {
       const market = await buildMarketBlock();
-      return `${question}\n\n[BỐI CẢNH DỮ LIỆU MỚI NHẤT]\n${market.compact}`;
+      return market.compact;
     }
+  }
+}
+
+/** Dòng nhắc Bộ tổng hợp Bayes gần nhất (≤6h) — null khi không có/chưa từng chạy. */
+async function latestBayesContextLine(): Promise<string | null> {
+  try {
+    const latest = await loadLatestAssessment();
+    if (!latest) return null;
+    const ageMs = Date.now() - new Date(latest.createdAt).getTime();
+    if (!Number.isFinite(ageMs) || ageMs > 6 * 3_600_000) return null;
+    const dirWord =
+      latest.marketDirection === "BULLISH"
+        ? "TĂNG"
+        : latest.marketDirection === "BEARISH"
+          ? "GIẢM"
+          : "ĐI NGANG";
+    return `Bộ tổng hợp Bayes gần nhất: thị trường hướng ${dirWord} (xác suất tăng ${Math.round(latest.pUp * 100)}%)`;
+  } catch {
+    return null; // lỗi DB assessment không được làm hỏng chat
   }
 }

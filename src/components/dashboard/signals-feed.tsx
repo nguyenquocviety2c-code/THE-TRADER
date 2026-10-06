@@ -50,7 +50,20 @@ const CONFIDENCE: Record<string, { label: string; className: string }> = {
   LOW: { label: "Tin cậy thấp", className: "text-muted-foreground" },
 };
 
-export function SignalsFeed() {
+/**
+ * Phiên #34 — props tùy chọn cho bản compact trên workspace Tổng quan:
+ * - limit: số dòng hiển thị tối đa (chỉ hiệu lực khi compact).
+ * - compact: mỗi dòng gọn hơn (ẩn cột phụ, không nút Chuyển lệnh).
+ * - onSeeAll: callback footer "Xem tất cả (N) →" (vd chuyển sang tab Tín hiệu).
+ * Mặc định (không truyền props) giữ 100% hành vi cũ.
+ */
+export interface SignalsFeedProps {
+  limit?: number;
+  compact?: boolean;
+  onSeeAll?: () => void;
+}
+
+export function SignalsFeed({ limit, compact = false, onSeeAll }: SignalsFeedProps) {
   const queryClient = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["signals"],
@@ -76,6 +89,10 @@ export function SignalsFeed() {
   });
 
   const signals = data?.signals ?? [];
+  // Bản compact chỉ hiện `limit` dòng đầu (mặc định 5 khi compact mà không truyền limit).
+  const maxRows = compact ? (limit ?? 5) : signals.length;
+  const visible = signals.slice(0, maxRows);
+  const hiddenCount = signals.length - visible.length;
 
   return (
     <Card className="gap-4">
@@ -84,13 +101,17 @@ export function SignalsFeed() {
           <Radar className="size-4 text-muted-foreground" aria-hidden="true" />
           Tín hiệu giao dịch
         </CardTitle>
-        <CardDescription>Khuyến nghị mới nhất từ các agent</CardDescription>
+        <CardDescription>
+          {compact
+            ? `Khuyến nghị mới nhất từ các agent · ${signals.length} tín hiệu`
+            : "Khuyến nghị mới nhất từ các agent"}
+        </CardDescription>
       </CardHeader>
       <CardContent className="pb-0">
         {isLoading ? (
           <div className="flex flex-col gap-3 pb-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="h-24 w-full rounded-lg" />
+            {Array.from({ length: compact ? 3 : 4 }).map((_, i) => (
+              <Skeleton key={i} className={compact ? "h-14 w-full rounded-lg" : "h-24 w-full rounded-lg"} />
             ))}
           </div>
         ) : isError ? (
@@ -100,12 +121,44 @@ export function SignalsFeed() {
         ) : signals.length === 0 ? (
           <p className="pb-6 text-sm text-muted-foreground">Chưa có tín hiệu nào.</p>
         ) : (
-          <ul className="max-h-[32rem] divide-y overflow-y-auto custom-scrollbar">
-            {signals.map((s) => {
+          <ul
+            className={cn(
+              "divide-y overflow-y-auto custom-scrollbar",
+              compact ? "max-h-none" : "max-h-[32rem]"
+            )}
+          >
+            {visible.map((s) => {
               const dir = DIRECTION[s.direction] ?? DIRECTION.HOLD;
               const DirIcon = dir.icon;
               const conf = CONFIDENCE[s.confidence] ?? CONFIDENCE.MEDIUM;
-              const convertible = s.direction !== "HOLD" && !s.actedAt;
+              const convertible = !compact && s.direction !== "HOLD" && !s.actedAt;
+              if (compact) {
+                // Dòng compact: hướng + mã + điểm + lý do cắt 1 dòng + tuổi.
+                return (
+                  <li key={s.id} className="flex flex-col gap-1 py-2.5 pr-1">
+                    <div className="flex items-center gap-2">
+                      <Badge className={cn("gap-1", dir.className)}>
+                        <DirIcon className="size-3" aria-hidden="true" />
+                        {dir.label}
+                      </Badge>
+                      <span className="text-sm font-bold tracking-tight">{s.symbol}</span>
+                      <span className="tabular-nums text-xs text-muted-foreground">
+                        {s.score.toFixed(0)}/100
+                      </span>
+                      {s.actedAt && (
+                        <Badge variant="secondary" className="ml-auto text-[10px]">
+                          Đã chuyển lệnh
+                        </Badge>
+                      )}
+                    </div>
+                    {s.rationale && (
+                      <p className="truncate text-xs text-muted-foreground" title={s.rationale}>
+                        {s.rationale}
+                      </p>
+                    )}
+                  </li>
+                );
+              }
               return (
                 <li key={s.id} className="flex flex-col gap-2 py-3.5 pr-1">
                   <div className="flex flex-wrap items-center gap-2">
@@ -195,6 +248,18 @@ export function SignalsFeed() {
               );
             })}
           </ul>
+        )}
+
+        {/* Footer compact — "Xem tất cả (N) →" chuyển sang workspace Tín hiệu */}
+        {compact && !isLoading && !isError && hiddenCount > 0 && onSeeAll && (
+          <button
+            type="button"
+            onClick={onSeeAll}
+            className="my-2 flex min-h-11 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed text-sm font-medium text-primary transition-colors hover:bg-accent"
+          >
+            Xem tất cả ({signals.length.toLocaleString("vi-VN")})
+            <ArrowRight className="size-3.5" aria-hidden="true" />
+          </button>
         )}
       </CardContent>
     </Card>

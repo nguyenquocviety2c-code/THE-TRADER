@@ -279,4 +279,25 @@
 
 ---
 
-*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free + phiên #33: rà soát toàn diện 30 findings audit + dữ liệu EOD thật VNDIRECT) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*
+## Prompt — Phiên #34 (2026-10-06)
+
+> **Người dùng (3 yêu cầu):** "(1) Chia module Tổng quan đang quá tải thành các module nhỏ. (2) Thêm module Cài đặt để nhập thông tin VNDIRECT dùng luôn. (3) Rà soát + tái kiến trúc phối hợp 23 agents — luồng dữ liệu chặt chẽ giữa các agents, MỘT module tổng hợp bằng 'bậc nhân quả Bayes' đưa ra nhận định/dự đoán, các agents phải chạy thuật toán THẬT chứ không chỉ prompt."
+>
+> Kèm định hướng gốc: "Đây là một hệ thống các agents chuyên gia, không phải nhỏ lẻ, và các agent cần được code vận hành cho công việc của mình chứ không chỉ đơn giản là prompt instructions. Nghĩa là chúng ta sẽ cần ứng dụng rất nhiều thuật toán thật vào trong đây."
+
+**Diễn giải — 3 yêu cầu gộp trong 1 phiên (#34):**
+1. **Chia module Tổng quan quá tải** — workspace Tổng quan cũ dồn 8 section vào 1 trang → tách thành các module nhỏ, gọn.
+2. **Module Cài đặt nhập VNDIRECT dùng luôn** — form nhập cấu hình khách hàng VNDIRECT (OAuth2 + finfo realtime) ngay trong app, không phải sửa `.env` tay.
+3. **Rà soát + tái kiến trúc phối hợp 23 agents** — luồng dữ liệu chặt chẽ giữa các agent; MỘT bộ tổng hợp bằng "bậc nhân quả Bayes" đưa ra nhận định/dự đoán; agents phải được **code vận hành** bằng thuật toán thật, không chỉ prompt instructions.
+
+**Thực thi (phiên #34 — 34-PLAN chốt hợp đồng → 3 subagent song song 34-BAYES + 34-SETTINGS + 34-FE → 34-VERIFY):**
+- **Khối 1 — UI 7 workspace:** overview viết lại gọn (MarketSummary + AssessmentBrief + Signals compact + AgentSystemBrief) · market · portfolio · signals (SignalsFeed + RiskAlerts + AgentsPanel compact) · agents · synthesis (Bộ tổng hợp Bayes) · settings (Cài đặt); nav 7 tab cuộn ngang mobile, deep-link `?ws=`; Prisma thêm model `AppSetting` + `MarketAssessment` (đã push Supabase).
+- **Khối 2 — Bộ tổng hợp Bayes nhân quả (Đợt D mới trong chu kỳ 6 đợt A→B→C→D Bayes→E Chủ tịch→F Thực thi):** engine log-odds naive Bayes **4 bậc nhân quả** (Bậc 0 tiên nghiệm base-rate 250 phiên thật 7.500 quan sát → Bậc 1 thị trường: breadth/news-lexicon/flows/Holt/regime → Bậc 2 ngành → Bậc 3 cổ phiếu kế thừa posterior); thuật toán thật mới `src/lib/quant/` (statistics OLS/percentile/entropy, forecast Holt double exponential + CI80, sentiment lexicon NLP tiếng Việt ~75 thuật ngữ + phủ định, regime) + indicators thêm MACD/Bollinger/ATR/OBV/Stochastic; 4 LLM research + risk giờ xuất assessment JSON `{direction, confidence, evidence[]}` → phiếu bầu Bayes có trọng số healthScore/successRate; sensitivity Δlog-odds → drivers; disagreement; narrative tiếng Việt tự sinh; `GET /api/assessment` + `POST /api/assessment/synthesize` (0 LLM, cooldown 10s). Chu kỳ đo thật: **38,8s · 23 agents · 0 lỗi**; assessment chu kỳ: **46 bằng chứng · 8 agents · pUp 0.194/pDown 0.710 → BEARISH**; Chủ tịch trích nguyên "xác suất 72,1%" trong tín hiệu (khớp pDown 0.7209).
+- **Khối 3 — Module Cài đặt:** `src/lib/settings.ts` + `src/lib/vndirect.ts` (OAuth2 `client_credentials` auth.vndirect.com.vn + finfo `/v4/lastprice` POST envelope + GET fallback + normalizePrice nghìn-VND heuristic) + `GET/PUT /api/settings` (secrets masked 4 đầu + ····; `""` = xoá; bỏ trống = giữ) + `POST /api/settings/test` (probe thật, ghi lastTest; không đè creds mới) + mode runtime `AppSetting` "market-data" ghi đè env (real-eod | realtime-vndirect | simulated) + tick route nhánh realtime trong phiên (throttle ≥30s, giá round100 + clamp ±7%) với fallback an toàn. Kết quả probe sandbox: finfo-api + auth.vndirect KHÔNG reachable (DNS private 10.210.100.8 — sandbox chặn egress) — chỉ dchart-api sống → realtime tự an toàn fallback real-eod, cần máy chủ có egress thật khi deploy.
+- **E2E + bug tự fix:** browser 7/7 workspace no-overflow desktop 1280 + mobile 390; 0 console error; tự fix 4 bug format % (xác suất 0..1 chưa ×100) + 1 tràn cột AgentsPanel; nút "Tổng hợp lại ngay" hoạt động (source manual · 42 bằng chứng); test kết nối VNDIRECT gọi thật OAuth2 + finfo, báo lỗi mạng trung thực; đổi mode realtime-vndirect → badge "Đang fallback: EOD thật" → đặt lại real-eod.
+
+**Trạng thái:** ✅ Hoàn thành — 3 yêu cầu đều verify end-to-end qua browser (3 luồng vàng: Bộ tổng hợp Bayes · module Cài đặt · chu kỳ 23 agents với Chủ tịch trích đúng số posterior).
+
+---
+
+*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free + phiên #33: rà soát toàn diện 30 findings audit + dữ liệu EOD thật VNDIRECT + phiên #34: 7 workspace · Bộ tổng hợp Bayes nhân quả · module Cài đặt VNDIRECT) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*

@@ -9,8 +9,21 @@ import { create } from "zustand";
  * sources of truth.
  */
 
-/** PHASE3_BLUEPRINT §3.1 — workspace tab của app shell (single route `/`). */
-export type Workspace = "overview" | "agents";
+/**
+ * PHASE3_BLUEPRINT §3.1 + phiên #34 — workspace tab của app shell (single route `/`).
+ * Tổng quan cũ được chia thành 7 module nhỏ hơn theo yêu cầu:
+ * overview (tin nhanh) · market (bảng giá + biểu đồ) · portfolio (danh mục) ·
+ * signals (tín hiệu + rủi ro + vận hành) · agents (đội agent) ·
+ * synthesis (Bộ tổng hợp Bayes) · settings (Cài đặt VNDIRECT).
+ */
+export type Workspace =
+  | "overview"
+  | "market"
+  | "portfolio"
+  | "signals"
+  | "agents"
+  | "synthesis"
+  | "settings";
 
 /** PHASE3_BLUEPRINT §5.1 — chế độ render biểu đồ giá. */
 export type ChartMode = "candle" | "line";

@@ -1,20 +1,35 @@
 "use client";
 
-import { Bot, LayoutDashboard } from "lucide-react";
+import {
+  Bot,
+  Brain,
+  Briefcase,
+  ChartCandlestick,
+  LayoutDashboard,
+  Radar,
+  Settings,
+} from "lucide-react";
 import { useUiStore, type Workspace } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 /**
- * PHASE3_BLUEPRINT §3.2 — thanh tab workspace, render bên trong Header
- * (hàng dưới thanh logo). Chuyển workspace bằng Zustand — KHÔNG reload
- * trang, KHÔNG thêm route (bất biến single-route `/`).
+ * PHASE3_BLUEPRINT §3.2 + phiên #34 — thanh tab workspace (7 module), render
+ * bên trong Header (hàng dưới thanh logo). Chuyển workspace bằng Zustand —
+ * KHÔNG reload trang, KHÔNG thêm route (bất biến single-route `/`).
  *
- * Mobile (<sm): 2 tab chia đôi hàng, touch target ≥ 44px.
+ * Mobile (<sm): hàng tab cuộn ngang (overflow-x-auto + snap-x + scrollbar ẩn),
+ * mỗi tab flex-none min-w-max, touch target ≥ 44px — không ép 7 tab chia đôi.
+ * Desktop (≥sm): các tab flex-none như cũ.
  */
 
 const TABS: { id: Workspace; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: "overview", label: "Tổng quan", icon: LayoutDashboard },
+  { id: "market", label: "Thị trường", icon: ChartCandlestick },
+  { id: "portfolio", label: "Danh mục", icon: Briefcase },
+  { id: "signals", label: "Tín hiệu", icon: Radar },
   { id: "agents", label: "Đội Agent", icon: Bot },
+  { id: "synthesis", label: "Tổng hợp", icon: Brain },
+  { id: "settings", label: "Cài đặt", icon: Settings },
 ];
 
 export function WorkspaceNav() {
@@ -30,7 +45,7 @@ export function WorkspaceNav() {
       <div
         role="tablist"
         aria-label="Vùng làm việc"
-        className="mx-auto flex w-full max-w-[1440px] items-stretch gap-1 px-2 pt-1.5 sm:gap-2 sm:px-6"
+        className="mx-auto flex w-full max-w-[1440px] items-stretch gap-1 overflow-x-auto px-2 pt-1.5 pb-1 [scrollbar-width:hidden] [ms-overflow-style:none] snap-x snap-mandatory sm:gap-2 sm:px-6 [&::-webkit-scrollbar]:hidden"
       >
         {TABS.map((tab) => {
           const selected = active === tab.id;
@@ -46,7 +61,8 @@ export function WorkspaceNav() {
               tabIndex={selected ? 0 : -1}
               onClick={() => setActive(tab.id)}
               onKeyDown={(e) => {
-                // Đ.phím mũi tên trái/phải chuyển tab (chuẩn WAI-ARIA tabs)
+                // Đ.phím mũi tên trái/phải chuyển tab (chuẩn WAI-ARIA tabs,
+                // modulo theo số tab hiện có — 7 tab phiên #34)
                 if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
                   e.preventDefault();
                   const idx = TABS.findIndex((t) => t.id === tab.id);
@@ -56,15 +72,16 @@ export function WorkspaceNav() {
                 }
               }}
               className={cn(
-                // Mobile: 2 tab chia đôi, touch target ≥44px; desktop: nút dạng tab
-                "relative flex min-h-11 flex-1 items-center justify-center gap-2 rounded-t-lg border-b-2 px-3 text-sm font-medium transition-colors sm:min-h-10 sm:flex-none sm:px-4",
+                // Mobile: cuộn ngang, mỗi tab flex-none min-w-max ≥44px;
+                // desktop: nút dạng tab flex-none như cũ
+                "relative flex min-h-11 min-w-max flex-none snap-start items-center justify-center gap-2 rounded-t-lg border-b-2 px-3 text-sm font-medium transition-colors sm:min-h-10 sm:px-4",
                 selected
                   ? "border-primary text-foreground"
                   : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
               )}
             >
               <Icon className="size-4 shrink-0" aria-hidden="true" />
-              <span>{tab.label}</span>
+              <span className="whitespace-nowrap">{tab.label}</span>
               {/* Badge chấm realtime khi workspace Đội Agent mở & engine đang nối */}
               {tab.id === "agents" && realtimeConnected && (
                 <span

@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { escalateStaleSources, readSources, staleOf } from "@/lib/sources";
 import { getTradingMode, TRADING_MODE_LABEL } from "@/lib/trading-mode";
 import { sessionPhase, SESSION_PHASE_LABEL, isTradingSession } from "@/lib/market-session";
+import { getEffectiveMode } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,9 @@ export async function GET() {
       ]);
 
     const trading = getTradingMode();
+    // Phiên #34 (additive — không phá shape cũ): mode dữ liệu hiệu lực +
+    // trạng thái realtime finfo để footer/monitoring hiển thị cảnh báo fallback.
+    const eff = await getEffectiveMode();
 
     return NextResponse.json({
       sources: sources.map((s) => {
@@ -52,6 +56,9 @@ export async function GET() {
         phaseLabel: SESSION_PHASE_LABEL[sessionPhase(new Date())],
         inSession: isTradingSession(new Date()),
         strictSession: process.env.MARKET_STRICT_SESSION === "true",
+        // Phiên #34 — optional additive (SystemStatusResponse.market giữ nguyên)
+        effectiveMode: eff.effectiveMode,
+        realtimeOk: eff.realtimeOk,
       },
       counts: {
         news: newsCount,

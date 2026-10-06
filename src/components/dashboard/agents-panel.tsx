@@ -22,13 +22,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
 import { useRunAgents } from "@/hooks/use-run-agents";
 import { useSignalDecision } from "@/hooks/use-agent-actions";
-import { agentSuccessPct } from "@/components/dashboard/agent-roster-card";
 import { useUiStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AgentMessageRow, AgentsResponse, SignalRow } from "@/lib/types";
@@ -39,13 +37,6 @@ const ROLE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = 
   RISK_MANAGER: ShieldAlert,
   PORTFOLIO_STRATEGIST: Brain,
   EXECUTION_MANAGER: Zap,
-};
-
-const STATUS_DOT: Record<string, { className: string; label: string }> = {
-  RUNNING: { className: "bg-up", label: "Đang chạy" },
-  IDLE: { className: "bg-muted-foreground", label: "Nhàn rỗi" },
-  PAUSED: { className: "bg-amber-500", label: "Tạm dừng" },
-  ERROR: { className: "bg-down", label: "Lỗi" },
 };
 
 /** Badge hướng tín hiệu cho khối phê duyệt/từ chối (PHASE3 B2 §4.5). */
@@ -60,6 +51,7 @@ const DIRECTION: Record<string, { label: string; className: string }> = {
 
 export function AgentsPanel() {
   const runAgents = useRunAgents();
+  const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
 
   const agentsQuery = useQuery({
     queryKey: ["agents"],
@@ -104,24 +96,19 @@ export function AgentsPanel() {
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {/* Agent cards */}
-          {agentsQuery.isLoading ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <Skeleton key={i} className="h-44 w-full rounded-xl" />
-              ))}
-            </div>
-          ) : agentsQuery.isError ? (
-            <p className="text-sm text-down">
-              {agentsQuery.error?.message ?? "Không tải được danh sách agent."}
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-              {agents.map((a) => (
-                <AgentCardView key={a.id} agent={a} />
-              ))}
-            </div>
-          )}
+          {/* Phiên #34 — compact: lưới 23 thẻ agent đã chuyển sang workspace
+              "Đội Agent" (roster đầy đủ); module này giữ header + nút chạy chu kỳ
+              + feed broadcast + phê duyệt — không tràn cột hẹp 1/3. */}
+          <Button
+            variant="outline"
+            size="sm"
+            className="justify-start gap-2 text-xs text-muted-foreground"
+            onClick={() => setActiveWorkspace("agents")}
+            aria-label="Mở workspace Đội Agent"
+          >
+            Xem hồ sơ chi tiết 23 agents (workspace Đội Agent)
+            <ArrowRight className="size-3" aria-hidden="true" />
+          </Button>
 
           <Separator />
 
@@ -162,9 +149,9 @@ export function AgentsPanel() {
         </CardContent>
       </Card>
 
-      {/* Tasks + message feed */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
-        <Card className="gap-4 lg:col-span-2">
+      {/* Tasks + message feed — dọc (cột hẹp 1/3 trong workspace Tín hiệu) */}
+      <div className="grid grid-cols-1 gap-4">
+        <Card className="gap-4">
           <CardHeader>
             <CardTitle className="text-sm">Nhiệm vụ agent</CardTitle>
             <CardDescription>12 nhiệm vụ gần nhất</CardDescription>
@@ -203,7 +190,7 @@ export function AgentsPanel() {
           </CardContent>
         </Card>
 
-        <Card className="gap-4 lg:col-span-3">
+        <Card className="gap-4">
           <CardHeader>
             <CardTitle className="text-sm">Luồng thảo luận giữa các agent</CardTitle>
             <CardDescription>30 tin nhắn gần nhất (mới nhất trước)</CardDescription>
@@ -256,117 +243,6 @@ export function AgentsPanel() {
         </Card>
       </div>
     </section>
-  );
-}
-
-function AgentCardView({
-  agent,
-}: {
-  agent: AgentsResponse["agents"][number];
-}) {
-  const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
-  const RoleIcon = ROLE_ICONS[agent.role] ?? Brain;
-  const dot = STATUS_DOT[agent.status] ?? STATUS_DOT.IDLE;
-  const health = Math.max(0, Math.min(100, agent.healthScore));
-  const healthColor =
-    health >= 80
-      ? "[&_[data-slot=progress-indicator]]:bg-up"
-      : health >= 60
-        ? "[&_[data-slot=progress-indicator]]:bg-amber-500"
-        : "[&_[data-slot=progress-indicator]]:bg-down";
-
-  return (
-    <div
-      className={cn(
-        "flex flex-col gap-3 rounded-xl border bg-card p-4 text-card-foreground shadow-sm transition-shadow hover:shadow-md",
-        health < 60 && "border-amber-500/50 ring-1 ring-amber-500/30"
-      )}
-    >
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <RoleIcon className="size-4.5 text-foreground/80" aria-hidden="true" />
-          </span>
-          <div className="leading-tight">
-            <p className="text-sm font-semibold">{agent.name}</p>
-            <p className="text-[11px] text-muted-foreground">{agent.roleLabel}</p>
-          </div>
-        </div>
-        <span className="flex items-center gap-1.5 pt-1" title={dot.label}>
-          <span className="relative flex size-2">
-            {agent.status === "RUNNING" && (
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-60" />
-            )}
-            <span
-              className={cn(
-                "relative inline-flex size-2 rounded-full",
-                agent.status === "ERROR" && "bg-down",
-                dot.className
-              )}
-              aria-hidden="true"
-            />
-          </span>
-          <span className="text-[10px] text-muted-foreground">{dot.label}</span>
-        </span>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>Sức khỏe</span>
-          <span className="tabular-nums font-medium text-foreground">
-            {health.toFixed(0)}%
-          </span>
-        </div>
-        <Progress value={health} className={cn("h-1.5", healthColor)} />
-      </div>
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant="outline" className="font-mono text-[10px]">
-          {agent.model}
-        </Badge>
-        {agent.pendingTaskCount > 0 && (
-          <Badge variant="secondary" className="text-[10px]">
-            {agent.pendingTaskCount} nhiệm vụ chờ
-          </Badge>
-        )}
-      </div>
-
-      {/* PHASE3 B2 §4.2 — stats mini: runs · success rate · chi phí */}
-      {agent.stats ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="secondary" className="tabular-nums text-[10px]">
-            {agent.stats.runCount} lần chạy
-          </Badge>
-          <Badge variant="secondary" className="tabular-nums text-[10px]">
-            thành công {agentSuccessPct(agent.stats.successRate)}%
-          </Badge>
-          <Badge variant="secondary" className="tabular-nums text-[10px]">
-            ${agent.stats.totalCostUsd.toFixed(2)}
-          </Badge>
-        </div>
-      ) : null}
-
-      <div className="mt-auto flex items-center justify-between gap-2">
-        <p className="text-[11px] text-muted-foreground">
-          {agent.lastRunAt
-            ? `Chạy cách đây ${formatDistanceToNow(new Date(agent.lastRunAt), {
-                locale: vi,
-              })}`
-            : "Chưa từng chạy"}
-        </p>
-        <Button
-          variant="ghost"
-          size="xs"
-          className="gap-1 text-xs text-muted-foreground"
-          onClick={() => setActiveWorkspace("agents")}
-          aria-label="Mở workspace Đội Agent"
-          title="Mở workspace Đội Agent (hồ sơ, chạy riêng, chat)"
-        >
-          Chi tiết
-          <ArrowRight className="size-3" aria-hidden="true" />
-        </Button>
-      </div>
-    </div>
   );
 }
 

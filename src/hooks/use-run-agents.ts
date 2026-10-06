@@ -23,6 +23,9 @@ export function useRunAgents() {
       void queryClient.invalidateQueries({ queryKey: ["portfolio"] });
       void queryClient.invalidateQueries({ queryKey: ["quotes"] });
       void queryClient.invalidateQueries({ queryKey: ["risk-alerts"] });
+      // Phiên #34: chu kỳ chạy đợt Bộ tổng hợp Bayes giữa Control & Chủ tịch —
+      // làm mới nhận định thị trường sau mỗi chu kỳ.
+      void queryClient.invalidateQueries({ queryKey: ["assessment"] });
 
       const secs = res.durationMs ? (res.durationMs / 1000).toFixed(1) : null;
       const signal = res.signals?.[0];

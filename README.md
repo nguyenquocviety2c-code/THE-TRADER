@@ -1,19 +1,21 @@
 # The Trader
 
-> **Dashboard multi-agent paper-trading cho VNDIRECT** — đội **23 agent AI chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy) phân tích realtime trên **dữ liệu giá EOD THẬT VNDIRECT** (90K bar 2013→nay qua dchart public API), bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
+> **Dashboard multi-agent paper-trading cho VNDIRECT** — đội **23 agent AI chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy) chạy **chu kỳ 6 đợt A→F** (Đợt D = **Bộ tổng hợp Bayes nhân quả** — log-odds 4 bậc trên dữ liệu thật, 0 LLM) phân tích realtime trên **dữ liệu giá EOD THẬT VNDIRECT** (90K bar 2013→nay qua dchart public API), bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
 
-**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **Space Bunny Free** (Opencode Zen, free-tier $0, chạy được cả ngoài sandbox — mặc định cho toàn đội) / fallback **GLM-4.6** (trong sandbox Z.ai) · **socket.io** · **giá EOD thật VNDIRECT dchart** (90.785 bar 2013→nay)
+**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **Space Bunny Free** (Opencode Zen, free-tier $0, chạy được cả ngoài sandbox — mặc định cho toàn đội) / fallback **GLM-4.6** (trong sandbox Z.ai) · **socket.io** · **giá EOD thật VNDIRECT dchart** (90.785 bar 2013→nay) · **7 workspace** (Tổng quan · Thị trường · Danh mục · Tín hiệu · Đội Agent · Tổng hợp · Cài đặt) · **Bộ tổng hợp Bayes nhân quả** (Đợt D của chu kỳ — `src/lib/quant` + `src/lib/bayes`: OLS · Holt · lexicon NLP tiếng Việt · regime, 0 LLM)
 
-> **Miễn trừ trách nhiệm:** đây là dự án minh họa (demo). **Lịch sử giá EOD 2013→nay là dữ liệu THẬT** từ VNDIRECT dchart (đã adjust — 90.785 bar, 30 mã VN30); giá intraday trong phiên vẫn **mô phỏng** quanh mức tham chiếu thật (random-walk + mean-reversion, gắn nhãn `simulated`); dòng khối ngoại mô phỏng deterministic (khai báo rõ); toàn bộ lệnh là **paper trading** — lệnh giấy nội bộ, không gửi ra môi giới; tin tức RSS là dữ liệu thật nhưng chỉ làm ngữ cảnh phân tích. Dự án **không** dùng để giao dịch tiền thật.
+> **Miễn trừ trách nhiệm:** đây là dự án minh họa (demo). **Lịch sử giá EOD 2013→nay là dữ liệu THẬT** từ VNDIRECT dchart (đã adjust — 90.785 bar, 30 mã VN30); giá intraday trong phiên vẫn **mô phỏng** quanh mức tham chiếu thật (random-walk + mean-reversion, gắn nhãn `simulated`) — trừ khi bật chế độ `realtime-vndirect` qua module Cài đặt (phiên #34, cần máy chủ có egress tới VNDIRECT): khi đó tick trong phiên lấy giá cuối thật finfo, lỗi mạng thì tự fallback quanh ref EOD thật + gắn nhãn `fallback`; dòng khối ngoại mô phỏng deterministic (khai báo rõ); toàn bộ lệnh là **paper trading** — lệnh giấy nội bộ, không gửi ra môi giới; tin tức RSS là dữ liệu thật nhưng chỉ làm ngữ cảnh phân tích. Dự án **không** dùng để giao dịch tiền thật.
 
 ---
 
 ## Tính năng chính
 
-- **App shell 2 workspace** — tab Tổng quan ⇄ **Đội Agent** (Zustand, không reload trang, realtime không đứt; deep-link `?ws=agents`).
-- **Bảng giá VN30 realtime** — 30 mã HOSE, tick mô phỏng mỗi 10 giây qua mini-service `market-engine` (WebSocket) **quanh mức tham chiếu THẬT** (close EOD dchart), tuân thủ quy tắc sàn: bội 100 VND, dải trần/sàn ±7% mở theo ref thật; **toggle cột mở rộng** (trần/sàn/tham chiếu/cao/thấp, dấu ⌃⌄ khi chạm trần/sàn); ngoài phiên bảng giá neo ở mức đóng cửa thật (mode `real`, `MARKET_STRICT_SESSION=true`).
+- **App shell 7 workspace (phiên #34)** — **Tổng quan** (gọn: MarketSummary + AssessmentBrief + Signals compact + AgentSystemBrief) · **Thị trường** · **Danh mục** · **Tín hiệu** (feed + rủi ro + vận hành agents) · **Đội Agent** · **Tổng hợp** (Bộ tổng hợp Bayes) · **Cài đặt** (VNDIRECT) — Zustand, không reload trang, realtime không đứt; nav 7 tab cuộn ngang trên mobile (snap, ẩn scrollbar, mọi tab ≥44px); deep-link `?ws=` cho cả 7 workspace.
+- **Bảng giá VN30 realtime** — 30 mã HOSE, tick mô phỏng mỗi 10 giây qua mini-service `market-engine` (WebSocket) **quanh mức tham chiếu THẬT** (close EOD dchart), tuân thủ quy tắc sàn: bội 100 VND, dải trần/sàn ±7% mở theo ref thật; **toggle cột mở rộng** (trần/sàn/tham chiếu/cao/thấp, dấu ⌃⌄ khi chạm trần/sàn); ngoài phiên bảng giá neo ở mức đóng cửa thật (mode `real`, `MARKET_STRICT_SESSION=true`). **Chế độ `realtime-vndirect` (phiên #34):** trong phiên kéo **giá cuối THẬT finfo VNDIRECT** (throttle ≥30s kèm cache, round100 + clamp ±7%, khối lượng dồn phiên thật), lỗi mạng → tự fallback random-walk quanh ref EOD thật + gắn nhãn `fallback`.
 - **Biểu đồ nến Nhật + RSI14 trên dữ liệu EOD thật** — nến custom (xanh=đóng≥mở) + volume histogram màu phiên + panel RSI Wilder (guideline 30/70, vùng quá mua/bán); toggle Nến/Đường, khung 30/60/90 phiên; chuỗi OHLCV 2013→nay là **bar thật VNDIRECT dchart**.
-- **23 AI agent (5 nhóm) — làm việc trực tiếp** — Nghiên cứu (5) · Kiểm soát VETO (3) · Điều hành (4) · Nền tảng dữ liệu (4) · Học máy (7): **6 agent gọi LLM mỗi chu kỳ** (market-analyst · fair-value · news-sentiment · liquidity · risk-manager · portfolio-strategist), **17 agent còn lại chạy deterministic từ DB** (0 chi phí LLM, ~0.2–1.5s); roster UI chia 5 nhóm + badge VETO; **chạy riêng từng agent**, **chat 1-1** (AgentMessage.direction USER/AGENT), hồ sơ chi phí token/$ từng agent + sparkline 7 ngày, rate-limit 60s/agent có đếm ngược.
+- **23 AI agent (5 nhóm) — làm việc trực tiếp** — Nghiên cứu (5) · Kiểm soát VETO (3) · Điều hành (4) · Nền tảng dữ liệu (4) · Học máy (7): **6 agent gọi LLM mỗi chu kỳ** (market-analyst · fair-value · news-sentiment · liquidity · risk-manager · portfolio-strategist), **17 agent còn lại chạy deterministic từ DB** (0 chi phí LLM, ~0.2–1.5s); chu kỳ **6 đợt A→F** (Đợt D = Bộ tổng hợp Bayes — xem dưới); 4 LLM nghiên cứu + risk-manager giờ kèm **assessment JSON** `{direction, confidence, evidence[]}` làm phiếu bầu cho Bộ tổng hợp Bayes; roster UI chia 5 nhóm + badge VETO; **chạy riêng từng agent**, **chat 1-1** (AgentMessage.direction USER/AGENT), hồ sơ chi phí token/$ từng agent + sparkline 7 ngày, rate-limit 60s/agent có đếm ngược.
+- **Bộ tổng hợp Bayes nhân quả (phiên #34 — workspace Tổng hợp)** — **Đợt D** của chu kỳ, chạy giữa Ủy ban Kiểm soát và Chủ tịch: engine **log-odds naive Bayes 4 bậc nhân quả** (Bậc 0 tiên nghiệm base-rate **250 phiên thật · 7.500 quan sát** → Bậc 1 thị trường: breadth · lexicon NLP tiếng Việt (~75 thuật ngữ + phủ định) · dòng khối ngoại · Holt double exponential · regime → Bậc 2 ngành → Bậc 3 cổ phiếu kế thừa posterior thị trường), clamp LR [0.5, 3] · weight [0.3, 1] · |L|≤4; **sensitivity Δlog-odds → drivers**, disagreement, narrative tiếng Việt tự sinh; phiếu bầu LLM có trọng số healthScore/successRate; forecast 5 phiên Holt kèm CI80; VETO Ủy ban Kiểm soát vẫn là ràng buộc cứng, banner phủ quyết ngay trên nhận định; **0 LLM — $0** (`GET /api/assessment` · `POST /api/assessment/synthesize` cooldown 10s).
+- **Module Cài đặt (phiên #34)** — nhập cấu hình **VNDIRECT** (consumer key/secret/access token/số tài khoản; secret mask 4 ký tự đầu + ····; bỏ trống = giữ, `""` = xoá) + **Kiểm tra kết nối thật** (OAuth2 `auth.vndirect.com.vn` + finfo) + chọn **mode dữ liệu runtime** `real-eod` | `realtime-vndirect` | `simulated` (bảng `AppSetting` ghi đè env, không cần restart) — mode realtime chưa cấu hình/lỗi fetch → tự fallback `real-eod` an toàn, UI badge "Đang fallback: EOD thật".
 - **Human-in-the-loop phê duyệt** — chu kỳ sinh tín hiệu **ACTIVE chờ duyệt**; trader **✅ Phê duyệt** (lệnh paper LIMIT 5% NAV) hoặc **⛔ Từ chối** ngay trong feed tin nhắn / tab Tín hiệu; đầy đủ audit `SIGNAL_CREATED`/`SIGNAL_APPROVED`/`SIGNAL_REJECTED`.
 - **Tin tức RSS thật** — crawler 5 nguồn Việt Nam (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet), dedupe theo URL, nạp tay hoặc tự động mỗi 15 phút.
 - **Dòng khối ngoại (S6)** — mô phỏng deterministic theo thanh khoản thật + cảnh báo `FOREIGN_FLOW_OUTFLOW` khi bán ròng mạnh.
@@ -32,6 +34,7 @@
 - **Tin tức RSS live (S5)** — crawler 5 nguồn Việt Nam (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet), dedupe theo URL, tự động mỗi 15 phút.
 - **Dòng khối ngoại — mô phỏng minh bạch (S6)** — deterministic theo thanh khoản thật, luôn gắn nhãn `simulated` trên footer; chưa có nguồn EOD thật.
 - **Intraday tick — mô phỏng quanh ref thật (S4)** — random-walk ±0,4%/tick quanh close EOD thật trong phiên; `MARKET_STRICT_SESSION=true` mặc định → ngoài phiên bảng giá neo ở mức đóng cửa thật (mode `real`), tick bị skip.
+- **Realtime finfo VNDIRECT (S8 — tùy chọn, chờ egress)** — module Cài đặt + `src/lib/vndirect.ts`: OAuth2 `client_credentials` (auth.vndirect.com.vn) + finfo `/v4/lastprice`; khi bật mode `realtime-vndirect`, tick trong phiên dùng giá cuối thật (round100 + clamp ±7% + khối lượng dồn phiên), lỗi → fallback EOD thật + gắn nhãn `fallback`. Probe sandbox: finfo/auth **không reachable** (DNS finfo resolve về địa chỉ private 10.210.100.8 — sandbox chặn egress), chỉ dchart-api sống → realtime cần **máy chủ có egress thật** khi deploy.
 - **Danh mục demo rebase theo giá thật** — `prisma/import-real-eod.ts`: vị thế/lệnh/bút toán tính lại theo close thật (phí 0,15% / thuế TNCN 0,1% khi bán); equity = cash + Σ(qty × close thật) = 1.373.869.150 ₫ sau rebase.
 
 ---
@@ -43,11 +46,12 @@ flowchart TB
     Browser["Trình duyệt\nReact 19 · TanStack Query · socket.io-client"]
 
     subgraph App["Next.js — cổng 3000"]
-        API["Route Handlers /api/*\nquotes · news · flows · tick · eod-sync\nagents/run (chu kỳ 23 agents)\nsignals · portfolio · system/status…"]
+        API["Route Handlers /api/*\nquotes · news · flows · tick · eod-sync\nagents/run (chu kỳ 23 agents — 6 đợt A→F)\nassessment · settings · signals · portfolio · system/status…"]
         LLM["src/lib/llm.ts — provider abstraction:\nSpace Bunny Free — Opencode Zen (free-tier $0,\ncó key, chạy được ngoài sandbox, reasoning_effort low)\nhoặc z-ai-web-dev-sdk GLM-4.6 (sandbox) —\n6 agent LLM · 17 agent deterministic (0 LLM)"]
+        BAYES["src/lib/bayes + src/lib/quant —\nBộ tổng hợp Bayes (Đợt D của chu kỳ):\nlog-odds 4 bậc nhân quả · 0 LLM"]
     end
 
-    DB[("Supabase Postgres — schema trader\nPrisma · 19 models")]
+    DB[("Supabase Postgres — schema trader\nPrisma · 21 models\n(mới: AppSetting · MarketAssessment)")]
 
     subgraph Engine["mini-service market-engine — cổng 3003"]
         IO["socket.io server\nbroadcast: quotes · news · eod · cycle"]
@@ -58,14 +62,19 @@ flowchart TB
 
     DCHART["VNDIRECT dchart-api (public EOD)\n90.785 bar thật 2013→nay (đã adjust)"]
 
+    FINFO["VNDIRECT finfo realtime + OAuth2 customer\n(module Cài đặt — chờ egress máy chủ)"]
+
     Browser -- "fetch /api/…" --> API
     Browser -- "WebSocket (qua gateway, XTransformPort=3003)" --> IO
     API --> DB
+    API --> BAYES
+    BAYES -- "persist MarketAssessment" --> DB
     SCHED -- "server-to-server (APP_URL)" --> API
     SCHED -- "POST /api/market/eod-sync (15:45 ICT hằng ngày + boot)" --> API
     API --> LLM
     API -- "crawler RSS" --> RSS
     API -- "EOD sync (throttle 300ms/request)" --> DCHART
+    API -. "tick mode realtime-vndirect (throttle ≥30s; lỗi → fallback real-eod)" .-> FINFO
 ```
 
 LLM **chỉ** gọi ở server (Route Handlers) — client không bao giờ thấy API key. Mini-service không chạm DB trực tiếp: mọi dữ liệu lấy qua API của app rồi broadcast cho client. Chi tiết: [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md).
@@ -168,7 +177,7 @@ Sandbox dùng GLM-4.6 qua `z-ai-web-dev-sdk` (gateway nội bộ, không có ở
 | `LIVE_TRADING` | `false` | S3 — bật giao dịch thật VNDIRECT; bật mà thiếu cấu hình bên dưới → API từ chối + audit log |
 | `VNDIRECT_API_BASE` | — | Endpoint VNDIRECT open API (chỉ cần khi `LIVE_TRADING=true`) |
 | `VNDIRECT_API_TOKEN` | — | Token khách hàng VNDIRECT — giữ phía server, không commit |
-| `MARKET_DATA_MODE` | `real-eod` | Chế độ dữ liệu thị trường: `real-eod` (mặc định — bar EOD thuộc về nguồn THẬT dchart VNDIRECT, tick **KHÔNG** ghi bar synthetic khi sang ngày mới) \| `simulated` (tick tự ghi bar synthetic như cũ) |
+| `MARKET_DATA_MODE` | `real-eod` | Chế độ dữ liệu thị trường: `real-eod` (mặc định — bar EOD thuộc về nguồn THẬT dchart VNDIRECT, tick **KHÔNG** ghi bar synthetic khi sang ngày mới) \| `realtime-vndirect` (tick trong phiên kéo giá cuối thật finfo VNDIRECT — cần cấu hình trong module Cài đặt; lỗi tự fallback `real-eod`) \| `simulated` (tick tự ghi bar synthetic như cũ). **Từ phiên #34: mode đổi được runtime qua module Cài đặt (bảng `AppSetting`) — ghi đè env, không cần restart** |
 | `DCHART_BASE_URL` | `https://dchart-api.vndirect.com.vn` | Endpoint dchart VNDIRECT cho EOD thật (`src/lib/eod-sync.ts` — public, không cần auth) |
 | `MARKET_STRICT_SESSION` | `true` | `true`: tick engine chỉ sinh giá trong phiên HOSE (T2–T6, 09:15–11:30 & 13:00–14:45, đã trừ nghỉ lễ VN); ngoài phiên bảng giá neo ở close thật (mode `real`) |
 
@@ -189,7 +198,9 @@ Biến cho mini-service `market-engine` (đặt trong môi trường shell hoặ
 
 ```
 src/app/                      # App Router: page.tsx (dashboard) + api/ (route handlers)
-src/components/dashboard/     # Header, bảng giá, chart, portfolio, agents panel,
+src/components/dashboard/     # Header, 7 workspace (overview · market · portfolio ·
+                              # signals · agents · synthesis · settings),
+                              # bảng giá, chart, portfolio, agents panel,
                               # signals, risk alerts, news card, footer…
 src/lib/                      # db, llm (provider LLM), agent-roster (23 agents —
                               # nguồn duy nhất), agent-service-runs (16 hàm
@@ -197,9 +208,19 @@ src/lib/                      # db, llm (provider LLM), agent-roster (23 agents 
                               # news (crawler RSS), flows, eod-sync (EOD thật
                               # dchart VNDIRECT), sources (stale marking),
                               # market-session, trading-mode, market-quotes,
-                              # indicators, health, store (zustand)…
-src/hooks/                    # use-realtime (WebSocket), use-run-agents
-prisma/                       # schema.prisma (19 models) + seed.ts
+                              # indicators (SMA/RSI/MACD/Bollinger/ATR/OBV/
+                              # Stochastic), health, store (zustand),
+                              # settings (AppSetting runtime — mode dữ liệu +
+                              # VNDIRECT masked), vndirect (OAuth2 + finfo
+                              # realtime), quant/ (statistics OLS · Holt
+                              # forecast + CI80 · sentiment lexicon NLP tiếng
+                              # Việt · regime), bayes/ (bộ tổng hợp log-odds
+                              # 4 bậc nhân quả — Đợt D)…
+src/hooks/                    # use-realtime (WebSocket), use-run-agents,
+                              # use-assessment (Bộ tổng hợp Bayes),
+                              # use-settings (module Cài đặt)
+prisma/                       # schema.prisma (21 models — mới: AppSetting ·
+                              # MarketAssessment) + seed.ts
                               # + expand-agents.ts (migrate 5 → 23 agents, idempotent)
                               # + import-real-eod.ts (nạp EOD thật + rebase danh mục)
 mini-services/market-engine/  # socket.io server + scheduler (cổng 3003)
@@ -210,16 +231,17 @@ docs/                         # Tài liệu chi tiết (xem dưới)
 
 ## Tài liệu chi tiết
 
-- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (**24 route** — có agents/[id] + run/chat + decision + market/eod-sync), thiết kế 23 agents · 5 nhóm · chu kỳ 5 đợt (6 LLM + 17 deterministic), realtime & mini-service market-engine
+- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (**28 endpoint** — có agents/[id] + run/chat + decision + market/eod-sync + assessment + settings), thiết kế 23 agents · 5 nhóm · **chu kỳ 6 đợt** (Đợt D = Bộ tổng hợp Bayes nhân quả; 6 LLM + 17 deterministic), realtime & mini-service market-engine
 - [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) — data dictionary 19 model, chính sách kiểu dữ liệu / PII / audit
-- [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) — kho kiểm kê nguồn dữ liệu S1–S7 (S7 = EOD thật VNDIRECT dchart), field mapping, chiến lược fallback
+- [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) — kho kiểm kê nguồn dữ liệu S1–S8 (S7 = EOD thật VNDIRECT dchart · S8 = finfo realtime chờ egress), field mapping, chiến lược fallback
 
 ---
 
 ## Ghi chú
 
 - **LLM backend-only qua lớp provider duy nhất `src/lib/llm.ts`** — mọi cuộc gọi của 23 agent (6 agent chạy LLM) đi qua một cổng: `.env` đã cấu hình `OPENCODE_ZEN_API_KEY` (lấy tại **opencode.ai/zen**, dạng `oc_sk_…`) nên toàn đội chạy **Space Bunny Free** free-tier $0 và **chạy được trên máy local ngoài sandbox**; không có key thì tự dùng GLM-4.6 của sandbox Z.ai để phát triển. Khóa không nằm trong repo hay client bundle; model đang chạy hiển thị trực tiếp trên UI (chip Đội Agent + tooltip footer) qua `GET /api/agents` → `llm`.
-- **Kiến trúc 23 agents — nguồn duy nhất `src/lib/agent-roster.ts`** (thuần dữ liệu, dùng chung bởi seed · `prisma/expand-agents.ts` · API · UI): 5 nhóm — Nghiên cứu (5) · Kiểm soát VETO (3) · Điều hành (4) · Nền tảng dữ liệu (4) · Học máy (7); chu kỳ chạy 5 đợt A→E (xem [docs/TECHNICAL_BLUEPRINT.md §5.2](docs/TECHNICAL_BLUEPRINT.md)); 17 agent dịch vụ chạy deterministic từ DB nên chu kỳ đầy đủ tốn đúng 6 lượt LLM.
-- **Scheduler chu kỳ agent mặc định TẮT** (`AGENT_CYCLE_MINUTES=0`) để tiết kiệm chi phí LLM — chạy chu kỳ thủ công bằng nút "Chạy chu kỳ đầy đủ (23 agents)" trên dashboard (đo thực tế: 1 chu kỳ ~42s, 0 lỗi, $0 với Space Bunny Free; trên dữ liệu EOD thật — phiên #33: 50,4s, 0 lỗi).
+- **Kiến trúc 23 agents — nguồn duy nhất `src/lib/agent-roster.ts`** (thuần dữ liệu, dùng chung bởi seed · `prisma/expand-agents.ts` · API · UI): 5 nhóm — Nghiên cứu (5) · Kiểm soát VETO (3) · Điều hành (4) · Nền tảng dữ liệu (4) · Học máy (7); chu kỳ chạy **6 đợt A→F** (Đợt D — Bộ tổng hợp Bayes nhân quả; xem [docs/TECHNICAL_BLUEPRINT.md §5.2–5.3](docs/TECHNICAL_BLUEPRINT.md)); 17 agent dịch vụ chạy deterministic từ DB nên chu kỳ đầy đủ tốn đúng 6 lượt LLM.
+- **Scheduler chu kỳ agent mặc định TẮT** (`AGENT_CYCLE_MINUTES=0`) để tiết kiệm chi phí LLM — chạy chu kỳ thủ công bằng nút "Chạy chu kỳ đầy đủ (23 agents)" trên dashboard (đo thực tế: 1 chu kỳ ~42s, 0 lỗi, $0 với Space Bunny Free; trên dữ liệu EOD thật — phiên #33: 50,4s, 0 lỗi; phiên #34 với 6 đợt + Đợt D Bayes: 38,8s, 23 agents, 0 lỗi).
 - **Dữ liệu giá EOD THẬT (phiên #33 — 2026-10-06)** — 90.785 bar 2013→nay của 30 mã VN30 nạp từ dchart VNDIRECT (import 30/30 mã OK, 37,8s, 0 bar bỏ); mọi chỉ báo (SMA/RSI/valuation band/backtest) và prompt của 23 agent chạy trên **giá thật**; danh mục demo rebase theo giá thật (equity 1.373.869.150 ₫); đồng bộ tự động 15:45 ICT hằng ngày + lúc boot market-engine (event WebSocket `eod` → client invalidate quotes/bars/watchlist/portfolio). Cùng phiên đã fix **30 findings audit AUD-CODE** (1 P1 + 9 P2 + 20 P3): sweep Signal EXPIRED, transaction claim atomic khi APPROVE, VETO hard-enforce (exposure chặn MUA / compliance chặn mọi tín hiệu mới), watchdog AgentRun kẹt RUNNING, mutex tick chống lost-update…
+- **Phiên #34 (2026-10-06) — 7 workspace · Bộ tổng hợp Bayes nhân quả · module Cài đặt VNDIRECT:** (1) Tổng quan quá tải tách thành **7 workspace** (nav 7 tab cuộn ngang mobile, deep-link `?ws=`), overview gọn còn MarketSummary + AssessmentBrief + Signals compact + AgentSystemBrief; Prisma thêm `AppSetting` + `MarketAssessment` (đã push Supabase). (2) Chu kỳ lên **6 đợt** — **Đợt D Bộ tổng hợp Bayes** giữa Ủy ban Kiểm soát và Chủ tịch: log-odds naive Bayes **4 bậc nhân quả** (Bậc 0 tiên nghiệm 250 phiên thật · 7.500 quan sát → Bậc 1 thị trường → Bậc 2 ngành → Bậc 3 cổ phiếu), 0 LLM, sensitivity Δlog-odds → drivers, disagreement, narrative tiếng Việt; bộ thuật toán lượng hoá thật mới `src/lib/quant/` (OLS, Holt double exponential + CI80, lexicon NLP tiếng Việt ~75 thuật ngữ, regime) + indicators thêm MACD/Bollinger/ATR/OBV/Stochastic; đo thật: chu kỳ **38,8s · 23 agents · 0 lỗi**, assessment chu kỳ **46 bằng chứng · 8 agents · pUp 0.194/pDown 0.710 → BEARISH**; Chủ tịch trích nguyên "xác suất 72,1%" trong tín hiệu (khớp pDown 0.7209). (3) Module Cài đặt: `GET/PUT /api/settings` (secret mask 4 đầu + ····) + `POST /api/settings/test` probe thật; mode runtime ghi đè env; sandbox chặn egress tới VNDIRECT (DNS private 10.210.100.8) nên realtime tự an toàn fallback `real-eod` — cần máy chủ egress thật khi deploy. E2E browser: 7/7 workspace không tràn (desktop 1280 + mobile 390), 0 console error, tự fix 4 bug format % + 1 tràn cột AgentsPanel.
 - Giá intraday trong phiên và dòng tiền khối ngoại là **mô phỏng có khai báo** (mode `simulated` hiển thị trên footer) quanh mức tham chiếu THẬT; ngoài phiên bảng giá neo ở close thật (mode `real`); lịch sử giá EOD và tin tức RSS là dữ liệu thật.

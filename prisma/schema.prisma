@@ -535,3 +535,38 @@ model DataSourceStatus {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 9. CÀI ĐẶT & BỘ TỔNG HỢP BAYES (phiên #34)
+// ─────────────────────────────────────────────────────────────────
+
+// Module Cài đặt — cấu hình runtime dạng key-value JSON, ghi đè env khi có.
+// Secrets VNDIRECT (consumer key/secret, access token) lưu tại đây; API luôn
+// mask khi trả về UI (chỉ 4 ký tự đầu + ****).
+model AppSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique // "vndirect" | "market-data"
+  value     String   // JSON payload
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Bộ tổng hợp Bayes — posterior thị trường theo 3 bậc nhân quả
+// (thị trường → nhóm ngành → cổ phiếu) sau mỗi chu kỳ 23 agents
+// (source="cycle") hoặc tổng hợp lại thủ công (source="manual", 0 LLM).
+model MarketAssessment {
+  id              String   @id @default(cuid())
+  source          String   @default("cycle") // cycle | manual
+  cycleRunId      String? // AgentRun id của Chủ tịch khi chạy trong chu kỳ
+  pUp             Float
+  pDown           Float
+  pFlat           Float
+  marketDirection String // BULLISH | BEARISH | NEUTRAL
+  confidence      Float    @default(0) // 0..1 — 1 − entropy chuẩn hoá
+  disagreement    Float    @default(0) // 0..1 — phân hoá quan điểm các agent
+  evidenceCount   Int      @default(0)
+  detail          String // JSON: prior, drivers, sectors, symbols, market, veto, forecast5d, narrative, agentsConsidered
+  createdAt       DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
