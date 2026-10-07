@@ -20,6 +20,7 @@ import { sessionPhase, SESSION_PHASE_LABEL } from "@/lib/market-session";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
 import { latestFeatures, loadTopSeries } from "@/lib/ml/features";
 import { MLP } from "@/lib/ml/nn";
+import { mlForecastEnsemble } from "@/lib/ml/ensemble";
 import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
 import {
   banditSnapshot,
@@ -48,22 +49,10 @@ function stdOf(xs: number[]): number {
   const m = meanOf(xs);
   return Math.sqrt(meanOf(xs.map((x) => (x - m) * (x - m))));
 }
-/** Hồi quy tuyến tính đơn giản: trả về slope trên chuỗi đóng cửa. */
-function linregSlope(ys: number[]): number {
-  const n = ys.length;
-  if (n < 2) return 0;
-  const xMean = (n - 1) / 2;
-  const yMean = meanOf(ys);
-  let num = 0;
-  let den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (i - xMean) * (ys[i] - yMean);
-    den += (i - xMean) ** 2;
-  }
-  return den > 0 ? num / den : 0;
-}
 
-/** Top-N mã thanh khoản cao nhất (kèm quote + closes + volumes 90 phiên). */
+/** Top-N mã thanh khoản cao nhất (kèm quote + closes + volumes 90 phiên).
+ *  B5 §3.4: khoá về HOSE-STOCK — universe đa sàn không làm lệch rổ của các
+ *  agent dịch vụ đang dùng (market-analyst bảng chỉ báo, ml-forecast…). */
 interface LiquidSymbol {
   id: string;
   symbol: string;
@@ -75,7 +64,7 @@ interface LiquidSymbol {
 }
 async function topLiquid(n: number): Promise<LiquidSymbol[]> {
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
+    where: { isActive: true, market: "HOSE", type: "STOCK" },
     select: {
       id: true,
       symbol: true,
@@ -183,7 +172,9 @@ async function portfolioSnapshot(): Promise<{
 
 /* ─────────────────────────── Nhóm 4 · platform ─────────────────────────── */
 
-/** S0 Data Collector — tình trạng đồng bộ dữ liệu. */
+/** S0 Data Collector — tình trạng đồng bộ dữ liệu (B11: + ingest fundamentals
+ * finfo tuần trong chu kỳ — try/catch toàn bộ, lỗi mạng → mode pending-egress,
+ * KHÔNG bao giờ làm hỏng chu kỳ; DataSourceStatus key "fundamentals" minh bạch). */
 async function runDataCollector(): Promise<ServiceRunResult> {
   const since24h = new Date(Date.now() - 24 * 3_600_000);
   const [instrumentCount, barCount, quoteAgg, news24h, sourceStatus] = await Promise.all([
@@ -203,12 +194,33 @@ async function runDataCollector(): Promise<ServiceRunResult> {
         ? `${ageSec}s trước`
         : `${Math.round(ageSec / 60)} phút trước`;
 
+  // B11 — ingest fundamentals finfo (tuần: chỉ chạy Chủ nhật theo lịch ICT)
+  const fundNote = await ingestFundamentalsWeekly();
+
   return {
-    content: `Đồng bộ hoàn tất: ${instrumentCount} mã VN30 · ${barCount.toLocaleString("vi-VN")} nến lịch sử · báo giá mới nhất ${ageLabel} (chế độ ${mode}) · ${news24h} tin RSS trong 24h qua. Dữ liệu sẵn sàng cho Hội đồng Nghiên cứu.`,
-    reasoning: "Đếm trực tiếp từ kho: Instrument/Bar/Quote/NewsItem.",
+    content: `Đồng bộ hoàn tất: ${instrumentCount} mã đa sàn (HOSE · HNX · UPCOM · ETF · INDEX · QT) · ${barCount.toLocaleString("vi-VN")} nến lịch sử · báo giá mới nhất ${ageLabel} (chế độ ${mode}) · ${news24h} tin RSS trong 24h qua.${fundNote ? ` Dữ liệu cơ bản: ${fundNote}.` : ""} Dữ liệu sẵn sàng cho Hội đồng Nghiên cứu.`,
+    reasoning: "Đếm trực tiếp từ kho: Instrument/Bar/Quote/NewsItem + ingest finfo (B11 pending-egress).",
     sentiment: null,
-    output: { instrumentCount, barCount, quoteAgeSec: ageSec, news24h, mode },
+    output: { instrumentCount, barCount, quoteAgeSec: ageSec, news24h, mode, fundamentals: fundNote },
   };
+}
+
+/** B11 — chạy ingest finfo 1 lần/tuần (Chủ nhật ICT) hoặc khi chưa có row nguồn;
+ *  những ngày khác chỉ đọc trạng thái DataSourceStatus (0 request mạng). */
+async function ingestFundamentalsWeekly(): Promise<string | null> {
+  const { ingestFundamentals } = await import("@/lib/fundamentals");
+  const isSunday = new Date(Date.now() + 7 * 3_600_000).getUTCDay() === 0;
+  const existing = await db.dataSourceStatus.findUnique({ where: { key: "fundamentals" } });
+  if (!isSunday && existing) {
+    return existing.mode === "real"
+      ? `finfo real (${existing.lastSuccessAt ? "đã sync" : "chưa sync"})`
+      : "finfo pending-egress (chờ máy chủ có egress)";
+  }
+  const res = await ingestFundamentals().catch(() => null);
+  if (!res) return "finfo lỗi (đã ghi DataSourceStatus)";
+  return res.mode === "real"
+    ? `finfo real — ${res.rowsUpserted} dòng ${res.instrumentsUpdated} mã`
+    : "finfo pending-egress (chờ máy chủ có egress)";
 }
 
 /** S1 Notification Officer — bản tin tình hình hệ thống. */
@@ -305,28 +317,54 @@ async function runDataIntegrity(): Promise<ServiceRunResult> {
 
 /* ─────────────────────── Nhóm 1 · research (service) ─────────────────────── */
 
-/** A15 ML Forecast — dự báo động lượng 5 phiên bằng hồi quy tuyến tính. */
+/** A15 ML Forecast — ensemble MLP + linreg (B7 — cử tri thứ 6 của Hội đồng
+ * Nghiên cứu, phiếu bầu theo số đông · đồng thuận 80%). Xem ml/ensemble.ts
+ * cho công thức đầy đủ (score 0,7×(pUp−pDown)+0,3×tanh(z), deadband 0,05,
+ * fallback linreg khi chưa có model). */
 async function runMlForecast(): Promise<ServiceRunResult> {
-  const top = await topLiquid(5);
-  const forecasts = top
-    .map((t) => {
-      const closes = t.closes.slice(-30);
-      if (closes.length < 10 || !t.last) return null;
-      const slope = linregSlope(closes);
-      const proj = (slope * 5) / t.last * 100; // % sau 5 phiên
-      return { symbol: t.symbol, proj };
-    })
-    .filter((f): f is { symbol: string; proj: number } => f !== null)
-    .sort((a, b) => b.proj - a.proj);
-  const avg = forecasts.length ? meanOf(forecasts.map((f) => f.proj)) : 0;
-  const best = forecasts[0];
-  const worst = forecasts[forecasts.length - 1];
+  const ens = await mlForecastEnsemble();
+  if (!ens) {
+    return {
+      content: "Chưa đủ dữ liệu chuỗi EOD cho rổ top-10 HOSE để tính ensemble ML (cần ≥ 70 phiên mỗi mã).",
+      reasoning: "mlForecastEnsemble trả null — rổ trống hoặc bar chưa sync.",
+      sentiment: null,
+      output: { horizonDays: 5, ensemble: null },
+    };
+  }
+  const dirVi = ens.direction === "UP" ? "TĂNG" : ens.direction === "DOWN" ? "GIẢM" : "ĐI NGANG";
+  const content = [
+    `Dự báo động lượng 5 phiên (ensemble MLP + hồi quy tuyến tính, rổ top-${ens.basketSize} thanh khoản HOSE): nghiêng ${dirVi}.`,
+    ens.pUp != null && ens.pDown != null
+      ? `MLP v${ens.modelVersion}: pTăng ${(ens.pUp * 100).toFixed(1)}% · pGiảm ${(ens.pDown * 100).toFixed(1)}%${ens.pFlat != null ? ` · pNgang ${(ens.pFlat * 100).toFixed(1)}%` : ""}.`
+      : "Chưa có MlModel serving — chạy fallback linreg thuần (huấn luyện MLP qua nút Huấn luyện ML để bật thành phần neural).",
+    ens.z != null || ens.lastProj != null
+      ? `Thành phần tuyến tính: ${ens.lastProj != null ? `proj₅ rổ ${ens.lastProj >= 0 ? "+" : ""}${ens.lastProj.toFixed(2)}%` : ""}${ens.z != null ? ` · z-score ${ens.z.toFixed(2)}` : ""}${ens.score != null ? ` · score tổng ${ens.score >= 0 ? "+" : ""}${ens.score.toFixed(3)} (deadband ±0,05 → ${dirVi})` : ""}.`
+      : "",
+    "Với tư cách cử tri thứ 6, phiếu này vào Bộ tổng hợp Bayes qua llm-vote:ml-forecast (tín hiệu ML chỉ vào Bayes MỘT lần — T7.5).",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return {
-    content: `Dự báo tuyến tính 5 phiên (hồi quy trên 30 phiên đóng cửa, top-5 thanh khoản): trung bình ${fmtPct(avg)} · tích cực nhất ${best ? best.symbol + " " + fmtPct(best.proj) : "—"} · yếu nhất ${worst && worst !== best ? worst.symbol + " " + fmtPct(worst.proj) : "—"}. Lưu ý: mô hình tuyến tính chỉ phản ánh động lượng gần đây, không phải khuyến nghị giao dịch.`,
-    reasoning: "linreg slope × 5 phiên / giá hiện tại, tính trên 30 closes mỗi mã.",
-    sentiment: avg > 1 ? "bullish" : avg < -1 ? "bearish" : "neutral",
-    output: { horizonDays: 5, avgPct: Number(avg.toFixed(2)), forecasts },
+    content,
+    reasoning:
+      "ensemble score = 0,7×(pUp−pDown) + 0,3×tanh(z), z = z-score proj₅ (slope×5/last×100, cửa sổ 60 phiên); deadband |score|<0,05 → FLAT.",
+    sentiment: ens.direction === "UP" ? "bullish" : ens.direction === "DOWN" ? "bearish" : "neutral",
+    output: {
+      horizonDays: 5,
+      ensemble: {
+        direction: ens.direction,
+        score: ens.score,
+        z: ens.z,
+        lastProj: ens.lastProj,
+        pUp: ens.pUp,
+        pDown: ens.pDown,
+        pFlat: ens.pFlat,
+        confidence: ens.confidence,
+        basketSize: ens.basketSize,
+      },
+      modelVersion: ens.modelVersion,
+    },
   };
 }
 

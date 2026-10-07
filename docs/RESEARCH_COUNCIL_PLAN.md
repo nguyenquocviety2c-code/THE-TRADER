@@ -313,7 +313,7 @@ Việc code: phần reward đã có `settlePendingRewards()`; thêm hàm tổng 
 
 ### 8.2. Test chu kỳ & tích hợp (tầng API)
 
-- [ ] **T8.1 Chu kỳ đầy đủ** sau nâng cấp: 23 agents · 0 lỗi · ≤ 90s · tin mới của 5 agent có số liệu mới (MACD, zSector, Amihud, lexicon điểm, MLP xác suất).
+- [ ] **T8.1 Chu kỳ đầy đủ** sau nâng cấp: 23 agents · 0 lỗi · **≤ 180s, cảnh báo > 300s** (ngân sách mới theo quyết định user §0.4 [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) — nới từ ≤ 90s cũ để tính thêm chỉ báo + segment + scorecard + cổng đồng thuận trên 90 mã) · tin mới của 5 agent có số liệu mới (MACD, zSector, Amihud, lexicon điểm, MLP xác suất). *Đo thật phiên #38: 101,6s — đạt.*
 - [ ] **T8.2 Bayes thu nhận:** evidence count tăng tương ứng nguồn mới/không giảm; drivers JSON có source mới; posterior tổng thay đổi hợp lý (|ΔpUp| < 15pp so trước nâng cấp).
 - [ ] **T8.3 Scorecard endpoint:** sau ≥ 1 chu kỳ có bảng hit-rate (giai đoạn đầu có thể 0 đủ tuổi — hiển thị "chưa đủ dữ liệu" trung thực).
 - [ ] **T8.4 Fallback an toàn:** xoá MlModel / hỏng lexicon / tin trống → chu kỳ vẫn chạy đủ 23 agents (mọi nâng cấp bọc try/catch — mô phỏng từng lỗi một).
@@ -329,6 +329,8 @@ Việc code: phần reward đã có `settlePendingRewards()`; thêm hàm tổng 
 ## §9. Câu hỏi mở cần chốt (trước khi triển khai đợt 1)
 
 > **✅ ĐÃ CHỐT TOÀN BỘ (phiên #37, 2026-10-07):** (1) chốt cả 3 nâng cấp P0; (2) phiếu bầu theo số đông — **cổng đồng thuận ≥ 80%**; (3) scorecard để ở **tab Đội Agent**; (4) **nới** ràng buộc ≤ 90s (→ ≤ 180s); (5) **nạp luôn** HNX. Kèm yêu cầu chủ: **15/15 tổ hợp vận hành + HNX + ETF + dữ liệu cơ bản + sàn quốc tế**. Toàn bộ ánh xạ thành **15 bước / 7 giai đoạn** tại [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) §0–§4 (Bước 6–8 = 3 nâng cấp P0 ở §7 tài liệu này).
+>
+> **✅ ĐÃ TRIỂN KHAI TOÀN BỘ (phiên #38, 2026-10-07)** — 15/15 bước B1–B15 hoàn tất theo MARKET_EXPANSION_BLUEPRINT v1.1: 3 nâng cấp P0 (§7.1 · §7.2 · §7.6) + nạp HNX/UPCOM/ETF/INDEX (90 instrument active · 215.327 bar thật) + cổng đồng thuận 80% 6 cử tri (shadow-mode) + quốc tế Yahoo (chờ nguồn hồi) + cơ bản finfo (pending-egress) + ma trận độ phủ. Chi tiết: [TECHNICAL_BLUEPRINT.md §10](./TECHNICAL_BLUEPRINT.md) v1.0.0.
 
 1. **Phạm vi đợt 1:** chốt cả 3 nâng cấp P0 (7.1 bảng chỉ báo mở rộng + 7.2 MLP ensemble + 7.6 scorecard) hay từng phần?
 2. **Độ ưu tiên MLP trong phiếu bầu:** MLP forecast có nên trở thành phiếu bầu ĐỘC LẬP trong Bayes (hiện là bằng chứng quant weight 0,6) hay giữ hiện trạng? (Ảnh hưởng cân bằng 4 phiếu LLM vs quant.)
@@ -379,4 +381,4 @@ flowchart TB
 
 ---
 
-*Tài liệu này là bản thảo luận mở đầu — mọi đề xuất §7 chỉ triển khai sau khi user chốt §9. Cập nhật lần cuối: 2026-10-07 (phiên #36).*
+*Tài liệu này là bản thảo luận mở đầu — mọi đề xuất §7 chỉ triển khai sau khi user chốt §9. Cập nhật lần cuối: 2026-10-07 (phiên #36; đồng bộ trạng thái sau khi triển khai toàn bộ ở #38 theo MARKET_EXPANSION_BLUEPRINT v1.1).*

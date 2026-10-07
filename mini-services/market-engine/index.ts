@@ -7,6 +7,8 @@
  *      - "quotes"  → payload GET/POST /api/market/tick (S4)
  *      - "news"    → kết quả nạp RSS (S5)
  *      - "eod"     → kết quả đồng bộ EOD THẬT VNDIRECT dchart (mới)
+ *      - "intl"    → kết quả đồng bộ EOD quốc tế Yahoo (B12 #38)
+ *      - "reprobe" → kết quả watcher re-probe ô ⚪/🟡 hằng tuần (B14 #38)
  *      - "cycle"   → kết quả chu kỳ agent (nếu bật scheduler)
  *   2. Scheduler:
  *      - TICK_MS  (mặc định 10s)     : tick bảng giá mô phỏng quanh ref THẬT
@@ -15,6 +17,11 @@
  *        POST /api/market/eod-sync — kéo bar EOD thật từ dchart VNDIRECT,
  *        neo Quote về mức đóng cửa thật (chỉ chạy MỘT lần/ngày; chạy thêm một
  *        lần lúc boot để môi trường mới tự có dữ liệu thật sớm).
+ *      - INTL_SYNC_AT (mặc định 06:15 ICT hằng ngày — B12, sau đóng cửa Mỹ):
+ *        POST /api/market/intl-sync (range auto: lần đầu 1y, sau đó 5d).
+ *      - REPROBE_AT (mặc định Chủ nhật 04:00 ICT hằng tuần — B14/T1):
+ *        POST /api/market/reprobe — probe dchart ứng viên các ô ⚪/🟡; mã
+ *        đầu tiên CÓ dữ liệu → tự tạo Instrument + backfill → ô tự sáng.
  *      - AGENT_CYCLE_MINUTES (0=off): chu kỳ phân tích đa agent tự động
  *
  * Frontend kết nối QUA GATEWAY với query XTransformPort=3003:
@@ -39,6 +46,12 @@ const AGENT_CYCLE_MINUTES = envMs("AGENT_CYCLE_MINUTES", 0, 1) / 60_000;
 /** Giờ ICT bắt đầu đồng bộ EOD hằng ngày (15:45 — sau giờ chốt 15:00). */
 const EOD_SYNC_AT = process.env.EOD_SYNC_AT ?? "15:45";
 const EOD_SYNC_DISABLED = process.env.EOD_SYNC_DISABLED === "1";
+/** B12 — giờ ICT sync EOD quốc tế Yahoo hằng ngày (06:15 — sau đóng cửa Mỹ). */
+const INTL_SYNC_AT = process.env.INTL_SYNC_AT ?? "06:15";
+const INTL_SYNC_DISABLED = process.env.INTL_SYNC_DISABLED === "1";
+/** B14 — watcher re-probe ô ⚪/🟡 hằng tuần: "SUN:04:00" (Chủ nhật 04:00 ICT). */
+const REPROBE_AT = process.env.REPROBE_AT ?? "SUN:04:00";
+const REPROBE_DISABLED = process.env.REPROBE_DISABLED === "1";
 
 /** "HH:MM" ICT → phút kể từ nửa đêm ICT (UTC+7). */
 function parseHhMm(s: string): number | null {
@@ -50,12 +63,26 @@ function parseHhMm(s: string): number | null {
   return h * 60 + min;
 }
 const EOD_SYNC_MINUTES = parseHhMm(EOD_SYNC_AT) ?? parseHhMm("15:45")!;
+const INTL_SYNC_MINUTES = parseHhMm(INTL_SYNC_AT) ?? parseHhMm("06:15")!;
 
-function ictNow(): { date: string; minutes: number } {
+/** "SUN:HH:MM" → { dow: 0..6 (0=CN), minutes } — lịch hằng tuần của watcher. */
+function parseWeekly(s: string): { dow: number; minutes: number } | null {
+  const m = /^(\d):(\d{1,2}):(\d{2})$/.exec(s.trim());
+  if (!m) return null;
+  const dow = Number(m[1]);
+  const h = Number(m[2]);
+  const min = Number(m[3]);
+  if (dow > 6 || h > 23 || min > 59) return null;
+  return { dow, minutes: h * 60 + min };
+}
+const REPROBE_SCHEDULE = parseWeekly(REPROBE_AT) ?? parseWeekly("SUN:04:00")!;
+
+function ictNow(): { date: string; minutes: number; dow: number } {
   const now = new Date(Date.now() + 7 * 3_600_000); // ICT = UTC+7
   return {
     date: now.toISOString().slice(0, 10),
     minutes: now.getUTCHours() * 60 + now.getUTCMinutes(),
+    dow: now.getUTCDay(),
   };
 }
 
@@ -71,6 +98,14 @@ const stats = {
   lastEodSyncDate: null as string | null,
   lastEodSyncError: null as string | null,
   eodSyncRuns: 0,
+  lastIntlSyncAt: null as string | null,
+  lastIntlSyncDate: null as string | null,
+  lastIntlSyncError: null as string | null,
+  intlSyncRuns: 0,
+  lastReprobeAt: null as string | null,
+  lastReprobeSunday: null as string | null,
+  lastReprobeError: null as string | null,
+  reprobeRuns: 0,
   lastCycleAt: null as string | null,
   cycles: 0,
   clients: 0,
@@ -85,6 +120,8 @@ const http = createServer((req, res) => {
         service: "market-engine",
         port: PORT,
         eodSyncAt: EOD_SYNC_AT,
+        intlSyncAt: INTL_SYNC_AT,
+        reprobeAt: REPROBE_AT,
         ...stats,
       })
     );
@@ -181,6 +218,50 @@ async function syncEodAndBroadcast(): Promise<void> {
   }
 }
 
+/** B12 — sync EOD quốc tế Yahoo (06:15 ICT hằng ngày): broadcast "intl". */
+async function syncIntlAndBroadcast(): Promise<void> {
+  try {
+    // range auto: lần đầu (chưa có bar) → 1y backfill; sau đó 5d hằng ngày
+    const data = await postJson("/api/market/intl-sync", { range: "auto" });
+    stats.lastIntlSyncAt = new Date().toISOString();
+    stats.intlSyncRuns++;
+    stats.lastIntlSyncError = null;
+    const ict = ictNow();
+    stats.lastIntlSyncDate = ict.date;
+    io.emit("intl", data);
+    const okCount = Array.isArray(data.symbolsOk) ? (data.symbolsOk as unknown[]).length : "?";
+    log(
+      "intl",
+      `sync EOD quốc tế (Yahoo) xong: ${okCount} mã · ${data.barsUpserted ?? 0} bar${data.nullSkipped != null ? ` · ${data.nullSkipped} null-skip` : ""}`
+    );
+  } catch (err) {
+    stats.lastIntlSyncError = err instanceof Error ? err.message : String(err);
+    // Yahoo 429 tạm thời là bình thường — job 06:15 ICT ngày mai tự phục hồi
+    log("intl", `bỏ qua: ${stats.lastIntlSyncError}`);
+  }
+}
+
+/** B14 — watcher re-probe ô ⚪/🟡 (Chủ nhật 04:00 ICT): broadcast "reprobe". */
+async function reprobeAndBroadcast(): Promise<void> {
+  try {
+    const data = await postJson("/api/market/reprobe", {});
+    stats.lastReprobeAt = new Date().toISOString();
+    stats.reprobeRuns++;
+    stats.lastReprobeError = null;
+    const ict = ictNow();
+    stats.lastReprobeSunday = ict.date;
+    io.emit("reprobe", data);
+    const created = Array.isArray(data.created) ? (data.created as string[]) : [];
+    log(
+      "reprobe",
+      `watcher re-probe xong: ${data.probed ?? "?"} ứng viên · tạo mới ${created.length}${created.length ? ` (${created.join(", ")})` : ""} · trống ${Array.isArray(data.empty) ? (data.empty as string[]).length : "?"}`
+    );
+  } catch (err) {
+    stats.lastReprobeError = err instanceof Error ? err.message : String(err);
+    log("reprobe", `bỏ qua: ${stats.lastReprobeError}`);
+  }
+}
+
 async function runAgentCycleAndBroadcast(): Promise<void> {
   try {
     const data = await postJson("/api/agents/run");
@@ -200,11 +281,29 @@ function eodSyncDue(): boolean {
   return ict.minutes >= EOD_SYNC_MINUTES && stats.lastEodSyncDate !== ict.date;
 }
 
+/** B12 — đã qua 06:15 ICT hôm nay và chưa sync quốc tế ngày này → sync. */
+function intlSyncDue(): boolean {
+  if (INTL_SYNC_DISABLED) return false;
+  const ict = ictNow();
+  return ict.minutes >= INTL_SYNC_MINUTES && stats.lastIntlSyncDate !== ict.date;
+}
+
+/** B14 — Chủ nhật, đã qua 04:00 ICT, chưa chạy tuần này → re-probe. */
+function reprobeDue(): boolean {
+  if (REPROBE_DISABLED) return false;
+  const ict = ictNow();
+  return (
+    ict.dow === REPROBE_SCHEDULE.dow &&
+    ict.minutes >= REPROBE_SCHEDULE.minutes &&
+    stats.lastReprobeSunday !== ict.date
+  );
+}
+
 http.listen(PORT, () => {
   log("boot", `market-engine lắng nghe cổng ${PORT} → app ${APP_URL}`);
   log(
     "boot",
-    `lịch: tick ${(TICK_MS / 1000).toFixed(0)}s · news ${(NEWS_MS / 60_000).toFixed(0)}phút · eod-sync ${EOD_SYNC_AT} ICT${EOD_SYNC_DISABLED ? " (TẮT)" : ""} · agent-cycle ${
+    `lịch: tick ${(TICK_MS / 1000).toFixed(0)}s · news ${(NEWS_MS / 60_000).toFixed(0)}phút · eod-sync ${EOD_SYNC_AT} ICT${EOD_SYNC_DISABLED ? " (TẮT)" : ""} · intl-sync ${INTL_SYNC_AT} ICT${INTL_SYNC_DISABLED ? " (TẮT)" : ""} · reprobe ${REPROBE_AT} ICT${REPROBE_DISABLED ? " (TẮT)" : ""} · agent-cycle ${
       AGENT_CYCLE_MINUTES > 0 ? `${AGENT_CYCLE_MINUTES.toFixed(0)}phút` : "TẮT"
     }`
   );
@@ -213,10 +312,15 @@ http.listen(PORT, () => {
   enqueueTick();
   void ingestNewsAndBroadcast();
   void syncEodAndBroadcast();
+  // B12 — quốc tế: chạy luôn lúc boot nếu hôm nay đến lịch (Yahoo 429 tạm
+  // thời thì bỏ qua im lặng — job 06:15 ICT ngày mai tự phục hồi)
+  if (intlSyncDue()) void syncIntlAndBroadcast();
   setInterval(enqueueTick, TICK_MS);
   setInterval(ingestNewsAndBroadcast, NEWS_MS);
   setInterval(() => {
     if (eodSyncDue()) void syncEodAndBroadcast();
+    if (intlSyncDue()) void syncIntlAndBroadcast();
+    if (reprobeDue()) void reprobeAndBroadcast();
   }, 60_000);
   if (AGENT_CYCLE_MINUTES > 0) {
     setInterval(runAgentCycleAndBroadcast, AGENT_CYCLE_MINUTES * 60_000);

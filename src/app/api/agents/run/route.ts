@@ -19,6 +19,7 @@ import { runServiceAgent, type ServiceRunResult } from "@/lib/agent-service-runs
 import { buildEvidenceBundle, type LlmVoteInput } from "@/lib/bayes/evidence";
 import { synthesizeMarketAssessment } from "@/lib/bayes/synthesis";
 import { saveMarketAssessment, attachCycleRunId } from "@/lib/bayes/persist";
+import { maybeAutoEnableConsensus } from "@/lib/consensus";
 import type { CycleAssessmentSummary, MarketAssessmentView } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -227,9 +228,32 @@ function buildBayesPromptBlock(view: MarketAssessmentView): string {
       (s) =>
         `${s.symbol} (pTăng ${fmt(s.pUp)}${s.forecast ? `, dự báo 5 phiên ${s.forecast.expectedPct >= 0 ? "+" : ""}${s.forecast.expectedPct}% · CI ${s.forecast.lowPct}%…${s.forecast.highPct}%` : ""})`
     );
+  // B5 — khối ĐA THỊ TRƯỜNG (1 dòng/segment, gọn — §3.4)
+  const segmentLines = (view.segments ?? [])
+    .filter((s) => s.segment !== "VN-COMPOSITE")
+    .map(
+      (s) =>
+        `- ${s.label}: TĂNG ${fmt(s.pUp)} · GIẢM ${fmt(s.pDown)} · NGANG ${fmt(s.pFlat)} (${s.symbolCount} mã)${s.note ? ` — ${s.note.split(" — ")[1] ?? ""}` : ""}`
+    );
+  // B9 — khối CỔNG ĐỒNG THUẬN 80% (6 cử tri — chairman bắt buộc tôn trọng)
+  const c = view.consensus;
+  const consensusLines = c
+    ? [
+        "",
+        "CỔNG ĐỒNG THUẬN 80% (6 cử tri nghiên cứu — BẮT BUỘC TÔN TRỌNG khi ra tín hiệu):",
+        `- Tally: ${c.tally.map((t) => `${t.agentName} → ${t.direction} (w ${t.weight.toFixed(2)})`).join(" · ")}`,
+        `- Tỉ lệ trọng số số đông: ${(c.ratio * 100).toFixed(1).replace(".", ",")}% → ${c.gateLabel}`,
+        c.gate === "CONSENSUS"
+          ? "- Đạt đồng thuận ≥ 80%: tín hiệu MUA/BÁN được phép đưa ra (nếu posterior đạt stance)."
+          : `- CHƯA đạt đồng thuận 80%: ${c.shadow ? "hiện shadow-mode — hãy tự giác chỉ đưa tín hiệu GIỮ vì cổng sẽ chặn cứng khi bật enforcement" : "enforcement ĐANG BẬT — tín hiệu MUA/BÁN sẽ bị hệ thống hạ về GIỮ"}.`,
+        "- VETO Ủy ban Kiểm soát vẫn TUYỆT ĐỐI — vượt mọi cấp cổng.",
+      ]
+    : [];
   return [
     "BỘ TỔNG HỢP BAYES (con số định lượng — hãy nhất quán với các con số này khi ra tín hiệu):",
-    `- Xác suất thị trường 5 phiên tới: TĂNG ${fmt(view.pUp)} · GIẢM ${fmt(view.pDown)} · ĐI NGANG ${fmt(view.pFlat)} → hướng ${view.marketDirection}`,
+    `- Xác suất thị trường 5 phiên tới (COMPOSITE VN — hợp thành theo trọng số ADTV thật + 0,05/index): TĂNG ${fmt(view.pUp)} · GIẢM ${fmt(view.pDown)} · ĐI NGANG ${fmt(view.pFlat)} → hướng ${view.marketDirection}`,
+    ...(segmentLines.length > 1 ? ["", "ĐA THỊ TRƯỜNG (posterior từng phân đoạn):", ...segmentLines] : []),
+    ...consensusLines,
     `- Độ tin cậy mô hình: ${fmt(view.confidence)} · Mức bất đồng agents: ${fmt(view.disagreement)}`,
     `- Driver mạnh nhất: ${driverLines.length ? driverLines.join(" ; ") : "(không có)"}`,
     `- Top cơ hội/rủi ro theo |pTăng − pGiảm|: ${topSymbols.length ? topSymbols.join(" ; ") : "(không có)"}`,
@@ -613,6 +637,21 @@ export async function POST() {
       });
       const draft = synthesizeMarketAssessment(bundle);
       bayesView = await saveMarketAssessment(bundle, draft, { source: "cycle" });
+      // B9 — shadow log "đã-sẽ-chặn" + auto-enable enforcement sau ≥10 chu kỳ
+      // shadow (user duyệt trước + tái xác nhận dải 50–79,9% = HOLD cứng — #38)
+      if (bayesView.consensus) {
+        if (bayesView.consensus.wouldBlock) {
+          console.log(
+            `[consensus] shadow: ĐÃ-SẼ-CHẶN — gate ${bayesView.consensus.gate} · ratio ${(bayesView.consensus.ratio * 100).toFixed(1)}% · ${bayesView.consensus.present}/6 cử tri — tín hiệu mới sẽ bị ép GIỮ khi bật enforcement`
+          );
+        }
+        try {
+          const autoRes = await maybeAutoEnableConsensus();
+          if (autoRes.reason) console.log(`[consensus] ${autoRes.reason}`);
+        } catch {
+          // AppSetting lỗi → giữ shadow, không làm hỏng chu kỳ
+        }
+      }
       assessmentSummary = {
         id: bayesView.id,
         pUp: bayesView.pUp,
@@ -824,6 +863,11 @@ export async function POST() {
           targetPrice: sig.direction === "HOLD" ? null : sig.targetPrice,
           stopLoss: sig.direction === "BUY" ? sig.stopLoss : null,
           takeProfit: sig.direction === "BUY" ? sig.takeProfit : null,
+          // B9 — SNAPSHOT cổng đồng thuận lúc Chủ tịch SINH tín hiệu: gate bind
+          // theo assessment TẠO RA tín hiệu — convert ở chu kỳ sau KHÔNG bị đánh
+          // giá lại bằng consensus mới hơn (ổn định + kiểm chứng theo tín hiệu)
+          consensusGate: bayesView?.consensus?.gate ?? null,
+          consensusRatio: bayesView?.consensus?.ratio ?? null,
           expiresAt,
           status: "ACTIVE", // chờ phê duyệt của trader (mặc định schema)
         },

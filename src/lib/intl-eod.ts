@@ -1,0 +1,493 @@
+/**
+ * src/lib/intl-eod.ts — ĐỒNG BỘ EOD QUỐC TẾ (US/HK) TỪ Yahoo Finance v8 chart
+ * (Bước 12 — MARKET_EXPANSION_BLUEPRINT §3.1 adapter `yahoo-intl`, v1.1).
+ *
+ * Nguồn: GET {YAHOO_BASE}/v8/finance/chart/{symbol}?range=1y&interval=1d&events=div,split
+ *        → JSON { chart: { result: [ { timestamp[], indicators: { quote[0].{
+ *          open, high, low, close, volume }, adjclose[0].adjclose[] } } ],
+ *          error? } } (probe 2026-10-07: HTTP 200 CÓ dữ liệu khi có header
+ *          User-Agent — thiếu UA → HTTP 429).
+ *        → GIÁ TRẢ VỀ ĐƠN VỊ THÔ NGUỒN: USD/HKD (AAPL 231.4) · index điểm thô
+ *          (^HSI ~24.000) — KHÔNG biến đổi ở đây, giao cho toRealBars theo
+ *          UnitSpec (§3.2): STOCK/ETF QT → cents ×100 · INDEX QT → điểm ×100
+ *          (T12.3).
+ *
+ * Đặc thù nguồn (v1.1 — vá review 37-PATCH):
+ *   - UA header BẮT BUỘC · throttle 1.200ms/request · retry 429/5xx/lỗi mạng
+ *     tối đa 3 lần backoff 5s → 15s → 45s (T12.2) · 4xx khác → YahooConfigError
+ *     ngay (endpoint đổi hợp đồng — KHÔNG retry mù).
+ *   - §B12 v1.1 CHUỘC ADJCLOSE: dùng `indicators.adjclose[0].adjclose[]` làm giá
+ *     đóng (đã adjust split/cổ tức — chuỗi đặc trưng không gãy khi tách cổ
+ *     phiếu); fallback `close[]` khi adjclose thiếu (hoặc toàn null/lệch độ dài);
+ *     cờ adjcloseUsed=true/false báo outcome dùng nguồn nào (T12.6).
+ *   - T12.5 NULL-SKIP: Yahoo trả null rải rác trong open/high/low/close/
+ *     adjclose/volume (index càng hay gặp) — DỌC SẠCH THEO CHỈ MỰC TRƯỚC khi
+ *     vào toRealBars (nó không tự bắt NaN giá): chỉ giữ dòng có timestamp > 0
+ *     và o/h/l/c(nguồn đã chọn)/v là số hữu hạn; dòng null bị LOẠI + đếm
+ *     nullSkipped minh bạch. T7/CN, ngày tương lai, cận đơn vị, clamp INT4
+ *     volume vẫn để toRealBars lo (tái dùng 100% validator eod-sync).
+ *
+ * Đơn vị & neo Quote: resolveUnitSpec/toRealBars/anchorQuoteToRealEod TÁI DÙNG
+ * từ eod-sync.ts (B2 export public) — index/quốc tế trần/sàn = null (T2.3).
+ *
+ * Dùng bởi: POST /api/market/intl-sync (manual) · market-engine job 06:15 ICT
+ * (orchestrator thêm riêng). EOD 1 lần/ngày là đủ (range=1y backfill lần đầu).
+ */
+
+import { db } from "@/lib/db";
+import { markSource } from "@/lib/sources";
+import {
+  resolveUnitSpec,
+  toRealBars,
+  anchorQuoteToRealEod,
+} from "@/lib/eod-sync";
+
+export const YAHOO_BASE =
+  process.env.YAHOO_BASE_URL ?? "https://query1.finance.yahoo.com";
+
+/** Khoảng cách tối thiểu giữa 2 request Yahoo (tôn trọng nguồn công cộng). */
+const REQUEST_INTERVAL_MS = 1_200;
+
+/** UA bắt buộc — Yahoo chối request trần trụi bằng 429 (probe §2 blueprint). */
+const USER_AGENT =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+/** Backoff retry 429/5xx/mạng: 5s → 15s → 45s (tối đa 3 lần retry — T12.2). */
+const RETRY_BACKOFF_MS = [5_000, 15_000, 45_000];
+
+/** Whitelist range Yahoo cho phép sync (B12 — default "1y" backfill lần đầu). */
+export const INTL_RANGES: readonly string[] = [
+  "5d",
+  "1mo",
+  "3mo",
+  "6mo",
+  "1y",
+  "2y",
+];
+export const DEFAULT_INTL_RANGE = "1y";
+
+/** Số request tối đa trong 1 chu kỳ sync (universe B12 = 14 mã; dư room cho
+ * watcher mở rộng — vượt ngưỡng này cần chia lượt, giữ ngân sách maxDuration). */
+const MAX_SYMBOLS_PER_SYNC = 40;
+
+/** DataSourceStatus key riêng cho adapter yahoo-intl (không đè "eod-history"). */
+const INTL_SOURCE_KEY = "intl-eod";
+const INTL_SOURCE_LABEL = "EOD quốc tế (Yahoo Finance)";
+
+export interface YahooChart {
+  t: number[];
+  o: number[];
+  h: number[];
+  l: number[];
+  c: number[];
+  v: number[];
+  /** true = c lấy từ adjclose[] (đã adjust split/cổ tức); false = close[]. */
+  adjcloseUsed: boolean;
+}
+
+export type FetchYahooResult =
+  | { empty: true }
+  | { empty: false; bars: YahooChart; nullSkipped: number };
+
+/** Response đổi hình dạng so với golden signature — cần rà soát nguồn. */
+export class YahooConfigError extends Error {}
+
+/** Lỗi mạng/HTTP sau khi retry hết lượt (429/5xx kéo dài, timeout). */
+export class YahooNetworkError extends Error {}
+
+let lastRequestAt = 0;
+
+async function throttle(): Promise<void> {
+  const wait = REQUEST_INTERVAL_MS - (Date.now() - lastRequestAt);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastRequestAt = Date.now();
+}
+
+function isFin(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+/** Node `chart.result[0]` thô sau JSON.parse — mọi trường unknown (Yahoo là
+ * nguồn bên thứ 3, chịu biến thể; chỉ ép kiểu khi đã kiểm tra bằng tay). */
+export interface RawYahooChartNode {
+  timestamp?: unknown;
+  indicators?: {
+    quote?: Array<{
+      open?: unknown;
+      high?: unknown;
+      low?: unknown;
+      close?: unknown;
+      volume?: unknown;
+    } | null> | null;
+    adjclose?: Array<{ adjclose?: unknown } | null> | null;
+  } | null;
+}
+
+export interface CleanedYahooSeries extends YahooChart {
+  /** T12.5 — số dòng bị LOẠI vì null/NaN trong timestamp/o/h/l/c/v. */
+  nullSkipped: number;
+}
+
+/**
+ * DỌC SẠCH NULL (T12.5) — lọc theo chỉ mục i: chỉ giữ dòng có timestamp là số
+ * > 0 và o/h/l/c(nguồn ĐÃ CHỌN adjclose-hoặc-close)/v là SỐ HỮU HẠN; dòng
+ * null/NaN bị LOẠI + đếm nullSkipped (KHÔNG để NaN lọt vào toRealBars — nó
+ * không tự bắt NaN giá). Xuất public để script verify feed mảng thủ công
+ * (bar null → đếm đúng).
+ *
+ * Quy tắc chọn nguồn giá đóng (§B12 v1.1): adjclose[] khi là mảng, đúng độ dài
+ * timestamp VÀ có ít nhất 1 giá trị hữu hạn — ngược lại fallback close[]. Khi
+ * đã chọn adjclose thì dòng adjclose null bị skip (dù close còn giá) — trộn 2
+ * hệ giá (adjust/thô) trong cùng chuỗi sẽ sinh bước nhảy giả khi split.
+ *
+ * Trả null khi không còn dòng nào dùng được (mã không có dữ liệu — hợp lệ);
+ * throw YahooConfigError khi cấu trúc response sai hợp đồng (schema drift).
+ */
+export function cleanYahooSeries(
+  node: RawYahooChartNode
+): CleanedYahooSeries | null {
+  const ts = node.timestamp;
+  if (!Array.isArray(ts)) {
+    throw new YahooConfigError(
+      "chart.result[0] thiếu mảng timestamp — schema drift"
+    );
+  }
+  if (ts.length === 0) return null; // mã không có dữ liệu — hợp lệ
+  const q = node.indicators?.quote?.[0];
+  if (!q || typeof q !== "object") {
+    throw new YahooConfigError("thiếu indicators.quote[0] — schema drift");
+  }
+  const oArr = Array.isArray(q.open) ? (q.open as unknown[]) : null;
+  const hArr = Array.isArray(q.high) ? (q.high as unknown[]) : null;
+  const lArr = Array.isArray(q.low) ? (q.low as unknown[]) : null;
+  const cArr = Array.isArray(q.close) ? (q.close as unknown[]) : null;
+  const vArr = Array.isArray(q.volume) ? (q.volume as unknown[]) : null;
+  if (!oArr || !hArr || !lArr || !cArr || !vArr) {
+    throw new YahooConfigError(
+      "indicators.quote[0] thiếu một trong o/h/l/c/v — schema drift"
+    );
+  }
+
+  // §B12 v1.1 — chọn nguồn giá đóng: adjclose ưu tiên, fallback close
+  const adj = node.indicators?.adjclose?.[0]?.adjclose;
+  const adjOk =
+    Array.isArray(adj) && adj.length === ts.length && adj.some((x) => isFin(x));
+  const closeSrc: unknown[] = adjOk ? (adj as unknown[]) : cArr;
+  const adjcloseUsed = adjOk;
+
+  const t: number[] = [];
+  const o: number[] = [];
+  const h: number[] = [];
+  const l: number[] = [];
+  const c: number[] = [];
+  const v: number[] = [];
+  let nullSkipped = 0;
+
+  for (let i = 0; i < ts.length; i++) {
+    const tRaw = ts[i];
+    const oRaw = oArr[i];
+    const hRaw = hArr[i];
+    const lRaw = lArr[i];
+    const cRaw = closeSrc[i];
+    const vRaw = vArr[i];
+    if (
+      !isFin(tRaw) ||
+      tRaw <= 0 ||
+      !isFin(oRaw) ||
+      !isFin(hRaw) ||
+      !isFin(lRaw) ||
+      !isFin(cRaw) ||
+      !isFin(vRaw)
+    ) {
+      nullSkipped++;
+      continue;
+    }
+    t.push(tRaw);
+    o.push(oRaw);
+    h.push(hRaw);
+    l.push(lRaw);
+    c.push(cRaw);
+    v.push(vRaw);
+  }
+
+  if (t.length === 0) return null;
+  return { t, o, h, l, c, v, adjcloseUsed, nullSkipped };
+}
+
+interface YahooChartEnvelope {
+  result?: unknown;
+  error?: unknown;
+}
+
+/**
+ * GET /v8/finance/chart/{symbol} — OHLCV EOD + adjclose (đã adjust split/cổ
+ * tức). Retry 429/5xx/lỗi mạng tối đa 3 lần backoff 5s → 15s → 45s (mỗi lần
+ * retry log rõ — T12.2); 4xx khác throw YahooConfigError ngay (không retry mù).
+ * Body rỗng / `chart.error` present / result rỗng / lọc null xong 0 dòng →
+ * `{ empty: true }` (mã không có dữ liệu — hợp lệ, không phải lỗi).
+ */
+export async function fetchYahooChart(p: {
+  symbol: string;
+  range: string;
+  timeoutMs?: number;
+}): Promise<FetchYahooResult> {
+  const url =
+    `${YAHOO_BASE}/v8/finance/chart/${encodeURIComponent(p.symbol)}` +
+    `?range=${encodeURIComponent(p.range)}&interval=1d&events=div,split`;
+
+  let attempt = 0; // 0 = lần đầu · 1..3 = retry (backoff RETRY_BACKOFF_MS)
+  for (;;) {
+    await throttle();
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        signal: AbortSignal.timeout(p.timeoutMs ?? 20_000),
+        headers: {
+          // UA BẮT BUỘC — thiếu User-Agent Yahoo trả 429 (probe §2)
+          "user-agent": USER_AGENT,
+          accept: "application/json,text/plain,*/*",
+        },
+      });
+    } catch (err) {
+      if (attempt >= RETRY_BACKOFF_MS.length) {
+        throw new YahooNetworkError(
+          `[${p.symbol}] Yahoo timeout/mạng sau ${attempt + 1} lần thử: ${String(err)}`
+        );
+      }
+      const wait = RETRY_BACKOFF_MS[attempt];
+      console.warn(
+        `[intl-eod] ${p.symbol} lỗi mạng — retry ${attempt + 1}/${RETRY_BACKOFF_MS.length} sau ${wait}ms (T12.2)`
+      );
+      await new Promise((r) => setTimeout(r, wait));
+      attempt++;
+      continue;
+    }
+
+    if (res.ok) {
+      const text = await res.text();
+      if (!text || !text.trim()) return { empty: true }; // mã không có dữ liệu
+      let body: { chart?: YahooChartEnvelope };
+      try {
+        body = JSON.parse(text) as { chart?: YahooChartEnvelope };
+      } catch {
+        throw new YahooConfigError(
+          `[${p.symbol}] Yahoo 200 nhưng body không phải JSON: ${text.slice(0, 120)}`
+        );
+      }
+      const chart = body.chart;
+      if (!chart || typeof chart !== "object") {
+        throw new YahooConfigError(`[${p.symbol}] thiếu node chart — schema drift`);
+      }
+      // chart.error present → mã delisted/không tồn tại — hợp lệ, không lỗi
+      if (chart.error) return { empty: true };
+      const result = chart.result;
+      if (!Array.isArray(result) || result.length === 0) return { empty: true };
+      const node = result[0];
+      if (!node || typeof node !== "object") return { empty: true };
+      const cleaned = cleanYahooSeries(node as RawYahooChartNode);
+      if (!cleaned) return { empty: true };
+      const { nullSkipped, ...bars } = cleaned;
+      return { empty: false, bars, nullSkipped };
+    }
+
+    if (res.status === 429 || res.status >= 500) {
+      if (attempt >= RETRY_BACKOFF_MS.length) {
+        throw new YahooNetworkError(
+          `[${p.symbol}] Yahoo HTTP ${res.status} sau ${attempt + 1} lần thử`
+        );
+      }
+      const wait = RETRY_BACKOFF_MS[attempt];
+      console.warn(
+        `[intl-eod] ${p.symbol} HTTP ${res.status} — retry ${attempt + 1}/${RETRY_BACKOFF_MS.length} sau ${wait}ms (T12.2)`
+      );
+      await new Promise((r) => setTimeout(r, wait));
+      attempt++;
+      continue;
+    }
+
+    // 4xx khác — khả năng endpoint đã đổi hợp đồng: KHÔNG retry
+    const errText = await res.text().catch(() => "");
+    throw new YahooConfigError(
+      `[${p.symbol}] Yahoo HTTP ${res.status} bất thường: ${errText.slice(0, 160)}`
+    );
+  }
+}
+
+export interface IntlSyncOutcome {
+  ok: boolean;
+  range: string;
+  symbolsOk: string[];
+  symbolsEmpty: string[];
+  symbolsFailed: { symbol: string; error: string }[];
+  barsUpserted: number;
+  barsSkipped: number;
+  /** T12.5 — tổng dòng bị LOẠI vì null/NaN ở adapter (đếm minh bạch). */
+  nullSkipped: number;
+  /** §B12 v1.1 — các mã dùng chuỗi adjclose (đã adjust) làm giá đóng. */
+  adjcloseUsed: string[];
+  lastTradeDate: string | null;
+  durationMs: number;
+  error?: string;
+}
+
+/**
+ * Đảm bảo dòng DataSourceStatus key "intl-eod" tồn tại với nhãn tiếng Việt
+ * đúng B12. SOURCE_DEFS thuộc sources.ts (orchestrator quản — subagent này
+ * không được sửa), mà markSource lấy label từ SOURCE_DEFS nên phải tạo nhãn
+ * trước; markSource sau đó chỉ lo phần trạng thái (mode/lastSuccess/meta).
+ */
+async function ensureIntlSourceRow(): Promise<void> {
+  await db.dataSourceStatus.upsert({
+    where: { key: INTL_SOURCE_KEY },
+    create: { key: INTL_SOURCE_KEY, label: INTL_SOURCE_LABEL, mode: "fallback" },
+    update: { label: INTL_SOURCE_LABEL },
+  });
+}
+
+/**
+ * Đồng bộ EOD quốc tế cho toàn bộ instrument US/HK đang hoạt động (mặc định
+ * range "1y" — backfill lần đầu; các ngày sau dùng "5d" là đủ). Mỗi mã:
+ * fetchYahooChart (adjclose ưu tiên) → toRealBars theo UnitSpec (cents ×100 /
+ * index điểm ×100) → upsert Bar idempotent @@unique([instrumentId, date]) →
+ * neo Quote (index/quốc tế KHÔNG trần/sàn). Lỗi 1 mã không làm hỏng cả lượt
+ * (try/catch từng mã, gom symbolsFailed) — đối xứng syncEodFromDchart.
+ *
+ * Circuit-breaker nhẹ: ≥3 mã LIÊN TIẾP lỗi (429 kéo dài/endpoint chết) → ngừng
+ * sớm để giữ ngân sách maxDuration 300s của route, phần mã còn lại được ghi
+ * rõ "bỏ qua" trong symbolsFailed (không âm thầm nuốt).
+ */
+export async function syncIntlEod(opts?: {
+  range?: string;
+}): Promise<IntlSyncOutcome> {
+  const startedAt = Date.now();
+  const range = opts?.range ?? DEFAULT_INTL_RANGE;
+  if (!INTL_RANGES.includes(range)) {
+    throw new Error(`range "${range}" không hợp lệ (${INTL_RANGES.join(" | ")})`);
+  }
+
+  const instruments = await db.instrument.findMany({
+    where: { isActive: true, market: { in: ["US", "HK"] } },
+    select: { id: true, symbol: true, market: true, type: true },
+    orderBy: { symbol: "asc" },
+    take: MAX_SYMBOLS_PER_SYNC,
+  });
+
+  const symbolsOk: string[] = [];
+  const symbolsEmpty: string[] = [];
+  const symbolsFailed: { symbol: string; error: string }[] = [];
+  const adjcloseUsed: string[] = [];
+  let barsUpserted = 0;
+  let barsSkipped = 0;
+  let nullSkipped = 0;
+  let lastTradeDate: string | null = null;
+  let failStreak = 0;
+
+  for (const inst of instruments) {
+    if (failStreak >= 3) {
+      symbolsFailed.push({
+        symbol: inst.symbol,
+        error: "circuit-breaker: nguồn lỗi liên tục, bỏ qua ở lượt này",
+      });
+      continue;
+    }
+    try {
+      const res = await fetchYahooChart({ symbol: inst.symbol, range });
+      if (res.empty) {
+        symbolsEmpty.push(inst.symbol);
+        failStreak = 0;
+        continue;
+      }
+      nullSkipped += res.nullSkipped;
+      if (res.bars.adjcloseUsed) adjcloseUsed.push(inst.symbol);
+
+      const unit = resolveUnitSpec(inst.market, inst.type);
+      const { bars, skipped } = toRealBars(inst.symbol, res.bars, unit);
+      barsSkipped += skipped;
+      if (bars.length === 0) {
+        symbolsEmpty.push(inst.symbol);
+        failStreak = 0;
+        continue;
+      }
+      for (const b of bars) {
+        await db.bar.upsert({
+          where: { instrumentId_date: { instrumentId: inst.id, date: b.date } },
+          create: {
+            instrumentId: inst.id,
+            date: b.date,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            value: b.value,
+          },
+          update: {
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            value: b.value,
+          },
+        });
+      }
+      barsUpserted += bars.length;
+      await anchorQuoteToRealEod(inst.id, bars, unit);
+      symbolsOk.push(inst.symbol);
+      failStreak = 0;
+      const d = bars[bars.length - 1].date.toISOString().slice(0, 10);
+      if (d > (lastTradeDate ?? "")) lastTradeDate = d;
+    } catch (err) {
+      symbolsFailed.push({
+        symbol: inst.symbol,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      failStreak++;
+    }
+  }
+
+  const outcome: IntlSyncOutcome = {
+    // Universe US/HK chưa seed (0 instrument) → vẫn ok=true với 0 mã (route
+    // sẽ kèm note hướng dẫn chạy expand-universe --intl trước)
+    ok:
+      instruments.length === 0 ||
+      (symbolsOk.length > 0 && symbolsFailed.length < instruments.length),
+    range,
+    symbolsOk,
+    symbolsEmpty,
+    symbolsFailed,
+    barsUpserted,
+    barsSkipped,
+    nullSkipped,
+    adjcloseUsed,
+    lastTradeDate,
+    durationMs: Date.now() - startedAt,
+  };
+
+  await ensureIntlSourceRow();
+  await markSource(INTL_SOURCE_KEY, {
+    // "stale" không phải SourceMode hợp lệ của sources.ts — "fallback" chính
+    // là chế độ "phục vụ cache + đánh dấu stale" (staleOf coi fallback = stale)
+    mode: outcome.ok ? "real" : "fallback",
+    success: outcome.ok,
+    lastError: outcome.ok
+      ? null
+      : `sync quốc tế: ${symbolsFailed.length}/${instruments.length} mã lỗi`,
+    meta: {
+      source: YAHOO_BASE,
+      provider: "Yahoo Finance (v8 chart public)",
+      range,
+      symbolsOk: symbolsOk.length,
+      symbolsEmpty: symbolsEmpty.length,
+      symbolsFailed: symbolsFailed.length,
+      barsUpserted,
+      barsSkipped,
+      nullSkipped,
+      adjcloseUsed: adjcloseUsed.length,
+      lastTradeDate,
+      note: "Bar EOD quốc tế — adjclose ưu tiên (adjust split/cổ tức), cents ×100 / index điểm ×100 (§3.2)",
+    },
+  });
+
+  return outcome;
+}

@@ -1,7 +1,7 @@
 # The Trader — Data Dictionary & Database Schema
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.5.0 · **Updated:** 2026-10-06
+> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.6.0 · **Updated:** 2026-10-07
 > **Source of truth:** [`prisma/schema.prisma`](../prisma/schema.prisma) — tài liệu này mô tả đúng schema đã implement. Mọi thay đổi schema phải được phản ánh lại đây.
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface) · [DATA_SOURCES.md](./DATA_SOURCES.md) (field mapping theo nguồn dữ liệu)
 
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Tổng cộng **19 model**.
+The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Phiên #34 thêm cấu hình runtime (`AppSetting`) + nhận định Bayes (`MarketAssessment`); phiên #35 thêm 3 bảng học máy (`MlModel` · `BanditArm` · `BanditEvent`); **phiên #38 (MARKET_EXPANSION_BLUEPRINT) thêm dữ liệu tài chính cơ bản (`FinancialFundamental`) + mở rộng `Market` (US · HK) + `Instrument.currency` + `Signal.consensusGate/consensusRatio`**. Tổng cộng **25 model**.
 
 Schema được thiết kế theo chuẩn **financial-grade**:
 
@@ -19,7 +19,7 @@ Schema được thiết kế theo chuẩn **financial-grade**:
 - **Integer money** — toàn bộ giá trị tiền tệ VND là số nguyên (xem §3), tránh sai số dấu chấm động vốn là yêu cầu bắt buộc trong hệ thống tài chính.
 - **Unique + composite indexes** phục vụ đúng truy vấn của dashboard và ràng buộc toàn vẹn dữ liệu thị trường (dedup OHLCV theo `(instrumentId, date)`).
 
-**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 19 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
+**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 25 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
 
 ---
 
@@ -114,6 +114,7 @@ erDiagram
 
     INSTRUMENT ||--o{ QUOTE : "báo giá"
     INSTRUMENT ||--o{ BAR : "chuỗi OHLCV"
+    INSTRUMENT ||--o{ FINANCIAL_FUNDAMENTAL : "báo cáo tài chính (phiên #38)"
     INSTRUMENT ||--o{ SIGNAL : "phát sinh tín hiệu"
     INSTRUMENT ||--o{ POSITION : "vị thế"
     INSTRUMENT ||--o{ ORDER : "lệnh"
@@ -178,6 +179,21 @@ erDiagram
         int close
         int volume
         bigint value
+    }
+    FINANCIAL_FUNDAMENTAL {
+        string id PK
+        string instrumentId FK
+        string period "Q1..Q4 | FY"
+        int year
+        bigint revenue "VND nguyên"
+        bigint netProfit "VND nguyên"
+        float eps "VND"
+        float bvps "VND"
+        float roe "tỷ lệ thô"
+        float roa "tỷ lệ thô"
+        float pe "tỷ lệ thô"
+        float pb "tỷ lệ thô"
+        string mode "real | pending"
     }
     AGENT {
         string id PK
@@ -304,6 +320,8 @@ erDiagram
 > Bảng đầy đủ của từng model (mọi field) nằm ở §6; ERD trên chỉ nêu field chủ chốt.
 >
 > **`NewsItem` và `DataSourceStatus` là 2 model standalone** — không có FK tới model khác: tin tức RSS chỉ mang `url` + nguồn (không gắn `instrumentId` vì một bài tin thường chạm nhiều mã); trạng thái nguồn là registry singleton-theo-`key` cho stale marking.
+>
+> **Các model mới không nằm trong ERD cũ (phiên #34–#38, chi tiết §6.20–§6.25):** `AppSetting` (key-value JSON runtime, standalone) · `MarketAssessment` (nhận định Bayes, standalone) · `MlModel` (trọng số mô hình học máy, standalone) · `BanditArm` (Thompson sampling theo `agentCode`, standalone) · `BanditEvent` (phiếu bầu theo `assessmentId`×`agentCode`, tham chiếu mềm không FK) — chỉ `FinancialFundamental` nối FK vào `Instrument` (đã thêm ở ERD trên).
 
 ---
 
@@ -363,10 +381,11 @@ Quy ước cột: **Constraints/Default** ghi ràng buộc Prisma; **Mô tả** 
 | Field | Type | Constraints / Default | Mô tả |
 |---|---|---|---|
 | `id` | String | PK, `cuid()` | Định danh duy nhất |
-| `symbol` | String | **Unique** | Mã ticker (VCB, FPT, VHM…) |
+| `symbol` | String | **Unique** | Mã ticker (VCB, FPT, VHM…; quốc tế giữ nguyên ký hiệu Yahoo — AAPL, 0700.HK, ^GSPC) |
 | `name` | String | — | Tên đầy đủ công ty |
-| `market` | Enum `Market` | — | Sàn niêm yết: HOSE / HNX / UPCOM |
+| `market` | Enum `Market` | — | Sàn niêm yết: HOSE / HNX / UPCOM / US / HK (US + HK thêm ở phiên #38 — dữ liệu Yahoo Finance) |
 | `type` | Enum `InstrumentType` | default `STOCK` | Loại tài sản: cổ phiếu, ETF, quỹ, trái phiếu, chỉ số |
+| `currency` | String | nullable, default `"VND"` | **Phiên #38** — VND \| USD \| HKD (định dạng hiển thị; đơn vị giá gốc tra theo bảng **UnitSpec** (market×type) trong `src/lib/eod-sync.ts` — single source of truth, không có cột đơn vị riêng) |
 | `sector` | String | nullable | Ngành (Ngân hàng, Bất động sản, Công nghệ…) — dùng cho risk sector-weight |
 | `listingDate` | DateTime | nullable | Ngày niêm yết |
 | `outstandingShares` | BigInt | nullable | Số cổ phiếu lưu hành — tính vốn hóa |
@@ -374,7 +393,7 @@ Quy ước cột: **Constraints/Default** ghi ràng buộc Prisma; **Mô tả** 
 | `deletedAt` | DateTime | nullable | Soft delete |
 | `createdAt` / `updatedAt` | DateTime | `now()` / `@updatedAt` | Audit |
 
-**Relations:** `quotes`, `bars`, `signals`, `watchlistItems`, `positions`, `orders`, `trades` (đều 1-n, Cascade).
+**Relations:** `quotes`, `bars`, `signals`, `watchlistItems`, `positions`, `orders`, `trades`, `fundamentals` (đều 1-n, Cascade).
 
 **Indexes/constraints:** unique `symbol`; `@@index([market])` (lọc theo sàn); `@@index([sector])` (phân tích tỷ trọng ngành cho Risk Manager).
 
@@ -528,6 +547,8 @@ Bản snapshot giá tại một thời điểm — thiết kế cho feed tick/sn
 | `stopLoss` | Int | nullable | Giá cắt lỗ (VND) |
 | `takeProfit` | Int | nullable | Giá chốt lời (VND) |
 | `agentId` | String | nullable, FK → `Agent.id`, **SetNull** | Agent gốc — null nếu tổng hợp/hệ thống |
+| `consensusGate` | String | nullable | **Phiên #38 (B9)** — snapshot cổng đồng thuận **lúc Chủ tịch sinh tín hiệu** (gate bind theo assessment tạo ra tín hiệu — convert chu kỳ sau KHÔNG bị đánh giá lại): `CONSENSUS` \| `WEAK_MAJORITY` \| `NO_CONSENSUS`; null = chưa có cổng |
+| `consensusRatio` | Float | nullable | **Phiên #38 (B9)** — tỉ lệ trọng số của phe số đông tại snapshot (0..1, để audit + hiển thị; `signal-execution.ts` chặn convert khi `consensus.enforce=true` mà gate ≠ CONSENSUS) |
 | `status` | String | default `"ACTIVE"` | `ACTIVE` \| `ACTED` \| `REJECTED` \| `EXPIRED` — vòng đời phê duyệt của trader (Giai đoạn 3 §4.1); chu kỳ agent sinh signal → `ACTIVE` chờ duyệt |
 | `expiresAt` | DateTime | nullable | Hạn hiệu lực tín hiệu (mặc định +3 ngày) |
 | `actedAt` | DateTime | nullable | **Thời điểm được chuyển thành lệnh** — đánh dấu signal đã consumed (`status=ACTED`) |
@@ -719,9 +740,9 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 | Field | Type | Constraints / Default | Mô tả |
 |---|---|---|---|
 | `id` | String | PK, `cuid()` | Định danh duy nhất |
-| `key` | String | **Unique** | Khóa nguồn: `market-quotes` \| `news` \| `foreign-flows` \| `trading` |
+| `key` | String | **Unique** | Khóa nguồn: `eod-history` \| `market-quotes` \| `news` \| `foreign-flows` \| `trading` \| `intl-eod` \| `fundamentals` (2 nguồn cuối thêm ở phiên #38 — đảm bảo nhãn bởi adapter riêng `intl-eod.ts`/`fundamentals.ts`) |
 | `label` | String | — | Nhãn hiển thị tiếng Việt trên footer dashboard (VD: "Bảng giá VN30") |
-| `mode` | String | — | Chế độ nguồn hiện tại: `live` (nguồn ngoài thật) \| `simulated` (mô phỏng có khai báo) \| `fallback` (đang phục vụ cache) \| `paper` (lệnh giấy) |
+| `mode` | String | — | Chế độ nguồn hiện tại: `live` (nguồn ngoài thật) \| `real` (EOD thật) \| `simulated` (mô phỏng có khai báo) \| `fallback` (đang phục vụ cache) \| `paper` (lệnh giấy) \| `pending` (pipeline chờ egress — `fundamentals`) |
 | `lastSuccessAt` | DateTime | nullable | Lần thành công cuối — tính tuổi dữ liệu (`ageMinutes`) và cờ `stale` |
 | `lastError` | String | nullable | Thông báo lỗi gần nhất của nguồn (hiển thị khi stale) |
 | `meta` | String | nullable | JSON mở rộng: `providers`, `counts`, chi tiết engine |
@@ -734,19 +755,124 @@ Registry **singleton-theo-`key`**: mỗi nguồn dữ liệu của hệ thống 
 
 **Quy tắc stale (encode ở `src/lib/sources.ts`, không phải DB):** `mode="fallback"` → luôn stale; `mode="live"` mà `lastSuccessAt` quá 30 phút → stale; `simulated`/`paper` → không stale (đã khai báo mô phỏng). Nguồn stale quá 4 tiếng → `escalateStaleSources()` tạo `RiskAlert` WARNING `DATA_SOURCE_STALE` (dedupe 24h).
 
-**Retention:** ghi đè liên tục — bảng luôn ổn định ở số dòng bằng số nguồn (4 dòng hiện tại).
+**Retention:** ghi đè liên tục — bảng luôn ổn định ở số dòng bằng số nguồn (7 dòng hiện tại: 5 nguồn `SOURCE_DEFS` của `sources.ts` + `intl-eod` + `fundamentals`).
+
+### 6.20 `AppSetting` — Cấu hình runtime key-value (phiên #34)
+
+Bảng cấu hình **đổi được không cần restart** (mode dữ liệu runtime ghi đè env — [TECHNICAL_BLUEPRINT.md §6.5](./TECHNICAL_BLUEPRINT.md)); secret VNDIRECT lưu ở đây và **mask tại API boundary** (4 ký tự đầu + "····") trước khi xuống client.
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `key` | String | **Unique** | `vndirect` \| `market-data` (\| `consensus` — tự sinh khi đủ 10 chu kỳ shadow, phiên #38 B9) |
+| `value` | String | — | JSON payload (creds mask · `{mode, realtimeOk, lastRealtimeAt}` · `{enforce, autoEnableAfter}`) |
+| `createdAt` / `updatedAt` | DateTime | `now()` / `@updatedAt` | Audit |
+
+**Relations:** standalone. **Indexes:** unique `key`. **Retention:** ghi đè theo key (singleton).
+
+### 6.21 `MarketAssessment` — Nhận định Bộ tổng hợp Bayes (phiên #34)
+
+Đầu ra persisted của Đợt D ([TECHNICAL_BLUEPRINT.md §5.3](./TECHNICAL_BLUEPRINT.md)) — log-odds 4 bậc nhân quả, 0 LLM. **Phiên #38 (B5/B9): `detail` JSON thêm `segments[]`** (5 segment VN + composite trọng số ADTV + INTERNATIONAL tham khảo) **và `consensus`** (snapshot cổng đồng thuận 80% — 6 cử tri, shadow-mode).
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `source` | String | default `"cycle"` | `cycle` (trong chu kỳ 23 agents) \| `manual` (tổng hợp lại thủ công) |
+| `cycleRunId` | String | nullable | AgentRun id của run Chủ tịch khi chạy trong chu kỳ |
+| `pUp` / `pDown` / `pFlat` | Float | — | Posterior 3 hướng (chuẩn hoá = 1) |
+| `marketDirection` | String | — | `BULLISH` \| `BEARISH` \| `NEUTRAL` |
+| `confidence` | Float | default `0` | 0..1 — 1 − entropy chuẩn hoá |
+| `disagreement` | Float | default `0` | 0..1 — phân hoá quan điểm các agent LLM |
+| `evidenceCount` | Int | default `0` | Số bằng chứng vào Bayes |
+| `detail` | String | — | JSON: `prior` · `drivers` · `sectors` · `symbols` · `market` · `veto` · `forecast5d` · `narrative` · `agentsConsidered` · **`segments[]` (phiên #38)** · **`consensus` (phiên #38)** |
+| `createdAt` | DateTime | default `now()` | Audit (append-only) |
+
+**Relations:** standalone (`BanditEvent` tham chiếu mềm qua `assessmentId`). **Indexes:** `@@index([createdAt(sort: Desc)])` — bản mới nhất + history 30. **Retention:** giữ toàn bộ lịch sử nhận định (đối chiếu hit-rate/bandit settle).
+
+### 6.22 `FinancialFundamental` — Dữ liệu tài chính cơ bản theo mã × kỳ (phiên #38 — B11)
+
+Báo cáo tài chính từ **finfo VNDIRECT** (`src/lib/fundamentals.ts`) — pipeline **pending-egress** trong sandbox (0 dòng — không bịa dữ liệu; tự sáng khi deploy máy chủ có egress). **Đơn vị:** `revenue`/`netProfit` **VND nguyên** (BigInt) · `eps`/`bvps` **VND** (Float) · `roe`/`roa`/`pe`/`pb` **tỷ lệ thô** (0,15 = 15%). Kỳ nằm trong `period` + `year` — **không có cột quarter riêng** (dư thừa).
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `instrumentId` | String | FK → `Instrument.id`, **Cascade** | Mã chứng khoán |
+| `period` | String | — | Kỳ báo cáo: `Q1` \| `Q2` \| `Q3` \| `Q4` \| `FY` |
+| `year` | Int | — | Năm tài chính (2000..năm hiện tại +1) |
+| `revenue` | BigInt | nullable | Doanh thu — **VND nguyên** (heuristic ingest: \|raw\| > 1e9 giữ nguyên, ≤ 1e9 coi triệu VND × 1e6) |
+| `netProfit` | BigInt | nullable | Lợi nhuận ròng — **VND nguyên** (cùng heuristic) |
+| `eps` | Float | nullable | Thu nhập trên cổ phiếu — VND/cp |
+| `bvps` | Float | nullable | Giá trị sổ sách trên cổ phiếu — VND/cp |
+| `roe` | Float | nullable | Tỷ suất sinh lời vốn chủ — **tỷ lệ thô** (0,15 = 15%) |
+| `roa` | Float | nullable | Tỷ suất sinh lời tài sản — tỷ lệ thô |
+| `pe` | Float | nullable | P/E — tỷ lệ thô (giá/eps) |
+| `pb` | Float | nullable | P/B — tỷ lệ thô |
+| `source` | String | default `"finfo"` | Nguồn dữ liệu |
+| `mode` | String | default `"pending"` | `real` (finfo sống) \| `pending` (chờ egress sandbox — hiện tại) |
+| `createdAt` / `updatedAt` | DateTime | `now()` / `@updatedAt` | Audit (upsert MERGE theo kỳ) |
+
+**Relations:** `instrument` (n-1, Cascade). **Indexes:** `@@unique([instrumentId, period, year])` — một mã một kỳ đúng một dòng (upsert idempotent, MERGE bổ sung trường non-null); `@@index([instrumentId, year(sort: Desc)])` — bản mới nhất cho valuation block (`latestFundamentals` — trong cùng năm ưu tiên FY → Q4 → Q3 → Q2 → Q1, chỉ trả dòng mode `real`). **Retention:** giữ toàn bộ lịch sử các kỳ; ingest hằng tuần (Chủ nhật ICT trong runDataCollector, rate-limit 500ms/request, cap 150 mã).
+
+### 6.23 `MlModel` — Mô hình học máy đã huấn luyện (phiên #35)
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `kind` | String | — | `dl-mlp` \| `rl-q` |
+| `version` | Int | — | Số phiên bản — mỗi lần train tạo bản mới, bản cũ cùng kind chuyển `archived` |
+| `status` | String | default `"serving"` | `serving` \| `archived` (versioning) |
+| `weights` | String | — | JSON trọng số (MLP layers \| Q-table 48×3) |
+| `featureNorm` | String | nullable | JSON z-score mean/std chuẩn hoá đặc trưng (MLP) |
+| `metrics` | String | — | JSON: `epochs/samples/trainAcc/valAcc/valLoss/topSymbols` (MLP) \| `episodes/epsilonEnd/avgReward/stance` (RL) |
+| `trainedAt` / `createdAt` | DateTime | `now()` | Thời điểm train / tạo |
+
+**Relations:** standalone. **Indexes:** `@@index([kind, status])` — tìm bản `serving` nhanh. **Retention:** giữ mọi version để đối chiếu deterministic (seed 42).
+
+### 6.24 `BanditArm` — Cánh tay Thompson sampling (phiên #35; 6 arms từ phiên #38)
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `agentCode` | String | **Unique** | 5 LLM research + **`ml-forecast` (arm 6 — phiên #38 B7, Beta(1,1) cold-start 0,5)** |
+| `alpha` / `beta` | Float | default `1` | Posterior **Beta(α+1, β+1)** — prior B(1,1) |
+| `pulls` | Int | default `0` | Số phiếu đã bầu |
+| `wins` | Float | default `0` | Số phiếu đúng (FLAT khớp = 0,7) |
+| `lastRewardAt` | DateTime | nullable | Lần settle reward cuối |
+| `updatedAt` | DateTime | `@updatedAt` | Audit |
+
+**Relations:** standalone (tham chiếu `agentCode` mềm). **Indexes:** unique `agentCode`. **Retention:** giữ vĩnh viễn — posterior tích luỹ qua các phiên.
+
+### 6.25 `BanditEvent` — Phiếu bầu chờ settle + kết quả (phiên #35; `confidence` thêm ở phiên #38)
+
+Mỗi phiếu bầu trong `MarketAssessment` (detail.drivers source `llm-vote:<code>` \| phiếu ML) được đối chiếu **realized direction của rổ top-10 sau 5 ngày giao dịch** → reward. Dòng có `settledAt` ≠ null nghĩa là đã settle.
+
+| Field | Type | Constraints / Default | Mô tả |
+|---|---|---|---|
+| `id` | String | PK, `cuid()` | Định danh duy nhất |
+| `assessmentId` | String | — | MarketAssessment gốc (tham chiếu mềm) |
+| `agentCode` | String | — | Agent bầu (5 LLM \| `ml-forecast`) |
+| `direction` | String | — | `UP` \| `DOWN` \| `FLAT` |
+| `castAt` | DateTime | — | Thời điểm bầu |
+| `settledAt` | DateTime | nullable | Thời điểm kết toán (null = chờ đủ 5 phiên) |
+| `reward` | Float | nullable | 1 đúng \| 0 sai \| 0,7 FLAT khớp |
+| `confidence` | Float | nullable | **Phiên #38 (B8)** — độ tự tin phiếu khi cast (0..1) để tính **Brier score** (phiếu MLP = max(pUp, pDown, pFlat)) |
+| `createdAt` | DateTime | default `now()` | Audit |
+
+**Relations:** standalone. **Indexes:** `@@unique([assessmentId, agentCode])` — một phiếu mỗi assessment mỗi agent; `@@index([settledAt, castAt])` — sweep phiếu chờ settle. **Retention:** giữ toàn bộ (nguồn hit-rate/Brier/streak của scorecard B8).
 
 ---
 
 ## 7. Enum Dictionary
 
-12 enum, lưu dạng TEXT trên SQLite (validate bởi Prisma Client). `AgentRole` mở rộng đủ **23 giá trị** từ v0.5 (đúng kiến trúc Gen-1 DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A; nhóm hiển thị theo `Agent.group`):
+12 enum (native enum type trên Postgres schema `trader`, validate bởi Prisma Client). `AgentRole` mở rộng đủ **23 giá trị** từ v0.5 (đúng kiến trúc Gen-1 DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A; nhóm hiển thị theo `Agent.group`); `Market` mở rộng **5 giá trị** từ v0.6.0 (phiên #38):
 
 | Enum | Giá trị | Diễn giải (VN) |
 |---|---|---|
 | `Market` | `HOSE` | Sở GDCK TP.HCM — sàn chính, dải trần/sàn **±7%**, tick 100 VND |
 | | `HNX` | Sở GDCK Hà Nội — dải ±10% |
 | | `UPCOM` | Thị trường công khai phi tập trung (OTC) — dải ±15% |
+| | `US` | **Phiên #38** — sàn quốc tế Mỹ (Yahoo Finance: 8 cổ phiếu + ^GSPC · ^IXIC; giá cents ×100, không trần/sàn) |
+| | `HK` | **Phiên #38** — sàn quốc tế Hồng Kông (Yahoo Finance: 3 cổ phiếu + ^HSI; giá cents ×100) |
 | `InstrumentType` | `STOCK` | Cổ phiếu thường |
 | | `ETF` | Quỹ hoán đổi danh mục |
 | | `FUND` | Quỹ mở/đóng |
@@ -831,3 +957,4 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 | 2026-10-06 | **v0.3 — Audit vòng 1+2 (Task 21/22):** `AgentMessage` thêm `@@index([createdAt])` (F-116); §6.4 Quote bổ sung vòng đời phiên EOD rollover + fill engine; §6.2 `equity` ghi rõ chính sách snapshot (chốt khi khớp lệnh/EOD, live do `/api/portfolio` tính); §4.3 làm rõ Quote là update-in-place tại chỗ (không append-only — khớp DATA_SOURCES Q4); §9 cập nhật equity migration; thay lễ 2026-04-10 → 2026-04-27 trong lịch (ở `market-session.ts`) |
 | 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B2):** `AgentMessage.direction` (AGENT\|USER) + index `[fromAgentId, broadcast, createdAt desc]` cho thread chat 1-1; `Signal.status` (ACTIVE\|ACTED\|REJECTED\|EXPIRED) + `rejectedAt`/`rejectNote` + index `[status, createdAt desc]` — tín hiệu giờ chờ trader phê duyệt (chu kỳ không tự tạo lệnh); audit action mới `SIGNAL_CREATED`/`SIGNAL_APPROVED`(via decision)/`SIGNAL_REJECTED`/`AGENT_CHAT`; backfill migration `scripts/set-signal-status.ts` (13 ACTED · 3 ACTIVE); API mới: `GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision` (§4 TECHNICAL_BLUEPRINT) |
 | 2026-10-06 | **v0.5 — Mở rộng 23 agents (Gen-1 DESIGN.md §4.1):** `enum AgentRole` **+18 giá trị** (tổng 23: 5 cũ + S0–S3 dịch vụ + A3/A5/A7–A9/A11–A19 chuyên gia); model `Agent` thêm field **`group`** (String, default `"research"` — research\|control\|executive\|platform\|ml) + index **`@@index([group])`**; `Agent.model` default `"glm-4.6"` → **`"space-bunny-free"`** (Opencode Zen free-tier — model runtime vẫn resolve từ `src/lib/llm.ts`); seed dùng roster `src/lib/agent-roster.ts` + script migrate idempotent `prisma/expand-agents.ts` (upsert theo `code`, không đụng lịch sử runs/messages); chu kỳ chạy 5 đợt A→E — chi tiết [TECHNICAL_BLUEPRINT.md §5](./TECHNICAL_BLUEPRINT.md) |
+| 2026-10-07 | **v0.6.0 — Đồng bộ sau phiên #34/#35/#38 (24→25 model):** (1) bổ sung dictionary 6 model còn thiếu — §6.20 `AppSetting` · §6.21 `MarketAssessment` (phiên #34) · §6.23 `MlModel` · §6.24 `BanditArm` (6 arms từ #38) · §6.25 `BanditEvent` (phiên #35) · **§6.22 `FinancialFundamental` (phiên #38 — B11 finfo pending-egress, đơn vị VND nguyên/tỷ lệ thô, `@@unique([instrumentId, period, year])`)**; (2) **phiên #38:** `enum Market` +2 giá trị **US · HK** (Yahoo Finance); `Instrument.currency` (VND \| USD \| HKD — UnitSpec là nguồn đơn vị thật); `Signal.consensusGate/consensusRatio` (snapshot cổng đồng thuận 80% lúc sinh tín hiệu — B9); `BanditEvent.confidence` (Brier score — B8); ERD thêm `FINANCIAL_FUNDAMENTAL` nối `Instrument`; (3) `DataSourceStatus`: nguồn mới `eod-history` (mode `real` — #33) · `intl-eod` · `fundamentals` (mode `pending`) — 7 dòng; (4) schema thật: 25 model — **backup DB trước `db push` ở `db/backup-pre-b1/`**; dữ liệu thật 90 instrument active · 215.327 bar |

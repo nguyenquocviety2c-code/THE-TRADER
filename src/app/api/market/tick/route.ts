@@ -408,8 +408,16 @@ async function runTick(): Promise<NextResponse> {
       });
     }
 
+    // B4 (MARKET_EXPANSION_BLUEPRINT): INDEX & instrument quốc tế KHÔNG vào
+    // tick-engine sinh quote mô phỏng — Quote của chúng được neo vào EOD thật
+    // (anchorQuoteToRealEod / intl-sync). Nguyên tắc không-bịa-dữ liệu: không
+    // mô phỏng intraday cho index/quốc tế; paper matching vẫn chạy cho cổ phiếu.
     const instruments = await db.instrument.findMany({
-      where: { isActive: true },
+      where: {
+        isActive: true,
+        type: { not: "INDEX" },
+        market: { in: ["HOSE", "HNX", "UPCOM"] },
+      },
       select: {
         id: true,
         symbol: true,

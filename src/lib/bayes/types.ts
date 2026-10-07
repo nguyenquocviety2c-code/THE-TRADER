@@ -42,9 +42,9 @@ export interface SymbolEvidence extends BayesEvidence {
   symbol: string;
 }
 
-/** Phiếu quan điểm có trọng số của một agent (dùng đo DISAGREEMENT). */
+/** Phiếu quan điểm có trọng số của một agent (dùng đo DISAGREEMENT + cổng B9). */
 export interface AgentVote {
-  /** Agent code, vd "market-analyst". */
+  /** Agent code, vd "market-analyst" | "ml-forecast" (cử tri thứ 6 — B7). */
   code: string;
   agentName: string;
   gen1: string;
@@ -53,6 +53,9 @@ export interface AgentVote {
   confidence: number;
   /** 0..1 — tỉ lệ run COMPLETED lịch sử của agent (đo từ AgentRun). */
   successRate: number;
+  /** B9 — trọng số tally cổng đồng thuận = clamp(healthScore/100 × posteriorMean
+   *  bandit, 0.3, 1) — TRÙNG công thức weight bằng chứng llm-vote (evidence.ts điền). */
+  weight?: number;
 }
 
 /** Tiên nghiệm base-rate lịch sử (Bậc 0). */
@@ -106,6 +109,23 @@ export interface SectorFeature {
   avgMomentum5d: number;
 }
 
+/** B5 — đầu vào posterior RIÊNG của một phân đoạn thị trường (§3.4). */
+export interface SegmentInput {
+  /** "VN-HOSE-STOCK" | "VN-HNX-STOCK" | "VN-UPCOM-STOCK" | "VN-ETF" | "VN-INDEX" | "INTERNATIONAL". */
+  segment: string;
+  /** Nhãn tiếng Việt. */
+  label: string;
+  /** Số mã có dữ liệu trong rổ segment. */
+  symbolCount: number;
+  /** Tiên nghiệm base-rate đo từ chuỗi rổ segment đó. */
+  prior: BayesPrior;
+  /** Bằng chứng Bậc 1 RIÊNG của segment (breadth/Holt/RSI segment…). */
+  evidence: BayesEvidence[];
+  /** Trọng số composite: ADTV VND thật (stock/ETF) · 0,05×số index · 0 khi rỗng.
+   *  INTERNATIONAL = 0 (tham khảo, KHÔNG vào composite VN — B13). */
+  compositeWeight: number;
+}
+
 /** Dữ liệu hiển thị/phụ — engine đọc để lắp MarketAssessmentView. */
 export interface SynthesisContext {
   market: MarketFeature;
@@ -121,9 +141,13 @@ export interface SynthesisInput {
   marketEvidence: BayesEvidence[];
   /** Bằng chứng Bậc 3 (cổ phiếu). */
   symbolEvidence: SymbolEvidence[];
-  /** Phiếu agents (LLM research + risk) — chỉ dùng cho DISAGREEMENT. */
+  /** Phiếu agents (5 LLM + ml-forecast) — DISAGREEMENT + cổng đồng thuận B9. */
   agentVotes: AgentVote[];
   veto: BayesVeto;
+  /** B5 — đầu vào per-segment cho posterior phân đoạn + composite VN. */
+  segments?: SegmentInput[];
+  /** B9 — AppSetting consensus.enforce (false = shadow-mode: cổng tính nhưng KHÔNG chặn). */
+  consensusEnforce?: boolean;
   /** Số liệu nền cho khối hiển thị (market/sectors/symbols). */
   context: SynthesisContext;
 }

@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { pctChange, rsi, sma, latestVsMean } from "@/lib/indicators";
+import { atr, bollinger, macd, pctChange, rsi, sma, latestVsMean, stochastic } from "@/lib/indicators";
 import { latestNewsForContext } from "@/lib/news";
 import { getForeignFlows, flowsPromptBlock } from "@/lib/flows";
 import { loadLatestAssessment } from "@/lib/bayes/persist";
@@ -28,7 +28,10 @@ export interface MarketSnapshot {
   instrumentIdBySymbol: Map<string, string>;
 }
 
-/** Snapshot VN30 + bảng chỉ báo top-10 + danh mục + tài khoản + cảnh báo rủi ro. */
+/** Snapshot VN30 + bảng chỉ báo top-10 + danh mục + tài khoản + cảnh báo rủi ro.
+ *  B5/B10 §3.8: bảng chính giữ top-10 HOSE-STOCK (continuity chuỗi #34) +
+ *  1 dòng ĐA THỊ TRƯỜNG gọn cho agent nghiên cứu; instrumentIdBySymbol phủ
+ *  TOÀN BỘ mã giao dịch được (trừ INDEX — không có tín hiệu cho chỉ số). */
 export async function buildMarketBlock(): Promise<MarketSnapshot> {
   const [instruments, positions, alerts, account] = await Promise.all([
     db.instrument.findMany({
@@ -37,6 +40,8 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
         id: true,
         symbol: true,
         sector: true,
+        market: true,
+        type: true,
         quotes: {
           orderBy: { tradedAt: "desc" },
           take: 1,
@@ -67,13 +72,30 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
     }),
   ]);
 
-  const quoteRows = instruments
+  // B5 — toàn bộ mã có quote (đa sàn) cho map tín hiệu + dòng ĐA THỊ TRƯỜNG
+  const allQuoted = instruments
     .map((i) => {
       const q = i.quotes[0];
-      return q ? { id: i.id, symbol: i.symbol, sector: i.sector, ...q } : null;
+      return q && q.last > 0
+        ? { id: i.id, symbol: i.symbol, sector: i.sector, market: i.market, type: i.type, ...q }
+        : null;
     })
-    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+
+  // Bảng chính: HOSE-STOCK (continuity #34 — prompt không phình §3.8)
+  const quoteRows = allQuoted
+    .filter((r) => r.market === "HOSE" && r.type === "STOCK")
     .sort((a, b) => b.volume - a.volume);
+
+  // 1 dòng ĐA THỊ TRƯỜNG gọn (B5 — agent nghiên cứu thấy các sàn khác)
+  const hnxCount = allQuoted.filter((r) => r.market === "HNX" && r.type === "STOCK").length;
+  const upcomCount = allQuoted.filter((r) => r.market === "UPCOM" && r.type === "STOCK").length;
+  const etfCount = allQuoted.filter((r) => r.type === "ETF").length;
+  const vnindex = allQuoted.find((r) => r.symbol === "VNINDEX");
+  const vnindexLine = vnindex
+    ? `VN-Index ${(vnindex.last / 100).toLocaleString("vi-VN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (${vnindex.changePct >= 0 ? "+" : ""}${vnindex.changePct.toFixed(2)}%)`
+    : "VN-Index —";
+  const multiMarketLine = `- ĐA THỊ TRƯỜNG (B5): HNX ${hnxCount} mã · UPCOM ${upcomCount} mã · ETF ${etfCount} mã · ${vnindexLine}`;
 
   const advancing = quoteRows.filter((r) => r.changePct > 0).length;
   const declining = quoteRows.filter((r) => r.changePct < 0).length;
@@ -85,21 +107,25 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
   const losers = [...quoteRows].sort((a, b) => a.changePct - b.changePct).slice(0, 5);
 
   // ── Chỉ báo kỹ thuật top-10 thanh khoản (90 phiên) ──────────────────
+  // B6 — thêm MACD hist (×1000) · %B Bollinger · ATR14% · Stoch %K (cột có sẵn
+  // code trong indicators.ts — RESEARCH_COUNCIL_PLAN §7.1; MACD/BOLL đã được
+  // nhắc tên trong prompt từ #34)
   const top10 = quoteRows.slice(0, 10);
   const barRows = await db.bar.findMany({
     where: { instrumentId: { in: top10.map((t) => t.id) } },
     orderBy: { date: "asc" },
-    select: { instrumentId: true, close: true, volume: true },
+    select: { instrumentId: true, close: true, high: true, low: true, volume: true },
   });
-  const barsByInstrument = new Map<string, { closes: number[]; volumes: number[] }>();
+  const barsByInstrument = new Map<string, { closes: number[]; volumes: number[]; bars: { high: number; low: number; close: number }[] }>();
   for (const b of barRows) {
     let entry = barsByInstrument.get(b.instrumentId);
     if (!entry) {
-      entry = { closes: [], volumes: [] };
+      entry = { closes: [], volumes: [], bars: [] };
       barsByInstrument.set(b.instrumentId, entry);
     }
     entry.closes.push(b.close);
     entry.volumes.push(b.volume);
+    entry.bars.push({ high: b.high, low: b.low, close: b.close });
   }
   const lastById = new Map(quoteRows.map((r) => [r.id, r.last]));
   const indicatorLines = top10.map((t) => {
@@ -111,6 +137,13 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
     const rsi14 = rsi(closes, 14);
     const chg5d = closes.length >= 6 ? pctChange(closes[closes.length - 6], last) : null;
     const volRatio = bars ? latestVsMean(bars.volumes, 20) : null;
+    // B6 — 4 chỉ báo mở rộng (đơn vị: MACD hist tính theo nghìn ₫ = hist VND/1000;
+    // %B 0..100; ATR14 % của giá; Stoch %K 0..100)
+    const macdHist = macd(closes)?.histogram ?? null;
+    const percentB = bollinger(closes)?.percentB ?? null;
+    const atr14 = bars ? atr(bars.bars, 14) : null;
+    const atrPct = atr14 != null && last > 0 ? (atr14 / last) * 100 : null;
+    const stochK = bars ? stochastic(bars.bars, 14)?.k ?? null : null;
     return [
       `${t.symbol} (${t.sector ?? "—"})`,
       `giá ${last.toLocaleString("vi-VN")}`,
@@ -118,6 +151,10 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
       `SMA20 ${sma20 != null ? Math.round(sma20).toLocaleString("vi-VN") : "—"}`,
       `SMA50 ${sma50 != null ? Math.round(sma50).toLocaleString("vi-VN") : "—"}`,
       `RSI14 ${rsi14 != null ? rsi14.toFixed(0) : "—"}`,
+      `MACDh ${macdHist != null ? (macdHist / 1000).toFixed(1) : "—"}`,
+      `%B ${percentB != null ? (percentB * 100).toFixed(0) : "—"}`,
+      `ATR14% ${atrPct != null ? atrPct.toFixed(2).replace(".", ",") : "—"}`,
+      `Stoch%K ${stochK != null ? stochK.toFixed(0) : "—"}`,
       `5 phiên ${chg5d != null ? (chg5d >= 0 ? "+" : "") + chg5d.toFixed(2) + "%" : "—"}`,
       `KL/TL20 ${volRatio ?? "—"}`,
     ].join(" · ");
@@ -157,11 +194,12 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
   const block = [
     "SNAPSHOT THỊ TRƯỜNG VN30 (HOSE) — PHIÊN HIỆN TẠI",
     `- Số mã: ${quoteRows.length} | Tăng: ${advancing} | Giảm: ${declining} | Biến động TB: ${avgChangePct.toFixed(2)}%`,
+    multiMarketLine,
     `- Tổng khối lượng: ${totalVolume.toLocaleString("vi-VN")} cp`,
     `- Top tăng: ${gainers.map((g) => `${g.symbol} +${g.changePct.toFixed(2)}%`).join(", ")}`,
     `- Top giảm: ${losers.map((g) => `${g.symbol} ${g.changePct.toFixed(2)}%`).join(", ")}`,
     "",
-    "BẢNG CHỈ BÁO KỸ THUẬT (10 mã thanh khoản cao nhất, 90 phiên):",
+    "BẢNG CHỈ BÁO KỸ THUẬT (10 mã thanh khoản cao nhất, 90 phiên — SMA · RSI · MACD hist (nghìn ₫) · %B · ATR14% · Stoch %K):",
     ...indicatorLines,
     "",
     "DANH MỤC ĐANG NẮM GIỮ:",
@@ -181,6 +219,7 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
   const compact = [
     "SNAPSHOT THỊ TRƯỜNG VN30 (HOSE) — RÚT GỌN",
     `- Số mã: ${quoteRows.length} | Tăng: ${advancing} | Giảm: ${declining} | Biến động TB: ${avgChangePct.toFixed(2)}%`,
+    multiMarketLine,
     `- Top tăng: ${gainers.map((g) => `${g.symbol} +${g.changePct.toFixed(2)}%`).join(", ")}`,
     `- Top giảm: ${losers.map((g) => `${g.symbol} ${g.changePct.toFixed(2)}%`).join(", ")}`,
     "",
@@ -198,7 +237,11 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
     block,
     compact,
     equity,
-    instrumentIdBySymbol: new Map(quoteRows.map((r) => [r.symbol, r.id])),
+    // B5 — map phủ toàn bộ mã GIAO DỊCH được đa sàn (trừ INDEX — không ra
+    // tín hiệu cho chỉ số); chairman có thể signal PVS/E1VFVN30… hợp lệ.
+    instrumentIdBySymbol: new Map(
+      allQuoted.filter((r) => r.type !== "INDEX").map((r) => [r.symbol, r.id])
+    ),
   };
 }
 
@@ -243,8 +286,10 @@ function stdOf(xs: number[]): number {
  * giá hiện tại vs min/max/mean/σ, z-score, % so đỉnh/đáy 90 phiên.
  */
 export async function buildValuationBlock(): Promise<string> {
+  // B5 §3.4 — khoá rổ về HOSE-STOCK (continuity #34; universe đa sàn/index
+  // volume ~2,1 tỷ không được tràn vào top-10 định giá)
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
+    where: { isActive: true, market: "HOSE", type: "STOCK" },
     select: {
       id: true,
       symbol: true,
@@ -285,6 +330,30 @@ export async function buildValuationBlock(): Promise<string> {
     closesBy.set(b.instrumentId, arr);
   }
 
+  // B11 — cột P/E · EPS · BVPS · ROE CHỈ thêm khi nguồn finfo mode=real có dữ liệu
+  // (pending-egress trong sandbox → giữ lời khai báo giới hạn trung thực như cũ)
+  const fundStatus = await db.dataSourceStatus.findUnique({ where: { key: "fundamentals" } });
+  const fundamentalsReal = fundStatus?.mode === "real";
+  const fundByInstrument = new Map<
+    string,
+    { pe: number | null; eps: number | null; bvps: number | null; roe: number | null }
+  >();
+  if (fundamentalsReal) {
+    const fundRows = await db.financialFundamental
+      .findMany({
+        where: { instrumentId: { in: top10.map((t) => t.id) }, mode: "real" },
+        orderBy: [{ year: "desc" }, { period: "desc" }],
+        select: { instrumentId: true, pe: true, eps: true, bvps: true, roe: true },
+      })
+      .catch(() => []);
+    for (const f of fundRows) {
+      //orderBy year/period desc → bản đầu mỗi instrument là mới nhất
+      if (!fundByInstrument.has(f.instrumentId)) {
+        fundByInstrument.set(f.instrumentId, { pe: f.pe, eps: f.eps, bvps: f.bvps, roe: f.roe });
+      }
+    }
+  }
+
   const lines = top10.map((t) => {
     const closes = closesBy.get(t.id) ?? [];
     const last = t.last || (closes.length ? closes[closes.length - 1] : 0);
@@ -299,6 +368,16 @@ export async function buildValuationBlock(): Promise<string> {
     const vsHigh = max > 0 ? ((last - max) / max) * 100 : 0;
     const vsLow = min > 0 ? ((last - min) / min) * 100 : 0;
     const band = z > 1.5 ? "ĐẮT bất thường" : z < -1.5 ? "RẺ bất thường" : "trong dải hợp lý";
+    const f = fundByInstrument.get(t.id);
+    const fundCols =
+      fundamentalsReal && f
+        ? [
+            `P/E ${f.pe != null ? f.pe.toFixed(1).replace(".", ",") : "—"}`,
+            `EPS ${f.eps != null ? Math.round(f.eps).toLocaleString("vi-VN") + "₫" : "—"}`,
+            `BVPS ${f.bvps != null ? Math.round(f.bvps).toLocaleString("vi-VN") + "₫" : "—"}`,
+            `ROE ${f.roe != null ? (f.roe * 100).toFixed(1).replace(".", ",") + "%" : "—"}`,
+          ]
+        : [];
     return [
       `- ${t.symbol} (${t.sector ?? "—"}):`,
       `giá ${last.toLocaleString("vi-VN")}`,
@@ -306,13 +385,16 @@ export async function buildValuationBlock(): Promise<string> {
       `TB ${Math.round(m).toLocaleString("vi-VN")} ± ${Math.round(sd).toLocaleString("vi-VN")}`,
       `z ${z.toFixed(2)} (${band})`,
       `đỉnh ${vsHigh.toFixed(1)}% · đáy +${vsLow.toFixed(1)}%`,
+      ...fundCols,
     ].join(" · ");
   });
 
   return [
     "DẢI ĐỊNH GIÁ 90 PHIÊN — TOP 10 THANH KHOẢN (z-score = lệch chuẩn so giá TB lịch sử):",
     ...lines,
-    "(Dữ liệu giá trị công ty/kết quả kinh doanh chưa có trong kho — định giá chỉ theo dải giá lịch sử, KHÔNG bịa P/E hay các chỉ số tài chính)",
+    fundamentalsReal
+      ? "(Cột P/E · EPS · BVPS · ROE từ finfo — chế độ real, đơn vị VND nguyên / tỷ lệ thô)"
+      : "(Dữ liệu cơ bản finfo đang ở chế độ pending-egress — chưa thoát khỏi sandbox — định giá chỉ theo dải giá lịch sử, KHÔNG bịa P/E hay chỉ số tài chính)",
   ].join("\n");
 }
 

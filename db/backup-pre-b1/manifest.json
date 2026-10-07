@@ -1,0 +1,31 @@
+{
+  "createdAt": "2026-10-07T08:03:42.645Z",
+  "purpose": "Backup trước db:push B1 — MARKET_EXPANSION_BLUEPRINT v1.1",
+  "counts": {
+    "instrument": 30,
+    "agent": 23,
+    "agentRun": 200,
+    "agentTask": 9,
+    "agentMessage": 179,
+    "signal": 15,
+    "order": 8,
+    "position": 7,
+    "trade": 7,
+    "watchlist": 1,
+    "watchlistItem": 8,
+    "newsItem": 133,
+    "dataSourceStatus": 5,
+    "appSetting": 2,
+    "marketAssessment": 10,
+    "mlModel": 7,
+    "banditArm": 5,
+    "banditEvent": 0,
+    "riskAlert": 0,
+    "auditLog": 113,
+    "brokerAccount": 1,
+    "quote": 30,
+    "user": 1,
+    "bar": 90785
+  },
+  "note": "Bar lưu 8 cột chính (bỏ value BigInt — re-tính được = close×volume). Khôi phục: đọc JSON/NDJSON createMany."
+}

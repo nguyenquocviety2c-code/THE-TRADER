@@ -5,6 +5,10 @@ export interface QuoteRow {
   name: string;
   sector: string;
   market: string;
+  /** B13 — loại tài sản (STOCK/ETF/INDEX…) để group bảng giá theo sàn/loại. */
+  type: string;
+  /** B13 — đơn vị hiển thị (VND/USD/HKD) — index điểm, QT cents (UnitSpec §3.2). */
+  currency: string;
   last: number;
   /** PHASE3 B3 §5.2 — cao/thấp phiên hiện tại (cột mở rộng bảng giá). */
   high: number | null;
@@ -608,6 +612,79 @@ export interface SymbolAssessment {
   drivers: string[];
 }
 
+/** Đơn vị giá lưu DB (Int) theo (market, instrumentType) — Bảng tra
+ *  UnitSpec §3.2 MARKET_EXPANSION_BLUEPRINT là SINGLE SOURCE OF TRUTH:
+ *  STOCK/ETF VN lưu VND nguyên (nguồn nghìn VND ×1000, bội 100) ·
+ *  INDEX lưu điểm×100 (nguồn điểm thô ×100, KHÔNG round100, KHÔNG ×1000) ·
+ *  STOCK/ETF QT lưu cents USD/HKD (nguồn thô ×100) · INDEX QT điểm×100 ·
+ *  BOND (khi có nguồn) % mệnh giá ×100. */
+export type UnitKind = "VND" | "INDEX_POINT" | "CENTS" | "BOND_PCT";
+
+/** Quy tắc biến đổi giá của một tổ hợp (market × instrumentType). */
+export interface UnitSpec {
+  kind: UnitKind;
+  /** Hệ số nhân khi ingest từ giá thô của nguồn (1000 | 100). */
+  multiplier: number;
+  /** Làm tròn bội số sau nhân (100 = bội 100₫ như Q1; 1 = nguyên). */
+  roundTo: number;
+  /** Cận giá hợp lệ SAU biến đổi — ngoài cận bị skip + đếm skipped. */
+  minPrice: number;
+  maxPrice: number;
+  /** true = neo Quote có trần/sàn ±7% (chỉ STOCK/ETF VN); INDEX/quốc tế null. */
+  hasPriceBand: boolean;
+  /** Bước giá tối thiểu (đơn vị DB) tính spread quote (0,1 điểm index = 10). */
+  tickUnit: number;
+}
+
+/** B5 — posterior một phân đoạn thị trường (multi-segment Bayes §3.4). */
+export interface SegmentAssessment {
+  /** "VN-HOSE-STOCK" | "VN-HNX-STOCK" | "VN-UPCOM-STOCK" | "VN-ETF" | "VN-INDEX" | "VN-COMPOSITE" | "INTERNATIONAL". */
+  segment: string;
+  /** Nhãn tiếng Việt hiển thị. */
+  label: string;
+  /** Số instrument có dữ liệu trong rổ segment. */
+  symbolCount: number;
+  pUp: number;
+  pDown: number;
+  pFlat: number;
+  marketDirection: "BULLISH" | "BEARISH" | "NEUTRAL";
+  /** Trọng số trong composite VN (ADTV thật; INDEX cố định 0,05/index; INTERNATIONAL = null). */
+  compositeWeight: number | null;
+  /** 1 dòng tổng hợp cho chairman prompt + UI. */
+  note: string;
+}
+
+/** B9 — phiếu bầu trong tally cổng đồng thuận. */
+export interface ConsensusVote {
+  code: string;
+  agentName: string;
+  gen1: string;
+  direction: "UP" | "DOWN" | "FLAT";
+  /** w = clamp(healthScore/100 × posteriorMean bandit, 0.3, 1). */
+  weight: number;
+  /** "llm" = 5 agent nghiên cứu | "ml" = ml-forecast ensemble. */
+  model: "llm" | "ml";
+}
+
+/** B9 — snapshot cổng đồng thuận 6 cử tri (lưu trong detail.consensus). */
+export interface ConsensusSnapshot {
+  /** consensusRatio = max_d S(d) / Σw (0..1). */
+  ratio: number;
+  /** CONSENSUS (≥0,80) | WEAK_MAJORITY ([0,50·0,80)) | NO_CONSENSUS (<0,50) | pool < 4 cử tri. */
+  gate: "CONSENSUS" | "WEAK_MAJORITY" | "NO_CONSENSUS";
+  /** Nhãn tiếng Việt hiển thị. */
+  gateLabel: string;
+  tally: ConsensusVote[];
+  /** Số cử tri có mặt (pool < 4 → fail-safe NO_CONSENSUS). */
+  present: number;
+  /** Shadow-mode (consensus.enforce=false): cổng tính nhưng KHÔNG chặn. */
+  shadow: boolean;
+  /** true = nếu enforce thì tín hiệu direction ≠ hướng số đông sẽ bị chặn. */
+  wouldBlock: boolean;
+  /** Câu giải thích (narrative + chairman prompt). */
+  note: string;
+}
+
 /** Bộ tổng hợp Bayes — khung nhìn đầy đủ cho UI module Tổng hợp. */
 export interface MarketAssessmentView {
   id: string;
@@ -656,6 +733,10 @@ export interface MarketAssessmentView {
   narrative: string;
   /** Các agent có bằng chứng được dùng trong lần tổng hợp này. */
   agentsConsidered: string[];
+  /** B5 — posterior theo phân đoạn thị trường (6 segment + composite); undefined ở row cũ. */
+  segments?: SegmentAssessment[];
+  /** B9 — cổng đồng thuận 6 cử tri tại assessment này; null/undefined ở row cũ. */
+  consensus?: ConsensusSnapshot | null;
 }
 
 /** GET /api/assessment — bản mới nhất + lịch sử (30 bản gần nhất). */

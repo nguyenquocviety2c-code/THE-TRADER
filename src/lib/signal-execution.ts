@@ -1,6 +1,7 @@
 import { db } from "@/lib/db";
 import { getTradingMode, liveTradingGate } from "@/lib/trading-mode";
 import { markSource } from "@/lib/sources";
+import { getConsensusSetting } from "@/lib/consensus";
 
 /**
  * MỘT NGUỒN DUY NHẤT cho toán tạo lệnh giấy từ tín hiệu
@@ -172,6 +173,26 @@ export async function createPaperOrderFromSignal(
       status: 409,
       error: "Tín hiệu này đã được chuyển thành lệnh trước đó.",
     };
+  }
+
+  // B9 — CỔNG ĐỒNG THUẬN 80% (§3.5 MARKET_EXPANSION_BLUEPRINT): chặn convert
+  // khi gate (snapshot lúc SINH tín hiệu) ≠ ĐỒNG THUẬN và enforcement đang BẬT
+  // (AppSetting consensus.enforce). Gate bind theo assessment tạo ra tín hiệu —
+  // KHÔNG đánh giá lại bằng consensus mới hơn. VETO vẫn tối thượng (guard riêng).
+  {
+    const setting = await getConsensusSetting();
+    if (
+      setting.enforce &&
+      signal.consensusGate != null &&
+      signal.consensusGate !== "CONSENSUS" &&
+      signal.direction !== "HOLD"
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        error: `Tín hiệu bị CỔNG ĐỒNG THUẬN chặn (${signal.consensusGate === "WEAK_MAJORITY" ? "đa số yếu" : "không đồng thuận"} — tỉ lệ trọng số số đông ${signal.consensusRatio != null ? `${(signal.consensusRatio * 100).toFixed(1).replace(".", ",")}%` : "?"} < 80%). Tín hiệu sinh ra khi hội đồng chưa đạt đồng thuận 80% → giữ GIỮ, không tạo lệnh.`,
+      };
+    }
   }
   // F-207 (audit 19-b): tín hiệu đã có lệnh trong sổ (dù actedAt thiếu) → chặn tạo trùng
   const existingOrder = await db.order.findFirst({

@@ -1,10 +1,17 @@
 /**
- * src/lib/bayes/evidence.ts — XÂY BỘ BẰNG CHỨNG TỪ DB (phiên #34).
+ * src/lib/bayes/evidence.ts — XÂY BỘ BẰNG CHỨNG TỪ DB (phiên #34 · mở rộng B5 #38).
  *
- * buildEvidenceBundle() đọc dữ liệu THẬT trong Supabase (90k bar EOD VNDIRECT,
- * quotes, NewsItem RSS, flows) và tính toàn bộ bằng chứng 3 bậc + tiên nghiệm
- * base-rate — deterministic, 0 LLM, ~1–2s. KHÔNG tạo side-effect mới ngoài
- * markSource của flows (idempotent, chuẩn hệ thống).
+ * buildEvidenceBundle() đọc dữ liệu THẬT trong Supabase (215k bar EOD VNDIRECT
+ * đa sàn HOSE/HNX/UPCOM/ETF/INDEX, quotes, NewsItem RSS, flows) và tính toàn bộ
+ * bằng chứng 3 bậc + tiên nghiệm base-rate — deterministic, 0 LLM, ~1–2s.
+ * KHÔNG tạo side-effect mới ngoài markSource của flows (idempotent).
+ *
+ * B5 — MULTI-SEGMENT (§3.4 MARKET_EXPANSION_BLUEPRINT): bộ bằng chứng được
+ * PHÂN ĐOẠN theo 5 segment VN (HOSE-STOCK top-10 · HNX-STOCK top-5 ·
+ * UPCOM-STOCK top-3 · ETF ≤10 · INDEX 4 mã) — mỗi segment có prior + bằng
+ * chứng riêng; synthesis.ts chạy engine per-segment rồi hợp thành composite
+ * trọng số (ADTV thật + INDEX 0,05/index). Phiếu LLM + lexicon tin + flows
+ * (thị trường-wide) gán cho segment chính VN-HOSE-STOCK như §3.4.
  *
  * Chu kỳ 23 agents truyền llmVotes (assessment JSON mới của LLM research +
  * risk) → được ƯU TIÊN hơn tin broadcast 24h trong DB.
@@ -18,19 +25,22 @@
 import { db } from "@/lib/db";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
 import { getForeignFlows } from "@/lib/flows";
+import { getConsensusSetting } from "@/lib/consensus";
 import { latestVsMean, macd, pctChange, rsi } from "@/lib/indicators";
 import { classifyRegime } from "@/lib/quant/regime";
 import { holtForecastPct } from "@/lib/quant/forecast";
 import { aggregateSentiment } from "@/lib/quant/sentiment";
-import { historicalBaseRates, mean, zscore } from "@/lib/quant/statistics";
-import { latestFeatures, loadTopSeries } from "@/lib/ml/features";
-import { MLP } from "@/lib/ml/nn";
+import { historicalBaseRates, zscore } from "@/lib/quant/statistics";
+import { loadSegmentBaskets, loadTopSeries, type SegmentBasket } from "@/lib/ml/features";
+import { mlForecastEnsemble } from "@/lib/ml/ensemble";
 import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
 import type {
   AgentVote,
   BayesEvidence,
+  BayesPrior,
   BayesVeto,
   MarketFeature,
+  SegmentInput,
   SectorFeature,
   SymbolEvidence,
   SymbolFeature,
@@ -65,10 +75,12 @@ export interface BuildEvidenceOptions {
 const BARS_PER_SYMBOL = 260;
 /** Số phiên base-rate tiên nghiệm. */
 const PRIOR_SESSIONS = 250;
-/** Số mã xây bằng chứng symbol-level (top thanh khoản ADTV). */
+/** Số mã xây bằng chứng symbol-level (top thanh khoản ADTV HOSE). */
 const TOP_SYMBOL_COUNT = 10;
 /** Số tin RSS tối đa chấm lexicon 24h. */
 const NEWS_MAX_ITEMS = 60;
+/** §3.4 — trọng số composite cố định cho mỗi index (không đo được ADTV VND). */
+const INDEX_COMPOSITE_WEIGHT = 0.05;
 
 /* ─────────────────────────── Hàm chính ─────────────────────────── */
 
@@ -83,79 +95,31 @@ export async function buildEvidenceBundle(
   const marketEvidence: BayesEvidence[] = [];
   const symbolEvidence: SymbolEvidence[] = [];
 
-  /* ── 1. Quotes mới nhất toàn rổ ─────────────────────────────────────── */
-  const instruments = await db.instrument.findMany({
-    where: { isActive: true },
-    select: {
-      id: true,
-      symbol: true,
-      name: true,
-      sector: true,
-      quotes: {
-        orderBy: { tradedAt: "desc" },
-        take: 1,
-        select: { last: true, changePct: true, volume: true },
-      },
-    },
-  });
-  const quoted = instruments
-    .map((i) => {
-      const q = i.quotes[0];
-      return q
-        ? {
-            id: i.id,
-            symbol: i.symbol,
-            name: i.name,
-            sector: i.sector ?? "Khác",
-            last: q.last,
-            changePct: q.changePct,
-            volume: q.volume,
-          }
-        : null;
-    })
-    .filter((r): r is NonNullable<typeof r> => r !== null);
+  /* ── 1. Rổ 5 segment VN — load MỘT LẦN, phân đoạn in-memory (B5) ────── */
+  const baskets = await loadSegmentBaskets(BARS_PER_SYMBOL);
+  const hose = baskets.find((b) => b.segment === "VN-HOSE-STOCK") ?? emptyBasket("VN-HOSE-STOCK");
+  const hnx = baskets.find((b) => b.segment === "VN-HNX-STOCK") ?? emptyBasket("VN-HNX-STOCK");
+  const upcom = baskets.find((b) => b.segment === "VN-UPCOM-STOCK") ?? emptyBasket("VN-UPCOM-STOCK");
+  const etf = baskets.find((b) => b.segment === "VN-ETF") ?? emptyBasket("VN-ETF");
+  const idx = baskets.find((b) => b.segment === "VN-INDEX") ?? emptyBasket("VN-INDEX");
 
-  const advancing = quoted.filter((q) => q.changePct > 0).length;
-  const declining = quoted.filter((q) => q.changePct < 0).length;
-  const unchanged = quoted.filter((q) => q.changePct === 0).length;
-  const totalQuoted = quoted.length;
+  // Segment chính HOSE-STOCK — continuation chuỗi lịch sử #34: mọi số liệu
+  // breadth/regime/sectors/prior tính trên TOÀN BỘ HOSE-STOCK quoted (30 mã).
+  const hoseQuoted = hose.quoted;
+  const hoseBasket = hose.symbols;
+
+  const advancing = hoseQuoted.filter((q) => q.changePct > 0).length;
+  const declining = hoseQuoted.filter((q) => q.changePct < 0).length;
+  const unchanged = hoseQuoted.filter((q) => q.changePct === 0).length;
+  const totalQuoted = hoseQuoted.length;
   const breadth = totalQuoted > 0 ? (advancing - declining) / totalQuoted : 0;
 
-  /* ── 2. Chuỗi closes/volumes 260 phiên mỗi mã ────────────────────────── */
-  const barLists = await Promise.all(
-    quoted.map((q) =>
-      db.bar
-        .findMany({
-          where: { instrumentId: q.id },
-          orderBy: { date: "desc" },
-          take: BARS_PER_SYMBOL,
-          select: { close: true, volume: true },
-        })
-        .then((rows) => rows.reverse())
-    )
-  );
-  const seriesBySymbol = new Map<
-    string,
-    { closes: number[]; volumes: number[]; quote: (typeof quoted)[number] }
-  >();
-  quoted.forEach((q, idx) => {
-    const bars = barLists[idx];
-    seriesBySymbol.set(q.symbol, { closes: bars.map((b) => b.close), volumes: bars.map((b) => b.volume), quote: q });
-  });
+  /* ── 2. TIÊN NGHIỆM BẬC 0 — base-rate 250 phiên thật (per-segment B5) ── */
+  const prior = buildPrior(hoseQuoted.map((s) => s.closes), "HOSE");
 
-  /* ── 3. TIÊN NGHIỆM BẬC 0 — base-rate 250 phiên thật ─────────────────── */
-  const closesBySymbol = [...seriesBySymbol.values()].map((s) => s.closes);
-  const baseRates = historicalBaseRates(closesBySymbol, { sessions: PRIOR_SESSIONS });
-  const prior = {
-    pUp: baseRates.pUp,
-    pDown: baseRates.pDown,
-    pFlat: baseRates.pFlat,
-    baseRateNote: `Tần suất lịch sử ${PRIOR_SESSIONS} phiên: ${(baseRates.pUp * 100).toFixed(1).replace(".", ",")}% tăng / ${(baseRates.pDown * 100).toFixed(1).replace(".", ",")}% giảm / ${(baseRates.pFlat * 100).toFixed(1).replace(".", ",")}% đi ngang (${baseRates.sampleCount.toLocaleString("vi-VN")} quan sát mã×phiên)`,
-  };
+  /* ── 3. BẰNG CHỨNG BẬC 1 · SEGMENT CHÍNH VN-HOSE-STOCK ──────────────── */
 
-  /* ── 4. Bậc 1 · bằng chứng thị trường ───────────────────────────────── */
-
-  // 4a. Breadth (tăng/giảm toàn rổ)
+  // 3a. Breadth (tăng/giảm toàn rổ HOSE)
   if (totalQuoted >= 5 && breadth !== 0) {
     const lr = Math.min(2.2, Math.max(1, 1 + 0.6 * Math.abs(breadth)));
     marketEvidence.push({
@@ -166,11 +130,11 @@ export async function buildEvidenceBundle(
       direction: breadth > 0 ? "UP" : "DOWN",
       likelihoodRatio: lr,
       weight: 0.7,
-      note: `${advancing} mã tăng / ${declining} mã giảm (breadth ${(breadth >= 0 ? "+" : "") + breadth.toFixed(2)})`,
+      note: `${advancing} mã tăng / ${declining} mã giảm HOSE (breadth ${(breadth >= 0 ? "+" : "") + breadth.toFixed(2)})`,
     });
   }
 
-  // 4b. Lexicon cảm xúc tin tức 24h
+  // 3b. Lexicon cảm xúc tin tức 24h (thị trường-wide VN — gán HOSE segment §3.4)
   const since24h = new Date(Date.now() - 24 * 3_600_000);
   const newsItems = await db.newsItem.findMany({
     where: { publishedAt: { gte: since24h } },
@@ -193,7 +157,7 @@ export async function buildEvidenceBundle(
     });
   }
 
-  // 4c. Dòng khối ngoại ròng (flows simulated — giảm trọng số tin cậy)
+  // 3c. Dòng khối ngoại ròng (flows simulated — giảm trọng số tin cậy)
   const flows = await getForeignFlows().catch(() => null);
   const flowTotal = flows ? flows.totalBuy + flows.totalSell : 0;
   if (flows && flowTotal > 0 && flows.totalNet !== 0) {
@@ -211,11 +175,8 @@ export async function buildEvidenceBundle(
     });
   }
 
-  // 4d. Holt basket forecast + regime trên rổ equal-weight
-  const basketCloses = buildBasketIndex(
-    [...seriesBySymbol.values()].map((s) => s.closes),
-    PRIOR_SESSIONS
-  );
+  // 3d. Holt basket forecast + regime trên rổ top-10 HOSE equal-weight
+  const basketCloses = buildBasketIndex(hoseBasket.map((s) => s.closes), PRIOR_SESSIONS);
   const basketForecast = holtForecastPct(basketCloses, { horizon: 5 });
   if (basketForecast && Math.abs(basketForecast.expectedPct) >= 0.1) {
     const strength = Math.min(1, Math.abs(basketForecast.expectedPct) / 1.5);
@@ -228,7 +189,7 @@ export async function buildEvidenceBundle(
       direction: basketForecast.expectedPct > 0 ? "UP" : "DOWN",
       likelihoodRatio: lr,
       weight: 0.65,
-      note: `Holt rổ 5 phiên: ${(basketForecast.expectedPct >= 0 ? "+" : "") + basketForecast.expectedPct.toFixed(2)}% (CI80 ${basketForecast.lowPct.toFixed(2)}%…${basketForecast.highPct.toFixed(2)}%)`,
+      note: `Holt rổ HOSE 5 phiên: ${(basketForecast.expectedPct >= 0 ? "+" : "") + basketForecast.expectedPct.toFixed(2)}% (CI80 ${basketForecast.lowPct.toFixed(2)}%…${basketForecast.highPct.toFixed(2)}%)`,
     });
   }
   const regime = classifyRegime(basketCloses);
@@ -241,19 +202,19 @@ export async function buildEvidenceBundle(
       direction: regime.regime === "BULL_TREND" ? "UP" : "DOWN",
       likelihoodRatio: 1.5,
       weight: 0.6,
-      note: `Chế độ ${regime.label} (SMA20 ${regime.sma20 != null ? Math.round(regime.sma20 * 100) / 100 : "—"} vs SMA50 ${regime.sma50 != null ? Math.round(regime.sma50 * 100) / 100 : "—"} của rổ)`,
+      note: `Chế độ ${regime.label} (SMA20 ${regime.sma20 != null ? Math.round(regime.sma20 * 100) / 100 : "—"} vs SMA50 ${regime.sma50 != null ? Math.round(regime.sma50 * 100) / 100 : "—"} của rổ HOSE)`,
     });
   }
 
-  /* ── 5. Phiếu LLM (chu kỳ ưu tiên, fallback DB 24h) → evidence + votes ── */
+  /* ── 4. Phiếu LLM (chu kỳ ưu tiên, fallback DB 24h) → evidence + votes ── */
   const votes = await resolveLlmVotes(options.llmVotes);
-  const voteStats = await loadVoteAgentStats(votes.map((v) => v.code));
+  // B7 — thêm code ml-forecast vào stats (cử tri thứ 6 cần healthScore/successRate)
+  const voteStats = await loadVoteAgentStats([...votes.map((v) => v.code), "ml-forecast"]);
   // (phiên #35) Posterior Thompson sampling BanditArm — nhân vào weight phiếu:
   // agent bầu đúng hướng giá thực tế nhiều → posteriorMean cao → tin hơn.
-  const banditArms =
-    votes.length > 0
-      ? await db.banditArm.findMany().catch(() => [])
-      : [];
+  // B7: đọc LUÔN (kể cả không có phiếu LLM) vì cử tri thứ 6 ml-forecast cần
+  // posteriorMean arm của mình (Beta(1,1) → 0,5 khi arm chưa tồn tại).
+  const banditArms = await db.banditArm.findMany().catch(() => []);
   const posteriorByCode = new Map(
     banditArms.map((a) => [a.agentCode, (a.alpha + 1) / (a.alpha + a.beta + 2)])
   );
@@ -266,8 +227,13 @@ export async function buildEvidenceBundle(
     const successRate = stats?.successRate ?? 0;
     const healthScore = stats?.healthScore ?? 80;
     const confidence = Math.max(0, Math.min(1, v.confidence));
+    // B9 — weight tally cổng đồng thuận (§3.5): trùng công thức weight bằng chứng
+    const voteWeight = Math.min(
+      1,
+      Math.max(0.3, (healthScore / 100) * (posteriorByCode.get(v.code) ?? 1))
+    );
 
-    agentVotes.push({ code: v.code, agentName, gen1, direction: v.direction, confidence, successRate });
+    agentVotes.push({ code: v.code, agentName, gen1, direction: v.direction, confidence, successRate, weight: voteWeight });
 
     // Assessment của LLM là bằng chứng thị trường (direction = quan điểm chung)
     const lr = Math.min(2.0, 1 + 0.8 * confidence);
@@ -279,37 +245,63 @@ export async function buildEvidenceBundle(
       level: "market",
       direction: v.direction,
       likelihoodRatio: lr,
-      weight: Math.min(
-        1,
-        Math.max(0.3, (healthScore / 100) * (posteriorByCode.get(v.code) ?? 1))
-      ),
+      weight: voteWeight,
       note: `${agentName} đánh giá ${v.direction === "UP" ? "TĂNG" : v.direction === "DOWN" ? "GIẢM" : "ĐI NGANG"} (tin cậy ${confidence.toFixed(2)})${firstNote ? ` — ${firstNote}` : ""}`,
     });
   }
 
-  /* ── 6. Bậc 3 · bằng chứng symbol top ADTV ──────────────────────────── */
-  const adtvBySymbol = new Map<string, number>();
-  for (const [symbol, s] of seriesBySymbol) {
-    const tail = s.closes.slice(-20);
-    const vols = s.volumes.slice(-20);
-    if (tail.length === 20) {
-      adtvBySymbol.set(symbol, mean(tail.map((c, i) => c * vols[i])));
-    }
+  /* ── 4b. (B7) CỬ TRI THỨ 6 — ml-forecast ensemble MLP+linreg ──────────
+   * REPLACE bằng chứng quant `mlp-forecast (MLP 10→16→8→3)` cũ: cùng tín
+   * hiệu ML giờ vào Bayes ĐÚNG MỘT LẦN qua phiếu bầu (chống đếm kép T7.5 —
+   * KHÔNG đồng thời tồn tại source quant cũ và llm-vote:ml-forecast). */
+  const mlEns = await mlForecastEnsemble().catch(() => null);
+  if (mlEns) {
+    const rosterMl = ROSTER_BY_CODE.get("ml-forecast");
+    const statsMl = voteStats.get("ml-forecast");
+    const agentNameMl = rosterMl?.name ?? "ML Forecast";
+    const gen1Ml = rosterMl?.gen1 ?? "A15";
+    const healthMl = statsMl?.healthScore ?? 80;
+    const mlDiff =
+      mlEns.pUp != null && mlEns.pDown != null
+        ? Math.abs(mlEns.pUp - mlEns.pDown)
+        : 0.3 * mlEns.confidence; // fallback linreg — LR khiêm tốn
+    // B9 — weight tally (§3.5, trùng weight bằng chứng; Beta(1,1) → 0,5 khi chưa có arm)
+    const mlVoteWeight = Math.min(
+      1,
+      Math.max(0.3, (healthMl / 100) * (posteriorByCode.get("ml-forecast") ?? 0.5))
+    );
+
+    agentVotes.push({
+      code: "ml-forecast",
+      agentName: agentNameMl,
+      gen1: gen1Ml,
+      direction: mlEns.direction,
+      confidence: mlEns.confidence, // = max(pUp,pDown,pFlat) — BanditEvent Brier (B8)
+      successRate: statsMl?.successRate ?? 0,
+      weight: mlVoteWeight, // B9 — trùng weight bằng chứng (đã điền ở trên)
+    });
+    marketEvidence.push({
+      source: "llm-vote:ml-forecast",
+      agentName: agentNameMl,
+      gen1: gen1Ml,
+      level: "market",
+      direction: mlEns.direction,
+      likelihoodRatio: Math.min(2.0, 1 + 0.8 * mlDiff),
+      // BanditArm ml-forecast chưa có track record → Beta(1,1) posteriorMean 0,5
+      // (cold-start khiêm tốn — B7 spec); arm đã có dữ liệu → posteriorMean thật.
+      weight: mlVoteWeight,
+      note: mlEns.note,
+    });
   }
-  const topSymbols = [...seriesBySymbol.entries()]
-    .map(([symbol, s]) => ({
-      symbol,
-      s,
-      adtv: adtvBySymbol.get(symbol) ?? 0,
-    }))
-    .sort((a, b) => b.adtv - a.adtv)
-    .slice(0, TOP_SYMBOL_COUNT);
+
+  /* ── 5. BẰNG CHỨNG BẬC 3 · symbol top ADTV HOSE (rổ segment chính) ──── */
+  const topSymbols = hoseBasket.slice(0, TOP_SYMBOL_COUNT);
 
   const symbolFeatures: SymbolFeature[] = [];
-  for (const { symbol, s } of topSymbols) {
+  for (const s of topSymbols) {
     const closes = s.closes;
     const volumes = s.volumes;
-    const last = s.quote.last || (closes.length ? closes[closes.length - 1] : 0);
+    const last = s.last || (closes.length ? closes[closes.length - 1] : 0);
     if (!last || closes.length < 30) continue;
 
     const rsi14 = rsi(closes, 14);
@@ -320,7 +312,7 @@ export async function buildEvidenceBundle(
       closes.length >= 6 ? pctChange(closes[closes.length - 6], last) : null;
     const forecast = holtForecastPct(closes, { horizon: 5 });
 
-    // 6a. RSI14 — quá bán/quá mua
+    // 5a. RSI14 — quá bán/quá mua
     if (rsi14 != null) {
       if (rsi14 < 30) {
         symbolEvidence.push({
@@ -328,7 +320,7 @@ export async function buildEvidenceBundle(
           agentName: "Feature Store",
           gen1: "S2",
           level: "symbol",
-          symbol,
+          symbol: s.symbol,
           direction: "UP",
           likelihoodRatio: 1.7,
           weight: 0.6,
@@ -340,7 +332,7 @@ export async function buildEvidenceBundle(
           agentName: "Feature Store",
           gen1: "S2",
           level: "symbol",
-          symbol,
+          symbol: s.symbol,
           direction: "DOWN",
           likelihoodRatio: 1.5,
           weight: 0.6,
@@ -349,7 +341,7 @@ export async function buildEvidenceBundle(
       }
     }
 
-    // 6b. z-score dải định giá 90 phiên (A3 Fair Value)
+    // 5b. z-score dải định giá 90 phiên (A3 Fair Value)
     if (z90 != null) {
       if (z90 < -1.5) {
         symbolEvidence.push({
@@ -357,7 +349,7 @@ export async function buildEvidenceBundle(
           agentName: "Fair Value Analyst",
           gen1: "A3",
           level: "symbol",
-          symbol,
+          symbol: s.symbol,
           direction: "UP",
           likelihoodRatio: 1.5,
           weight: 0.6,
@@ -369,7 +361,7 @@ export async function buildEvidenceBundle(
           agentName: "Fair Value Analyst",
           gen1: "A3",
           level: "symbol",
-          symbol,
+          symbol: s.symbol,
           direction: "DOWN",
           likelihoodRatio: 1.5,
           weight: 0.6,
@@ -378,14 +370,14 @@ export async function buildEvidenceBundle(
       }
     }
 
-    // 6c. MACD histogram
+    // 5c. MACD histogram
     if (macdHist != null && macdHist !== 0) {
       symbolEvidence.push({
         source: "feature-store.macd",
         agentName: "Feature Store",
         gen1: "S2",
         level: "symbol",
-        symbol,
+        symbol: s.symbol,
         direction: macdHist > 0 ? "UP" : "DOWN",
         likelihoodRatio: 1.25,
         weight: 0.5,
@@ -393,10 +385,10 @@ export async function buildEvidenceBundle(
       });
     }
 
-    // 6d. Khối lượng xác nhận hướng giá
+    // 5d. Khối lượng xác nhận hướng giá
     const priceDir =
-      s.quote.changePct !== 0
-        ? s.quote.changePct > 0
+      s.changePct !== 0
+        ? s.changePct > 0
           ? "UP"
           : "DOWN"
         : momentum5d != null && momentum5d !== 0
@@ -410,22 +402,22 @@ export async function buildEvidenceBundle(
         agentName: "Feature Store",
         gen1: "S2",
         level: "symbol",
-        symbol,
+        symbol: s.symbol,
         direction: priceDir,
         likelihoodRatio: 1.3,
         weight: 0.55,
-        note: `KL ${volRatio.toFixed(2)}× TB20 kết hợp giá ${s.quote.changePct >= 0 ? "+" : ""}${s.quote.changePct.toFixed(2)}% — dòng tiền xác nhận`,
+        note: `KL ${volRatio.toFixed(2)}× TB20 kết hợp giá ${s.changePct >= 0 ? "+" : ""}${s.changePct.toFixed(2)}% — dòng tiền xác nhận`,
       });
     }
 
-    // 6e. Momentum 5 phiên
+    // 5e. Momentum 5 phiên
     if (momentum5d != null && Math.abs(momentum5d) > 0.3) {
       symbolEvidence.push({
         source: "feature-store.momentum",
         agentName: "Feature Store",
         gen1: "S2",
         level: "symbol",
-        symbol,
+        symbol: s.symbol,
         direction: momentum5d > 0 ? "UP" : "DOWN",
         likelihoodRatio: 1.2,
         weight: 0.5,
@@ -433,7 +425,7 @@ export async function buildEvidenceBundle(
       });
     }
 
-    // 6f. Holt forecast từng mã (LR theo |expected|/sigma, cap 1.8)
+    // 5f. Holt forecast từng mã (LR theo |expected|/sigma, cap 1.8)
     if (forecast && Math.abs(forecast.expectedPct) >= 0.1) {
       const sigmaFloor = Math.max(forecast.sigmaPct, 0.05); // chống chia ~0 chuỗi phẳng
       const zStat = Math.min(1.6, Math.abs(forecast.expectedPct) / sigmaFloor);
@@ -442,7 +434,7 @@ export async function buildEvidenceBundle(
         agentName: "ML Forecast",
         gen1: "A15",
         level: "symbol",
-        symbol,
+        symbol: s.symbol,
         direction: forecast.expectedPct > 0 ? "UP" : "DOWN",
         likelihoodRatio: Math.min(1.8, 1 + 0.5 * zStat),
         weight: 0.6,
@@ -451,15 +443,15 @@ export async function buildEvidenceBundle(
     }
 
     symbolFeatures.push({
-      symbol,
-      name: s.quote.name,
-      sector: s.quote.sector,
+      symbol: s.symbol,
+      name: s.name,
+      sector: s.sector,
       last,
-      changePct: s.quote.changePct,
+      changePct: s.changePct,
       zScore: z90,
       rsi14,
       momentum5d,
-      adtvVnd: adtvBySymbol.get(symbol) ?? 0,
+      adtvVnd: s.adtvVnd,
       forecast: forecast
         ? {
             horizonDays: 5,
@@ -471,41 +463,16 @@ export async function buildEvidenceBundle(
     });
   }
 
-  /* ── 6g. (phiên #35) Bằng chứng học máy — MLP + Q-learning nếu có model ── */
-  // 1 query findMany kind in [dl-mlp, rl-q] status serving; chưa có model
-  // nào → bỏ qua im lặng (KHÔNG throw, KHÔNG log — module đọc là an toàn).
+  /* ── 6. (phiên #35 · B7 REPLACE) Bằng chứng học máy — CHỈ còn rl-policy ──
+   * Block (a) `mlp-forecast (MLP 10→16→8→3)` đã bị REPLACE bằng phiếu cử tri
+   * thứ 6 ở mục 4b (llm-vote:ml-forecast) — giữ lại (b) rl-policy nguyên vẹn. */
   try {
     const mlModels = await db.mlModel.findMany({
-      where: { kind: { in: ["dl-mlp", "rl-q"] }, status: "serving" },
+      where: { kind: { in: ["rl-q"] }, status: "serving" },
     });
-    const dlModel = mlModels.find((m) => m.kind === "dl-mlp");
     const rlModel = mlModels.find((m) => m.kind === "rl-q");
 
-    // (a) mlp-forecast: predictProba phiên cuối top-10 (featureNorm tự áp)
-    if (dlModel) {
-      const mlp = MLP.fromJSON(dlModel.weights);
-      const feats = await latestFeatures();
-      if (feats.length > 0) {
-        const probs = feats.map((f) => mlp.predictProba(f.x));
-        const avgUp = mean(probs.map((p) => p[0]));
-        const avgDown = mean(probs.map((p) => p[2]));
-        const diff = avgUp - avgDown;
-        const direction: "UP" | "DOWN" | "FLAT" =
-          Math.abs(diff) < 0.05 ? "FLAT" : diff > 0 ? "UP" : "DOWN";
-        marketEvidence.push({
-          source: "mlp-forecast (MLP 10→16→8→3)",
-          agentName: "DL Trainer",
-          gen1: "A17",
-          level: "market",
-          direction,
-          likelihoodRatio: Math.min(2.0, 1 + 1.2 * Math.abs(diff)),
-          weight: 0.6,
-          note: `MLP v${dlModel.version} trên ${feats.length} mã: pUp ${(avgUp * 100).toFixed(1)}% / pDown ${(avgDown * 100).toFixed(1)}%`,
-        });
-      }
-    }
-
-    // (b) rl-policy: policyStance từ Q-table + rổ top-10 THEO QUOTE VOLUME
+    // rl-policy: policyStance từ Q-table + rổ top-10 HOSE-STOCK THEO QUOTE VOLUME
     // (loadTopSeries(10) — CÙNG rổ với lúc train trong /api/ml/train, để
     // stance hiển thị ở status và stance trong bằng chứng Bayes KHÔNG lệch nhau)
     if (rlModel) {
@@ -528,10 +495,194 @@ export async function buildEvidenceBundle(
     // mô hình hỏng/thiếu dữ liệu → im lặng bỏ qua, 4 bậc gốc không bị ảnh hưởng
   }
 
-  /* ── 7. Bậc 2 · số liệu nền nhóm ngành (toàn rổ có quote) ───────────── */
+  /* ── 7. BẰNG CHỨNG BẬC 1 · CÁC SEGMENT PHỤ (B5 §3.4) ────────────────── */
+  const segments: SegmentInput[] = [
+    {
+      segment: "VN-HOSE-STOCK",
+      label: hose.label,
+      symbolCount: hoseBasket.length,
+      prior,
+      evidence: marketEvidence,
+      compositeWeight: hose.adtvVnd ?? 0,
+    },
+  ];
+
+  // 7a. VN-HNX-STOCK — breadth segment · Holt · RSI basket
+  {
+    const ev: BayesEvidence[] = [];
+    pushBreadthSegment(ev, hnx, "HNX");
+    pushHoltSegment(ev, hnx, "HNX");
+    pushRsiSegment(ev, hnx, "HNX");
+    segments.push({
+      segment: "VN-HNX-STOCK",
+      label: hnx.label,
+      symbolCount: hnx.symbols.length,
+      prior: buildPrior(hnx.symbols.map((s) => s.closes), "HNX"),
+      evidence: ev,
+      compositeWeight: hnx.adtvVnd ?? 0,
+    });
+  }
+
+  // 7b. VN-UPCOM-STOCK — Holt · RSI basket
+  {
+    const ev: BayesEvidence[] = [];
+    pushHoltSegment(ev, upcom, "UPCOM");
+    pushRsiSegment(ev, upcom, "UPCOM");
+    segments.push({
+      segment: "VN-UPCOM-STOCK",
+      label: upcom.label,
+      symbolCount: upcom.symbols.length,
+      prior: buildPrior(upcom.symbols.map((s) => s.closes), "UPCOM"),
+      evidence: ev,
+      compositeWeight: upcom.adtvVnd ?? 0,
+    });
+  }
+
+  // 7c. VN-ETF — breadth ETF · Holt
+  {
+    const ev: BayesEvidence[] = [];
+    pushBreadthSegment(ev, etf, "ETF");
+    pushHoltSegment(ev, etf, "ETF");
+    segments.push({
+      segment: "VN-ETF",
+      label: etf.label,
+      symbolCount: etf.symbols.length,
+      prior: buildPrior(etf.symbols.map((s) => s.closes), "ETF"),
+      evidence: ev,
+      compositeWeight: etf.adtvVnd ?? 0,
+    });
+  }
+
+  // 7d. VN-INDEX — động lượng index · RSI index (§3.4)
+  {
+    const ev: BayesEvidence[] = [];
+    const vnindex = idx.symbols.find((s) => s.symbol === "VNINDEX");
+    if (vnindex && vnindex.closes.length >= 6) {
+      const mom5 = pctChange(vnindex.closes[vnindex.closes.length - 6], vnindex.closes[vnindex.closes.length - 1]);
+      if (Math.abs(mom5) > 1) {
+        ev.push({
+          source: "index.momentum",
+          agentName: "Market Analyst",
+          gen1: "A2",
+          level: "market",
+          direction: mom5 > 0 ? "UP" : "DOWN",
+          likelihoodRatio: 1.15,
+          weight: 0.6,
+          note: `VN-Index động lượng 5 phiên ${(mom5 >= 0 ? "+" : "") + mom5.toFixed(2)}%`,
+        });
+      }
+      const rsiIdx = rsi(vnindex.closes, 14);
+      if (rsiIdx != null) {
+        if (rsiIdx < 30) {
+          ev.push({
+            source: "index.rsi",
+            agentName: "Market Analyst",
+            gen1: "A2",
+            level: "market",
+            direction: "UP",
+            likelihoodRatio: 1.2,
+            weight: 0.6,
+            note: `RSI14 VN-Index ${rsiIdx.toFixed(0)} — quá bán`,
+          });
+        } else if (rsiIdx > 70) {
+          ev.push({
+            source: "index.rsi",
+            agentName: "Market Analyst",
+            gen1: "A2",
+            level: "market",
+            direction: "DOWN",
+            likelihoodRatio: 1.2,
+            weight: 0.6,
+            note: `RSI14 VN-Index ${rsiIdx.toFixed(0)} — quá mua`,
+          });
+        }
+      }
+    }
+    segments.push({
+      segment: "VN-INDEX",
+      label: idx.label,
+      symbolCount: idx.symbols.length,
+      prior: buildPrior(idx.symbols.map((s) => s.closes), "INDEX"),
+      evidence: ev,
+      compositeWeight: idx.symbols.length * INDEX_COMPOSITE_WEIGHT,
+    });
+  }
+
+  /* ── 7e. (B13) SEGMENT INTERNATIONAL — ^GSPC · ^HSI (tham khảo, KHÔNG vào
+   * composite VN — thiết kế tách bạch T13.3): động lượng 5 phiên LR 1,15 khi
+   * |mom| > 1% + RSI14 LR 1,2 khi < 30 / > 70; weight 0,4 (mờ hơn bằng chứng VN). */
+  {
+    const intlSymbols = ["^GSPC", "^HSI"];
+    const intlRows = await db.instrument
+      .findMany({
+        where: { isActive: true, market: { in: ["US", "HK"] }, symbol: { in: intlSymbols } },
+        select: { id: true, symbol: true },
+      })
+      .catch(() => [] as { id: string; symbol: string }[]);
+    if (intlRows.length > 0) {
+      const intlBars = await db.bar
+        .findMany({
+          where: { instrumentId: { in: intlRows.map((r) => r.id) }, date: { gte: new Date(Date.now() - 180 * 86_400_000) } },
+          orderBy: [{ instrumentId: "asc" }, { date: "asc" }],
+          select: { instrumentId: true, close: true },
+        })
+        .catch(() => [] as { instrumentId: string; close: number }[]);
+      const closesById = new Map<string, number[]>();
+      for (const b of intlBars) {
+        if (!(b.close > 0)) continue;
+        const arr = closesById.get(b.instrumentId) ?? [];
+        arr.push(b.close);
+        closesById.set(b.instrumentId, arr);
+      }
+      const intlCloses = intlRows
+        .map((r) => ({ symbol: r.symbol, closes: (closesById.get(r.id) ?? []).slice(-70) }))
+        .filter((s) => s.closes.length >= 20);
+
+      const ev: BayesEvidence[] = [];
+      for (const s of intlCloses) {
+        const short = s.symbol === "^GSPC" ? "S&P 500" : s.symbol === "^HSI" ? "HSI" : s.symbol;
+        const mom5 = s.closes.length >= 6 ? pctChange(s.closes[s.closes.length - 6], s.closes[s.closes.length - 1]) : null;
+        if (mom5 != null && Math.abs(mom5) > 1) {
+          ev.push({
+            source: `intl.momentum:${s.symbol}`,
+            agentName: "Market Analyst",
+            gen1: "A2",
+            level: "market",
+            direction: mom5 > 0 ? "UP" : "DOWN",
+            likelihoodRatio: 1.15,
+            weight: 0.4,
+            note: `Quốc tế: ${short} ${mom5 >= 0 ? "+" : ""}${mom5.toFixed(2)}% 5 phiên — ảnh hưởng tâm lý VN`,
+          });
+        }
+        const rsiIntl = rsi(s.closes, 14);
+        if (rsiIntl != null && (rsiIntl < 30 || rsiIntl > 70)) {
+          ev.push({
+            source: `intl.rsi:${s.symbol}`,
+            agentName: "Market Analyst",
+            gen1: "A2",
+            level: "market",
+            direction: rsiIntl < 30 ? "UP" : "DOWN",
+            likelihoodRatio: 1.2,
+            weight: 0.4,
+            note: `RSI14 ${short} ${rsiIntl.toFixed(0)} — ${rsiIntl < 30 ? "quá bán" : "quá mua"}`,
+          });
+        }
+      }
+      segments.push({
+        segment: "INTERNATIONAL",
+        label: "Quốc tế (S&P 500 · HSI — tham khảo)",
+        symbolCount: intlCloses.length,
+        prior: buildPrior(intlCloses.map((s) => s.closes), "QT"),
+        evidence: ev,
+        compositeWeight: 0, // §3.4: INTERNATIONAL KHÔNG vào composite VN
+      });
+    }
+  }
+
+  /* ── 8. Bậc 2 · số liệu nền nhóm ngành (HOSE-STOCK quoted — continuation) ── */
   const sectorAgg = new Map<string, { count: number; momSum: number; momCount: number }>();
-  for (const [, s] of seriesBySymbol) {
-    const key = s.quote.sector;
+  for (const s of hoseQuoted) {
+    const key = s.sector;
     const agg = sectorAgg.get(key) ?? { count: 0, momSum: 0, momCount: 0 };
     agg.count++;
     if (s.closes.length >= 6) {
@@ -549,7 +700,7 @@ export async function buildEvidenceBundle(
     }))
     .sort((a, b) => b.symbolCount - a.symbolCount);
 
-  /* ── 8. Lồng ghép context thị trường ────────────────────────────────── */
+  /* ── 9. Lồng ghép context thị trường (HOSE-STOCK — continuation #34) ──── */
   const market: MarketFeature = {
     advancing,
     declining,
@@ -560,12 +711,17 @@ export async function buildEvidenceBundle(
     breadth,
   };
 
+  /* ── 10. B9 — đọc AppSetting consensus.enforce (shadow/enforce) ─────── */
+  const consensusSetting = await getConsensusSetting().catch(() => ({ enforce: false, autoEnableAfter: 10 }));
+
   return {
     prior,
     marketEvidence,
     symbolEvidence,
     agentVotes,
+    segments,
     veto,
+    consensusEnforce: consensusSetting.enforce,
     context: {
       market,
       symbols: symbolFeatures,
@@ -575,6 +731,99 @@ export async function buildEvidenceBundle(
 }
 
 /* ─────────────────────────── Tiện ích nội bộ ─────────────────────────── */
+
+/** Basket rỗng an toàn khi DB chưa có dữ liệu segment. */
+function emptyBasket(segment: string): SegmentBasket {
+  return {
+    segment: segment as SegmentBasket["segment"],
+    label: segment,
+    symbols: [],
+    quoted: [],
+    adtvVnd: null,
+  };
+}
+
+/** Tiên nghiệm base-rate 250 phiên từ chuỗi closes của segment. */
+function buildPrior(closesBySymbol: number[][], label: string): BayesPrior {
+  const usable = closesBySymbol.filter((c) => c.length >= 30);
+  const baseRates = historicalBaseRates(usable.length > 0 ? usable : closesBySymbol, {
+    sessions: PRIOR_SESSIONS,
+  });
+  return {
+    pUp: baseRates.pUp,
+    pDown: baseRates.pDown,
+    pFlat: baseRates.pFlat,
+    baseRateNote: `Tần suất lịch sử ${PRIOR_SESSIONS} phiên (${label}): ${(baseRates.pUp * 100).toFixed(1).replace(".", ",")}% tăng / ${(baseRates.pDown * 100).toFixed(1).replace(".", ",")}% giảm / ${(baseRates.pFlat * 100).toFixed(1).replace(".", ",")}% đi ngang (${baseRates.sampleCount.toLocaleString("vi-VN")} quan sát mã×phiên)`,
+  };
+}
+
+/** Breadth segment: (tăng − giảm)/tổng trên toàn bộ quoted của segment. */
+function pushBreadthSegment(ev: BayesEvidence[], basket: SegmentBasket, label: string): void {
+  const quoted = basket.quoted;
+  if (quoted.length < 3) return;
+  const adv = quoted.filter((q) => q.changePct > 0).length;
+  const dec = quoted.filter((q) => q.changePct < 0).length;
+  const br = (adv - dec) / quoted.length;
+  if (br === 0) return;
+  ev.push({
+    source: `segment-breadth:${label.toLowerCase()}`,
+    agentName: "Market Analyst",
+    gen1: "A2",
+    level: "market",
+    direction: br > 0 ? "UP" : "DOWN",
+    likelihoodRatio: Math.min(2.0, Math.max(1, 1 + 0.6 * Math.abs(br))),
+    weight: 0.6,
+    note: `${label}: ${adv} mã tăng / ${dec} mã giảm (breadth ${(br >= 0 ? "+" : "") + br.toFixed(2)})`,
+  });
+}
+
+/** Holt forecast trên basket index equal-weight của segment. */
+function pushHoltSegment(ev: BayesEvidence[], basket: SegmentBasket, label: string): void {
+  const closes = buildBasketIndex(basket.symbols.map((s) => s.closes), PRIOR_SESSIONS);
+  const f = holtForecastPct(closes, { horizon: 5 });
+  if (!f || Math.abs(f.expectedPct) < 0.1) return;
+  const strength = Math.min(1, Math.abs(f.expectedPct) / 1.5);
+  ev.push({
+    source: `segment-holt:${label.toLowerCase()}`,
+    agentName: "ML Forecast",
+    gen1: "A15",
+    level: "market",
+    direction: f.expectedPct > 0 ? "UP" : "DOWN",
+    likelihoodRatio: Math.min(1.8, 1 + 0.9 * strength),
+    weight: 0.6,
+    note: `Holt rổ ${label} 5 phiên: ${(f.expectedPct >= 0 ? "+" : "") + f.expectedPct.toFixed(2)}%`,
+  });
+}
+
+/** RSI14 trên basket index equal-weight của segment (quá bán/quá mua). */
+function pushRsiSegment(ev: BayesEvidence[], basket: SegmentBasket, label: string): void {
+  const closes = buildBasketIndex(basket.symbols.map((s) => s.closes), PRIOR_SESSIONS);
+  const r = rsi(closes, 14);
+  if (r == null) return;
+  if (r < 30) {
+    ev.push({
+      source: `segment-rsi:${label.toLowerCase()}`,
+      agentName: "Feature Store",
+      gen1: "S2",
+      level: "market",
+      direction: "UP",
+      likelihoodRatio: 1.5,
+      weight: 0.55,
+      note: `RSI14 rổ ${label} ${r.toFixed(0)} — quá bán`,
+    });
+  } else if (r > 70) {
+    ev.push({
+      source: `segment-rsi:${label.toLowerCase()}`,
+      agentName: "Feature Store",
+      gen1: "S2",
+      level: "market",
+      direction: "DOWN",
+      likelihoodRatio: 1.4,
+      weight: 0.55,
+      note: `RSI14 rổ ${label} ${r.toFixed(0)} — quá mua`,
+    });
+  }
+}
 
 /** Basket index equal-weight: mỗi mã chuẩn hoá = 1 tại phiên đầu rồi lấy TB. */
 function buildBasketIndex(closesBySymbol: number[][], sessions: number): number[] {

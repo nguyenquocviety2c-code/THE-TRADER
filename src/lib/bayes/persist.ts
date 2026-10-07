@@ -99,6 +99,10 @@ function rowToView(
     veto: (parsed.veto as MarketAssessmentView["veto"]) ?? { blocked: false, reason: null },
     narrative: (parsed.narrative as string) ?? "",
     agentsConsidered: (parsed.agentsConsidered as string[]) ?? [],
+    // B5 — phân đoạn thị trường (row cũ trước #38 không có → mảng rỗng)
+    segments: (parsed.segments as MarketAssessmentView["segments"]) ?? [],
+    // B9 — cổng đồng thuận (row cũ trước #38 không có → null)
+    consensus: (parsed.consensus as MarketAssessmentView["consensus"]) ?? null,
   };
 }
 
@@ -118,7 +122,15 @@ export async function saveMarketAssessment(
   view: SynthesisOutput,
   options: SaveAssessmentOptions
 ): Promise<MarketAssessmentView> {
-  void input; // giữ tham số theo hợp đồng module (view đã chứa toàn bộ)
+  const detail = viewToDetail(view);
+  // B7/B8 — persist phiếu bầu 6 cử tri (code/direction/confidence) vào detail:
+  // bandit settle + scorecard đọc được KẼ CẢ KHI phiếu rơi ngoài drivers top-12
+  // (parseVotes ưu tiên detail.agentVotes trước detail.drivers).
+  detail.agentVotes = input.agentVotes.map((v) => ({
+    code: v.code,
+    direction: v.direction,
+    confidence: Number(v.confidence.toFixed(4)),
+  }));
   const row = await db.marketAssessment.create({
     data: {
       source: options.source,
@@ -130,7 +142,7 @@ export async function saveMarketAssessment(
       confidence: view.confidence,
       disagreement: view.disagreement,
       evidenceCount: view.evidenceCount,
-      detail: JSON.stringify(viewToDetail(view)),
+      detail: JSON.stringify(detail),
     },
   });
   return {

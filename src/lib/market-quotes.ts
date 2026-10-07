@@ -19,6 +19,8 @@ export async function loadQuotesPayload(): Promise<
         name: true,
         sector: true,
         market: true,
+        type: true,
+        currency: true,
         quotes: {
           orderBy: { tradedAt: "desc" },
           take: 1,
@@ -55,6 +57,9 @@ export async function loadQuotesPayload(): Promise<
         name: i.name,
         sector: i.sector ?? "",
         market: i.market,
+        // B13 — group bảng giá theo sàn + định dạng đơn vị theo loại/tiền tệ
+        type: i.type,
+        currency: i.currency ?? "VND",
         last: q?.last ?? 0,
         // PHASE3 B3 §5.2 — Cao/Thấp phiên hiện tại cho cột mở rộng bảng giá
         high: q?.high ?? null,
@@ -75,18 +80,26 @@ export async function loadQuotesPayload(): Promise<
     .filter((q) => q.last > 0)
     .sort((a, b) => b.volume - a.volume);
 
-  const advancing = quotes.filter((q) => q.change > 0).length;
-  const declining = quotes.filter((q) => q.change < 0).length;
-  const unchanged = quotes.length - advancing - declining;
-  const totalVolume = quotes.reduce((s, q) => s + q.volume, 0);
-  const totalValue = quotes.reduce((s, q) => s + q.volume * q.last, 0);
+  // B13 — BẢNG GIÁ đa sàn (group theo sàn ở UI), nhưng SUMMARY (VN30 proxy ·
+  // breadth · thanh khoản ₫) khoá về HOSE-STOCK như #33/#34: index lưu điểm×100
+  // (không phải VND) và volume index ~2,1 tỷ cp — trộn vào totalValue/totalVolume
+  // sẽ sinh con số vô nghĩa; HNX/UPCOM có module phân đoạn riêng (B5).
+  const summaryRows = quotes.filter(
+    (q) => q.market === "HOSE" && q.type === "STOCK"
+  );
+
+  const advancing = summaryRows.filter((q) => q.change > 0).length;
+  const declining = summaryRows.filter((q) => q.change < 0).length;
+  const unchanged = summaryRows.length - advancing - declining;
+  const totalVolume = summaryRows.reduce((s, q) => s + q.volume, 0);
+  const totalValue = summaryRows.reduce((s, q) => s + q.volume * q.last, 0);
   const avgChangePct =
-    quotes.length > 0
-      ? quotes.reduce((s, q) => s + q.changePct, 0) / quotes.length
+    summaryRows.length > 0
+      ? summaryRows.reduce((s, q) => s + q.changePct, 0) / summaryRows.length
       : 0;
 
   // VN30 proxy index level: base 1000 × mean(last / refPrice)
-  const ratios = quotes
+  const ratios = summaryRows
     .filter((q) => q.refPrice && q.refPrice > 0)
     .map((q) => q.last / (q.refPrice as number));
   const indexLevel =
@@ -94,14 +107,14 @@ export async function loadQuotesPayload(): Promise<
       ? 1000 * (ratios.reduce((s, r) => s + r, 0) / ratios.length)
       : 1000;
 
-  const topGainer = quotes.reduce<MarketSummary["topGainer"]>(
+  const topGainer = summaryRows.reduce<MarketSummary["topGainer"]>(
     (best, q) =>
       q.changePct > (best?.changePct ?? -Infinity)
         ? { symbol: q.symbol, changePct: q.changePct, last: q.last }
         : best,
     null,
   );
-  const topLoser = quotes.reduce<MarketSummary["topLoser"]>(
+  const topLoser = summaryRows.reduce<MarketSummary["topLoser"]>(
     (worst, q) =>
       q.changePct < (worst?.changePct ?? Infinity)
         ? { symbol: q.symbol, changePct: q.changePct, last: q.last }
@@ -121,7 +134,7 @@ export async function loadQuotesPayload(): Promise<
       advancing,
       declining,
       unchanged,
-      count: quotes.length,
+      count: summaryRows.length, // B13 — summary chỉ đếm HOSE-STOCK (nhãn "X mã HOSE")
       totalVolume,
       totalValue,
       topGainer,

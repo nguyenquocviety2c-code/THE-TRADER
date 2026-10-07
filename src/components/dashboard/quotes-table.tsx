@@ -20,7 +20,13 @@ import {
 } from "@/components/ui/table";
 import { apiGet, apiPostJson } from "@/lib/api";
 import { useUiStore } from "@/lib/store";
-import { changeColor, formatPrice, formatPct, formatSigned, formatVolume } from "@/lib/format";
+import {
+  changeColor,
+  formatPct,
+  formatUnitPrice,
+  formatVolume,
+  unitKindOf,
+} from "@/lib/format";
 import type { QuoteRow, QuotesResponse, WatchlistResponse, WatchlistToggleResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -95,6 +101,44 @@ export function QuotesTable() {
     );
   }, [source, search]);
 
+  // B13 — group bảng giá theo SÀN (HOSE → HNX → UPCOM → US → HK) + nhóm Chỉ số
+  // riêng (index VN + quốc tế); mỗi nhóm giữ thứ tự khối lượng của nguồn.
+  const groups = React.useMemo(() => {
+    const marketOrder = ["HOSE", "HNX", "UPCOM", "US", "HK"] as const;
+    const marketLabels: Record<string, string> = {
+      HOSE: "HOSE — Sàn TP.HCM",
+      HNX: "HNX — Sàn Hà Nội",
+      UPCOM: "UPCOM — Niêm yết OTC",
+      US: "Mỹ (US)",
+      HK: "Hồng Kông (HK)",
+    };
+    const sections: { key: string; label: string; rows: QuoteRow[] }[] = [];
+    for (const m of marketOrder) {
+      const rows = quotes.filter((q) => q.market === m && q.type !== "INDEX");
+      if (rows.length > 0) {
+        sections.push({ key: m, label: marketLabels[m] ?? m, rows });
+      }
+    }
+    const indexes = quotes.filter((q) => q.type === "INDEX");
+    if (indexes.length > 0) {
+      sections.push({
+        key: "INDEX",
+        label: "Chỉ số (VN-Index · HNX · UPCOM · S&P 500 · HSI)",
+        rows: indexes,
+      });
+    }
+    return sections;
+  }, [quotes]);
+
+  // B13 — giá theo đơn vị của loại tài sản (VND nguyên · index điểm · cents)
+  const fmtP = (n: number | null | undefined, q: QuoteRow) =>
+    formatUnitPrice(n, unitKindOf(q.market, q.type), q.currency);
+  const fmtSignedUnit = (n: number | null | undefined, q: QuoteRow) => {
+    if (n == null || Number.isNaN(n)) return "—";
+    const s = formatUnitPrice(Math.abs(n), unitKindOf(q.market, q.type), q.currency);
+    return n > 0 ? `+${s}` : n < 0 ? `-${s}` : s;
+  };
+
   const isLoading = watchlistOnly && !watchlistQuery.data ? watchlistQuery.isLoading : quotesQuery.isLoading;
   const isError = watchlistOnly && !watchlistQuery.data ? watchlistQuery.isError : quotesQuery.isError;
   const error = watchlistOnly && !watchlistQuery.data ? watchlistQuery.error : quotesQuery.error;
@@ -103,7 +147,7 @@ export function QuotesTable() {
     <Card className="gap-4">
       <CardHeader>
         <CardTitle className="text-base">
-          {watchlistOnly ? "Danh mục theo dõi" : "Bảng giá VN30"}
+          {watchlistOnly ? "Danh mục theo dõi" : "Bảng giá đa sàn"}
         </CardTitle>
         <CardDescription>Nhấp vào một mã để xem biểu đồ giá</CardDescription>
         <CardAction>
@@ -198,7 +242,18 @@ export function QuotesTable() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {quotes.map((q) => (
+                  {groups.map((g) => (
+                    <React.Fragment key={g.key}>
+                      {/* B13 — hàng đầu nhóm sàn */}
+                      <TableRow className="bg-muted/40 hover:bg-muted/40">
+                        <TableCell
+                          colSpan={12}
+                          className="py-1.5 pl-6 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
+                        >
+                          {g.label} · {g.rows.length} mã
+                        </TableCell>
+                      </TableRow>
+                      {g.rows.map((q) => (
                     <TableRow
                       key={q.symbol}
                       onClick={() => setSelectedSymbol(q.symbol)}
@@ -246,7 +301,7 @@ export function QuotesTable() {
                         <p className="font-semibold">{q.symbol}</p>
                         <p className="max-w-[160px] truncate text-[11px] text-muted-foreground">
                           {quotesExpanded
-                            ? `TC ${formatPrice(q.refPrice)} · C ${formatPrice(q.high)} · T ${formatPrice(q.low)}`
+                            ? `TC ${fmtP(q.refPrice, q)} · C ${fmtP(q.high, q)} · T ${fmtP(q.low, q)}`
                             : q.sector || q.name}
                         </p>
                       </TableCell>
@@ -254,18 +309,18 @@ export function QuotesTable() {
                         {/* Q2 HOSE: chạm trần ⌃ / chạm sàn ⌄ */}
                         {q.ceilingPrice != null && q.last >= q.ceilingPrice ? (
                           <span className="font-bold text-up">
-                            ⌃ {formatPrice(q.last)}
+                            ⌃ {fmtP(q.last, q)}
                           </span>
                         ) : q.floorPrice != null && q.last <= q.floorPrice ? (
                           <span className="font-bold text-down">
-                            ⌄ {formatPrice(q.last)}
+                            ⌄ {fmtP(q.last, q)}
                           </span>
                         ) : (
-                          formatPrice(q.last)
+                          fmtP(q.last, q)
                         )}
                       </TableCell>
                       <TableCell className={`tabular-nums py-2.5 text-right ${changeColor(q.change)}`}>
-                        {formatSigned(q.change)}
+                        {fmtSignedUnit(q.change, q)}
                       </TableCell>
                       <TableCell
                         className={`tabular-nums py-2.5 text-right font-medium ${changeColor(q.changePct)}`}
@@ -276,27 +331,29 @@ export function QuotesTable() {
                         {formatVolume(q.volume)}
                       </TableCell>
                       <TableCell className="tabular-nums py-2.5 pr-6 text-right text-xs">
-                        <span className="text-up">{formatPrice(q.bidPrice)}</span>
+                        <span className="text-up">{fmtP(q.bidPrice, q)}</span>
                         <span className="text-muted-foreground"> / </span>
-                        <span className="text-down">{formatPrice(q.askPrice)}</span>
+                        <span className="text-down">{fmtP(q.askPrice, q)}</span>
                       </TableCell>
                       {/* PHASE3 B3 §5.2 — hàng cột mở rộng (≥ sm) */}
                       <TableCell className="hidden tabular-nums py-2.5 text-right font-semibold text-up sm:table-cell">
-                        {formatPrice(q.ceilingPrice)}
+                        {fmtP(q.ceilingPrice, q)}
                       </TableCell>
                       <TableCell className="hidden tabular-nums py-2.5 text-right font-semibold text-down sm:table-cell">
-                        {formatPrice(q.floorPrice)}
+                        {fmtP(q.floorPrice, q)}
                       </TableCell>
                       <TableCell className="hidden tabular-nums py-2.5 text-right text-muted-foreground sm:table-cell">
-                        {formatPrice(q.refPrice)}
+                        {fmtP(q.refPrice, q)}
                       </TableCell>
                       <TableCell className="hidden tabular-nums py-2.5 text-right sm:table-cell">
-                        {formatPrice(q.high)}
+                        {fmtP(q.high, q)}
                       </TableCell>
                       <TableCell className="hidden tabular-nums py-2.5 pr-6 text-right sm:table-cell">
-                        {formatPrice(q.low)}
+                        {fmtP(q.low, q)}
                       </TableCell>
                     </TableRow>
+                      ))}
+                    </React.Fragment>
                   ))}
                   {quotes.length === 0 && (
                     <TableRow>
@@ -312,8 +369,8 @@ export function QuotesTable() {
               </Table>
             </div>
             <p className="px-6 py-3 text-[11px] text-muted-foreground">
-              Hiển thị {quotes.length}/{totalCount} mã{" "}
-              {watchlistOnly ? "· danh mục theo dõi" : "· sắp xếp theo khối lượng"}
+              Hiển thị {quotes.length}/{totalCount} mã · nhóm theo sàn (HOSE · HNX · UPCOM · US · HK · Chỉ số)
+              {watchlistOnly ? " · danh mục theo dõi" : ""}
               {quotesExpanded ? " · cột mở rộng: trần/sàn/TC/cao/thấp" : ""}
             </p>
           </>

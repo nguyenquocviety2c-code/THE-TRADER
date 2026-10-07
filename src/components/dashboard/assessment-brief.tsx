@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRunAgents } from "@/hooks/use-run-agents";
 import { useAssessment } from "@/hooks/use-assessment";
-import { ArrowRight, Brain, Loader2, Play } from "lucide-react";
+import { ArrowRight, Brain, Loader2, MoveRight, Play, TrendingDown, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,7 +18,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useUiStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { formatDateTime } from "@/lib/format";
-import type { MarketAssessmentView } from "@/lib/types";
+import type {
+  ConsensusSnapshot,
+  MarketAssessmentView,
+  SegmentAssessment,
+} from "@/lib/types";
 
 /**
  * Phiên #34 — bản tóm tắt nhận định Bayes trên workspace Tổng quan.
@@ -172,6 +176,129 @@ function AssessmentBriefBody({ assessment }: { assessment: MarketAssessmentView 
           </Badge>
         )}
       </div>
+
+      {/* B5 compact — đa thị trường: composite + 3 phân đoạn nổi bật */}
+      {assessment.segments != null && assessment.segments.length > 0 && (
+        <BriefSegments segments={assessment.segments} />
+      )}
+
+      {/* B9 compact — cổng đồng thuận 80% */}
+      {assessment.consensus != null && (
+        <BriefConsensus consensus={assessment.consensus} />
+      )}
+    </div>
+  );
+}
+
+/* ─────────────── B5/B9 compact — chip phân đoạn + cổng đồng thuận ─────────────── */
+
+/** Thứ tự ưu tiên hiển thị: 1 dòng tổng (composite) + 3 segment nổi bật. */
+const BRIEF_SEGMENT_ORDER = [
+  "VN-COMPOSITE",
+  "VN-HOSE-STOCK",
+  "VN-HNX-STOCK",
+  "VN-INDEX",
+] as const;
+
+/** Nhãn ngắn từng segment (đồng bộ SEGMENT_SHORT trong synthesis-workspace). */
+const BRIEF_SEGMENT_SHORT: Record<string, string> = {
+  "VN-HOSE-STOCK": "HOSE",
+  "VN-HNX-STOCK": "HNX",
+  "VN-UPCOM-STOCK": "UPCOM",
+  "VN-ETF": "ETF",
+  "VN-INDEX": "INDEX",
+  "VN-COMPOSITE": "VN tổng",
+  INTERNATIONAL: "Quốc tế",
+};
+
+/** Gate badge compact: ĐỒNG THUẬN xanh lá · ĐA SỐ YẾU vàng · KHÔNG ĐỒNG THUẬN đỏ. */
+const BRIEF_GATE_TONE: Record<string, string> = {
+  CONSENSUS: "border-emerald-600/40 text-emerald-700 dark:text-emerald-400",
+  WEAK_MAJORITY: "border-amber-500/40 text-amber-700 dark:text-amber-400",
+  NO_CONSENSUS: "border-rose-600/40 text-rose-700 dark:text-rose-400",
+};
+
+function BriefSegments({ segments }: { segments: SegmentAssessment[] }) {
+  const bySegment = new Map(segments.map((s) => [s.segment, s]));
+  const picked = BRIEF_SEGMENT_ORDER.map((k) => bySegment.get(k)).filter(
+    (s): s is SegmentAssessment => s != null
+  );
+  if (picked.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+      <span className="text-muted-foreground">Đa thị trường:</span>
+      {picked.map((s) => {
+        const tone =
+          s.marketDirection === "BULLISH"
+            ? "text-up"
+            : s.marketDirection === "BEARISH"
+              ? "text-down"
+              : "text-muted-foreground";
+        const Icon =
+          s.marketDirection === "BULLISH"
+            ? TrendingUp
+            : s.marketDirection === "BEARISH"
+              ? TrendingDown
+              : MoveRight;
+        // Xác suất trùng hướng đang hiển thị (dominant của 3 xác suất).
+        const dominant = Math.max(s.pUp, s.pDown, s.pFlat);
+        return (
+          <span
+            key={s.segment}
+            className="flex items-center gap-1 rounded-md border px-1.5 py-0.5"
+            title={`${s.label} — P(tăng) ${pct1(s.pUp)} · P(đi ngang) ${pct1(s.pFlat)} · P(giảm) ${pct1(s.pDown)}`}
+          >
+            <span
+              className={cn(
+                "font-medium",
+                s.segment === "VN-COMPOSITE" && "font-semibold"
+              )}
+            >
+              {BRIEF_SEGMENT_SHORT[s.segment] ?? s.label}
+            </span>
+            <Icon className={cn("size-3", tone)} aria-hidden="true" />
+            <span className={cn("tabular-nums", tone)}>{pct1(dominant)}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function BriefConsensus({ consensus }: { consensus: ConsensusSnapshot }) {
+  const tone =
+    BRIEF_GATE_TONE[consensus.gate] ?? BRIEF_GATE_TONE.NO_CONSENSUS;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-muted-foreground">Cổng đồng thuận 80%:</span>
+      <Badge
+        variant="outline"
+        className={cn("text-[11px] font-semibold", tone)}
+        title={consensus.note || "Tỷ lệ trọng số phiếu 6 cử tri Hội đồng Nghiên cứu"}
+      >
+        {consensus.gateLabel}
+      </Badge>
+      <span className="tabular-nums font-semibold">{pct1(consensus.ratio)}</span>
+      <span className="text-[11px] text-muted-foreground">
+        · {consensus.present}/6 cử tri
+      </span>
+      {consensus.shadow ? (
+        <Badge
+          variant="outline"
+          className="border-amber-500/50 px-1 py-0 text-[9px] text-amber-700 dark:text-amber-400"
+          title="Cổng đang chạy shadow-mode — tính nhưng chưa chặn tín hiệu"
+        >
+          shadow
+        </Badge>
+      ) : (
+        <Badge
+          className="bg-emerald-600/15 px-1 py-0 text-[9px] text-emerald-700 dark:text-emerald-400"
+          title="Enforcement đang bật — tín hiệu ngược số đông bị chặn"
+        >
+          enforcement
+        </Badge>
+      )}
     </div>
   );
 }

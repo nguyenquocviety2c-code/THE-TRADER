@@ -14,6 +14,7 @@ import {
 import {
   ArrowRight,
   Brain,
+  Globe,
   History,
   Loader2,
   MoveRight,
@@ -23,6 +24,7 @@ import {
   Sigma,
   TrendingDown,
   TrendingUp,
+  Vote,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,7 +53,10 @@ import { changeColor, formatDateTime, formatVnd } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
   BayesDriver,
+  ConsensusSnapshot,
+  ConsensusVote,
   MarketAssessmentView,
+  SegmentAssessment,
   SymbolAssessment,
 } from "@/lib/types";
 
@@ -251,6 +256,16 @@ export function SynthesisWorkspace() {
           {/* 1. Header nhận định: badge hướng + stacked bar + 3 stat */}
           <AssessmentHeaderCard assessment={assessment} />
 
+          {/* 1b. B5 — Đa thị trường: posterior phân đoạn (row cũ chưa có) */}
+          {assessment.segments != null && assessment.segments.length > 0 && (
+            <SegmentsCard segments={assessment.segments} />
+          )}
+
+          {/* 1c. B9 — Cổng đồng thuận 80% (row cũ chưa có) */}
+          {assessment.consensus != null && (
+            <ConsensusCard consensus={assessment.consensus} />
+          )}
+
           {/* 2. Tường thuật + VETO */}
           <NarrativeCard assessment={assessment} />
 
@@ -379,6 +394,462 @@ function ProbSegment({
         </span>
       )}
     </div>
+  );
+}
+
+/* ─────────────────── 1b. B5 — Đa thị trường: posterior phân đoạn ─────────────────── */
+
+/** Nhãn ngắn mỗi segment (dòng phụ trọng số + bản compact ở overview). */
+const SEGMENT_SHORT: Record<string, string> = {
+  "VN-HOSE-STOCK": "HOSE",
+  "VN-HNX-STOCK": "HNX",
+  "VN-UPCOM-STOCK": "UPCOM",
+  "VN-ETF": "ETF",
+  "VN-INDEX": "INDEX",
+  "VN-COMPOSITE": "VN tổng",
+  INTERNATIONAL: "Quốc tế",
+};
+
+function segmentShort(segment: string): string {
+  return SEGMENT_SHORT[segment] ?? segment;
+}
+
+/** "% nguyên" — segment quá nhẹ (<0,5%) hiển thị "<1%" trung thực hơn "0%". */
+function formatShare(share: number | null): string | null {
+  if (share == null) return null;
+  const pct = Math.round(share * 100);
+  return pct > 0 ? `${pct}%` : share > 0 ? "<1%" : "0%";
+}
+
+function SegmentsCard({ segments }: { segments: SegmentAssessment[] }) {
+  // Tỷ lệ đóng góp composite = compositeWeight / Σw — chỉ tính trên segment
+  // có weight > 0 (bỏ COMPOSITE là tổng, bỏ INTERNATIONAL weight null).
+  const weighted = segments.filter(
+    (s) =>
+      s.compositeWeight != null &&
+      s.compositeWeight > 0 &&
+      s.segment !== "VN-COMPOSITE"
+  );
+  const totalWeight = weighted.reduce(
+    (sum, s) => sum + (s.compositeWeight ?? 0),
+    0
+  );
+  const shareOf = (s: SegmentAssessment): number | null =>
+    totalWeight > 0 &&
+    s.compositeWeight != null &&
+    s.compositeWeight > 0 &&
+    s.segment !== "VN-COMPOSITE"
+      ? s.compositeWeight / totalWeight
+      : null;
+  const weightNote = weighted
+    .map((s) => `${segmentShort(s.segment)} ${formatShare(shareOf(s)) ?? "0%"}`)
+    .join(" · ");
+
+  return (
+    <Card className="gap-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Globe className="size-4 text-muted-foreground" aria-hidden="true" />
+          Đa thị trường — posterior phân đoạn
+        </CardTitle>
+        <CardDescription>
+          {segments.length} phân đoạn · composite VN = trung bình trọng số theo
+          ADTV thật (index cố định 0,05/index)
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="pb-0">
+        <div className="max-h-96 overflow-y-auto custom-scrollbar">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="text-xs">Phân đoạn</TableHead>
+                <TableHead className="text-xs">Hướng</TableHead>
+                <TableHead className="text-xs">P(tăng)</TableHead>
+                <TableHead className="hidden text-xs sm:table-cell">
+                  P(đi ngang)
+                </TableHead>
+                <TableHead className="text-xs">P(giảm)</TableHead>
+                <TableHead className="hidden text-xs sm:table-cell">
+                  Trọng số
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {segments.map((s) => (
+                <SegmentRow key={s.segment} row={s} share={shareOf(s)} />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+        {weightNote && (
+          <p className="py-3 text-[11px] leading-relaxed text-muted-foreground">
+            Trọng số: {weightNote} — tỷ lệ đóng góp vào composite VN (ADTV đo
+            được, index khiêm tốn cố định).
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SegmentRow({
+  row,
+  share,
+}: {
+  row: SegmentAssessment;
+  share: number | null;
+}) {
+  const dir = DIRECTION[row.marketDirection] ?? DIRECTION.NEUTRAL;
+  const isComposite = row.segment === "VN-COMPOSITE";
+  // INTERNATIONAL (hoặc segment weight null) — tham khảo, không vào composite.
+  const isReference =
+    !isComposite && (row.segment === "INTERNATIONAL" || row.compositeWeight == null);
+  const shareText = formatShare(share);
+
+  return (
+    <TableRow
+      className={cn(isComposite && "border-t-2 border-border bg-muted/40")}
+    >
+      {/* Mobile — 1 hàng gộp (không tràn cột ở 390px) */}
+      <TableCell colSpan={6} className="sm:hidden">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-col gap-0.5 leading-tight">
+            <span className="flex items-center gap-1.5">
+              <span className="truncate text-xs font-semibold" title={row.note}>
+                {row.label}
+              </span>
+              {isComposite && (
+                <Badge variant="secondary" className="px-1 py-0 text-[9px]">
+                  composite
+                </Badge>
+              )}
+              {isReference && (
+                <Badge
+                  variant="outline"
+                  className="px-1 py-0 text-[9px] text-muted-foreground"
+                >
+                  tham khảo
+                </Badge>
+              )}
+            </span>
+            <span className="text-[10px] text-muted-foreground">
+              {row.symbolCount.toLocaleString("vi-VN")} mã
+              {isComposite
+                ? " · Σ 100%"
+                : shareText
+                  ? ` · TL ${shareText}`
+                  : ""}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Badge variant="outline" className={cn("text-[10px]", dir.className)}>
+              {dir.label}
+            </Badge>
+            <span className="tabular-nums text-[11px] font-semibold">
+              {pct1(row.pUp)}
+            </span>
+            <span className="text-[10px] text-muted-foreground">/</span>
+            <span className="tabular-nums text-[11px] text-muted-foreground">
+              {pct1(row.pDown)}
+            </span>
+          </div>
+        </div>
+      </TableCell>
+
+      {/* Desktop — 6 cột đầy đủ */}
+      <TableCell className="hidden sm:table-cell">
+        <div className="flex flex-col leading-tight" title={row.note}>
+          <span className="flex items-center gap-1.5 text-xs font-semibold">
+            {row.label}
+            {isComposite && (
+              <Badge variant="secondary" className="px-1 py-0 text-[9px]">
+                composite
+              </Badge>
+            )}
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            {row.symbolCount.toLocaleString("vi-VN")} mã
+          </span>
+        </div>
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        <Badge variant="outline" className={cn("text-[10px]", dir.className)}>
+          {dir.label}
+        </Badge>
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        <span
+          className={cn(
+            "tabular-nums text-xs",
+            row.marketDirection === "BULLISH"
+              ? "font-semibold text-up"
+              : "text-muted-foreground"
+          )}
+        >
+          {pct1(row.pUp)}
+        </span>
+      </TableCell>
+      <TableCell className="hidden tabular-nums text-xs text-muted-foreground sm:table-cell">
+        {pct1(row.pFlat)}
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        <span
+          className={cn(
+            "tabular-nums text-xs",
+            row.marketDirection === "BEARISH"
+              ? "font-semibold text-down"
+              : "text-muted-foreground"
+          )}
+        >
+          {pct1(row.pDown)}
+        </span>
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        {isComposite ? (
+          <span
+            className="tabular-nums text-xs text-muted-foreground"
+            title="Tổng hợp có trọng số của các phân đoạn thành phần"
+          >
+            Σ 100%
+          </span>
+        ) : shareText ? (
+          <span
+            className="tabular-nums text-xs text-muted-foreground"
+            title="Tỷ lệ đóng góp vào composite VN"
+          >
+            {shareText}
+          </span>
+        ) : (
+          <span className="text-[11px] italic text-muted-foreground">tham khảo</span>
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+/* ─────────────────── 1c. B9 — Cổng đồng thuận 80% ─────────────────── */
+
+/** Màu badge gate: ĐỒNG THUẬN xanh lá · ĐA SỐ YẾU vàng · KHÔNG ĐỒNG THUẬN đỏ. */
+const GATE_TONE: Record<string, string> = {
+  CONSENSUS: "bg-emerald-600/15 text-emerald-700 dark:text-emerald-400",
+  WEAK_MAJORITY: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  NO_CONSENSUS: "bg-rose-600/15 text-rose-700 dark:text-rose-400",
+};
+
+const TALLY_DIRS = ["UP", "DOWN", "FLAT"] as const;
+
+function ConsensusCard({ consensus }: { consensus: ConsensusSnapshot }) {
+  const tally = consensus.tally ?? [];
+  const totalWeight = tally.reduce((s, v) => s + v.weight, 0);
+  const votesOf = (d: (typeof TALLY_DIRS)[number]) =>
+    tally.filter((v) => v.direction === d);
+  const sumOf = (d: (typeof TALLY_DIRS)[number]) =>
+    votesOf(d).reduce((s, v) => s + v.weight, 0);
+  const shareOf = (d: (typeof TALLY_DIRS)[number]) =>
+    totalWeight > 0 ? sumOf(d) / totalWeight : 0;
+  const gateTone = GATE_TONE[consensus.gate] ?? GATE_TONE.NO_CONSENSUS;
+
+  const ariaLabel =
+    totalWeight > 0
+      ? `Cổng đồng thuận 80%: tỷ lệ trọng số ${pct1(consensus.ratio)} — ${consensus.gateLabel}. ` +
+        TALLY_DIRS.map(
+          (d) =>
+            `${votesOf(d).length} phiếu ${d === "UP" ? "tăng" : d === "DOWN" ? "giảm" : "đi ngang"} (${pct1(shareOf(d))})`
+        ).join(", ") +
+        ". Ngưỡng đồng thuận 80%."
+      : "Cổng đồng thuận 80%: không có phiếu hợp lệ.";
+
+  return (
+    <Card className="gap-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Vote className="size-4 text-muted-foreground" aria-hidden="true" />
+          Cổng đồng thuận 80%
+        </CardTitle>
+        <CardDescription>
+          {consensus.present}/6 cử tri Hội đồng Nghiên cứu · tỷ lệ đồng thuận
+          trọng số{" "}
+          <span className="tabular-nums font-semibold text-foreground">
+            {pct1(consensus.ratio)}
+          </span>
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {/* Gate + trạng thái enforcement */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            className={cn("px-3 py-1 text-sm font-bold tracking-wide", gateTone)}
+          >
+            {consensus.gateLabel}
+          </Badge>
+          {consensus.shadow ? (
+            <Badge
+              variant="outline"
+              className="border-amber-500/50 text-[11px] text-amber-700 dark:text-amber-400"
+            >
+              Shadow-mode — chưa chặn tín hiệu
+            </Badge>
+          ) : (
+            <Badge className="bg-emerald-600/15 text-[11px] text-emerald-700 dark:text-emerald-400">
+              Enforcement ĐANG BẬT
+            </Badge>
+          )}
+          {consensus.present < 6 && (
+            <span className="text-[11px] text-muted-foreground">
+              {consensus.present}/6 cử tri có mặt
+            </span>
+          )}
+        </div>
+
+        {/* Thanh tally 3 cụm + đường ngưỡng 80% */}
+        {totalWeight > 0 ? (
+          <div className="flex flex-col gap-1.5">
+            <div className="relative">
+              <div
+                className="flex h-8 overflow-hidden rounded-md border border-border/60"
+                role="img"
+                aria-label={ariaLabel}
+              >
+                {TALLY_DIRS.map((d) => {
+                  const share = shareOf(d);
+                  if (share <= 0) return null;
+                  return (
+                    <div
+                      key={d}
+                      className={cn(
+                        "flex items-center justify-center border-r border-background/60 last:border-r-0",
+                        d === "UP"
+                          ? "bg-up/25"
+                          : d === "DOWN"
+                            ? "bg-down/25"
+                            : "bg-muted-foreground/20"
+                      )}
+                      style={{ width: `${share * 100}%` }}
+                      title={`${votesOf(d).length} phiếu · ${pct1(share)} trọng số`}
+                    >
+                      {share >= 0.18 && (
+                        <span
+                          className={cn(
+                            "tabular-nums text-[11px] font-semibold",
+                            d === "UP"
+                              ? "text-up"
+                              : d === "DOWN"
+                                ? "text-down"
+                                : "text-foreground"
+                          )}
+                        >
+                          {votesOf(d).length} · {pct1(share)}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Đường ngưỡng 80% (vị trí left 80%) */}
+              <div
+                className="pointer-events-none absolute inset-y-[-4px] left-[80%] w-0 border-l-2 border-dashed border-foreground/50"
+                aria-hidden="true"
+              />
+            </div>
+            {/* Nhãn ngưỡng dưới đường */}
+            <div className="relative h-4">
+              <span
+                className="absolute left-[80%] -translate-x-1/2 whitespace-nowrap text-[10px] font-semibold text-muted-foreground"
+                aria-hidden="true"
+              >
+                ▾ ngưỡng 80%
+              </span>
+            </div>
+            {/* Legend — đọc được cả khi cụm quá hẹp */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+              {TALLY_DIRS.map((d) => (
+                <span key={d} className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "size-2 rounded-full",
+                      d === "UP" ? "bg-up" : d === "DOWN" ? "bg-down" : "bg-muted-foreground"
+                    )}
+                    aria-hidden="true"
+                  />
+                  {d === "UP" ? "Tăng" : d === "DOWN" ? "Giảm" : "Đi ngang"}{" "}
+                  <span className="tabular-nums font-semibold text-foreground">
+                    {votesOf(d).length}
+                  </span>{" "}
+                  phiếu · <span className="tabular-nums">{pct1(shareOf(d))}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Không có phiếu hợp lệ trong lần tổng hợp này.
+          </p>
+        )}
+
+        {/* Danh sách 6 phiếu */}
+        {tally.length > 0 && (
+          <ul
+            className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3"
+            aria-label="Danh sách phiếu bầu Hội đồng Nghiên cứu"
+          >
+            {tally.map((v) => (
+              <VoteRow key={v.code} vote={v} />
+            ))}
+          </ul>
+        )}
+
+        {/* Ghi chú narrative */}
+        {consensus.note && (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {consensus.note}
+          </p>
+        )}
+        {consensus.shadow && consensus.wouldBlock && (
+          <p className="text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+            Nếu bật enforcement: tín hiệu ngược hướng số đông tại lần tổng hợp
+            này sẽ bị chặn.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function VoteRow({ vote }: { vote: ConsensusVote }) {
+  // Tái dụng DRIVER_DIRECTION (Tăng/Giảm/Đi ngang + icon lucide + màu ngữ nghĩa).
+  const dir = DRIVER_DIRECTION[vote.direction] ?? DRIVER_DIRECTION.FLAT;
+  const DirIcon = dir.icon;
+
+  return (
+    <li className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2">
+      <div className="flex min-w-0 flex-col leading-tight">
+        <span className="truncate text-xs font-semibold" title={vote.agentName}>
+          {vote.agentName}
+        </span>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {vote.gen1 ? `${vote.gen1} · ` : ""}
+          {vote.code}
+        </span>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {vote.model === "ml" && (
+          <Badge variant="secondary" className="px-1 py-0 text-[9px]">
+            ML
+          </Badge>
+        )}
+        <span
+          className="tabular-nums text-[11px] text-muted-foreground"
+          title="Trọng số phiếu = health × posterior bandit (clamp 0,3–1)"
+        >
+          w {nf2.format(vote.weight)}
+        </span>
+        <span className={cn("flex items-center gap-1 text-xs font-medium", dir.className)}>
+          <DirIcon className="size-3.5" aria-hidden="true" />
+          <span className="sr-only">{dir.label}</span>
+          <span aria-hidden="true">{dir.label}</span>
+        </span>
+      </div>
+    </li>
   );
 }
 

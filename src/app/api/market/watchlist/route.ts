@@ -23,6 +23,8 @@ export async function GET() {
                 name: true,
                 sector: true,
                 market: true,
+                type: true,
+                currency: true,
                 quotes: {
                   orderBy: { tradedAt: "desc" },
                   take: 1,
@@ -50,7 +52,12 @@ export async function GET() {
               name: item.instrument.name,
               sector: item.instrument.sector ?? "",
               market: item.instrument.market,
+              // B13 — group bảng giá theo sàn + đơn vị theo loại/tiền tệ
+              type: item.instrument.type,
+              currency: item.instrument.currency ?? "VND",
               last: q.last,
+              high: q.high,
+              low: q.low,
               change: q.change,
               changePct: q.changePct,
               volume: q.volume,

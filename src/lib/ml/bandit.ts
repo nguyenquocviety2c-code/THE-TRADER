@@ -1,6 +1,7 @@
 /**
- * src/lib/ml/bandit.ts — THOMPSON SAMPLING Beta-Bernoulli cho 5 arm =
- * 5 LLM research agents (phiên #35). KHÔNG gọi LLM, KHÔNG dependencies.
+ * src/lib/ml/bandit.ts — THOMPSON SAMPLING Beta-Bernoulli cho 6 arm =
+ * 5 LLM research agents + ml-forecast (phiên #35 · B7 #38). KHÔNG gọi LLM,
+ * KHÔNG dependencies.
  *
  * Posterior Beta(α+1, β+1) mỗi arm; reward sinh từ kết toán phiếu bầu:
  * đối chiếu direction vote trong MarketAssessment với realized direction
@@ -11,18 +12,22 @@
  * Ban đầu chu kỳ mới chạy → chưa đủ 5 phiên → settle 0 (trung thực);
  * reward tự kết toán khi bar EOD mới về (settlePendingRewards được gọi
  * trước mỗi lần train + trong chu kỳ rl-trainer).
+ *
+ * B7: arm "ml-forecast" seed Beta(1,1) — weight khiêm tốn ~0,5 khi chưa có
+ * track record; BanditEvent.confidence lưu từ phiếu cast (B8 Brier).
  */
 
 import { db } from "@/lib/db";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
 
-/** 5 arm Thompson sampling = 5 agent LLM có phiếu assessment. */
+/** 6 arm Thompson sampling = 5 agent LLM có phiếu assessment + ml-forecast (B7). */
 export const BANDIT_ARM_CODES = [
   "market-analyst",
   "fair-value",
   "news-sentiment",
   "liquidity",
   "risk-manager",
+  "ml-forecast",
 ] as const;
 
 /** Số phiên chờ trước khi kết toán reward. */
@@ -34,10 +39,12 @@ const SETTLE_MIN_SYMBOLS = 3;
 /** Quét N assessment gần nhất khi kết toán (phiếu cũ hơn coi như bỏ quên). */
 const SETTLE_SCAN_LIMIT = 30;
 
-/** Phiếu bầu của một agent trong assessment. */
+/** Phiếu bầu của một agent trong assessment (B7: kèm confidence cho Brier B8). */
 interface CastVote {
   code: string;
   direction: "UP" | "DOWN" | "FLAT";
+  /** 0..1 — lưu vào BanditEvent.confidence lúc settle (ml-forecast = max(pUp,pDown,pFlat)). */
+  confidence?: number;
 }
 
 /** Kết quả một lần kết toán. */
@@ -50,7 +57,7 @@ export interface SettleResult {
   details?: { agentCode: string; agentName: string; reward: number; assessmentId: string }[];
 }
 
-/** Upsert 5 BanditArm nếu thiếu (idempotent — gọi an toàn mọi nơi). */
+/** Upsert 6 BanditArm nếu thiếu (idempotent — gọi an toàn mọi nơi). */
 export async function ensureArms(): Promise<void> {
   for (const code of BANDIT_ARM_CODES) {
     await db.banditArm.upsert({
@@ -63,8 +70,8 @@ export async function ensureArms(): Promise<void> {
 
 /**
  * Đọc phiếu bầu từ detail JSON của assessment: hỗ trợ cả dạng detail
- * .agentVotes [{code, direction}] và dạng .drivers source "llm-vote:<code>"
- * (cấu trúc thực tế đang lưu) — chỉ giữ 5 arm bandit.
+ * .agentVotes [{code, direction, confidence}] (persist #38 lưu kèm) và dạng
+ * .drivers source "llm-vote:<code>" (cấu trúc cũ) — chỉ giữ phiếu 6 arm bandit.
  */
 function parseVotes(detail: string): CastVote[] {
   let parsed: Record<string, unknown>;
@@ -80,12 +87,19 @@ function parseVotes(detail: string): CastVote[] {
   const votes = parsed.agentVotes;
   if (Array.isArray(votes)) {
     for (const v of votes) {
-      const row = v as { code?: unknown; direction?: unknown };
+      const row = v as { code?: unknown; direction?: unknown; confidence?: unknown };
       if (typeof row.code === "string" && isDir(row.direction)) {
-        out.push({ code: row.code, direction: row.direction });
+        out.push({
+          code: row.code,
+          direction: row.direction,
+          confidence:
+            typeof row.confidence === "number" && Number.isFinite(row.confidence)
+              ? Math.max(0, Math.min(1, row.confidence))
+              : undefined,
+        });
       }
     }
-    return filterArms(out);
+    if (out.length > 0) return filterArms(out);
   }
   const drivers = parsed.drivers;
   if (Array.isArray(drivers)) {
@@ -103,7 +117,7 @@ function parseVotes(detail: string): CastVote[] {
   return filterArms(out);
 }
 
-/** Chỉ giữ phiếu của 5 arm bandit. */
+/** Chỉ giữ phiếu của 6 arm bandit. */
 function filterArms(votes: CastVote[]): CastVote[] {
   const armSet = new Set<string>(BANDIT_ARM_CODES);
   return votes.filter((v) => armSet.has(v.code));
@@ -165,9 +179,10 @@ export async function settlePendingRewards(): Promise<SettleResult> {
     select: { date: true },
   });
 
-  // Rổ top-10 thanh khoản theo quote volume mới nhất
+  // Rổ top-10 thanh khoản theo quote volume mới nhất — B5 §3.4: khoá về
+  // HOSE-STOCK (chuỗi settle lịch sử + tránh volume index ~2,1 tỷ tràn vào top)
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
+    where: { isActive: true, market: "HOSE", type: "STOCK" },
     select: {
       id: true,
       quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { volume: true } },
@@ -227,7 +242,13 @@ export async function settlePendingRewards(): Promise<SettleResult> {
 
       await db.banditEvent.upsert({
         where: { assessmentId_agentCode: { assessmentId: a.id, agentCode: v.code } },
-        update: { settledAt: new Date(), reward, direction: v.direction },
+        update: {
+          settledAt: new Date(),
+          reward,
+          direction: v.direction,
+          // B8 — độ tự tin phiếu khi cast → đầu vào Brier score (nếu có lưu)
+          ...(v.confidence != null ? { confidence: v.confidence } : {}),
+        },
         create: {
           assessmentId: a.id,
           agentCode: v.code,
@@ -235,6 +256,7 @@ export async function settlePendingRewards(): Promise<SettleResult> {
           castAt: a.createdAt,
           settledAt: new Date(),
           reward,
+          ...(v.confidence != null ? { confidence: v.confidence } : {}),
         },
       });
       await db.banditArm.update({

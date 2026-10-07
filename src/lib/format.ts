@@ -6,6 +6,7 @@
  */
 
 import { isTradingSession } from "@/lib/market-session";
+import type { UnitKind } from "@/lib/types";
 
 const nf = new Intl.NumberFormat("vi-VN", {
   maximumFractionDigits: 0,
@@ -31,6 +32,37 @@ export function formatVnd(n: number | null | undefined): string {
 export function formatPrice(n: number | null | undefined): string {
   if (n == null || Number.isNaN(n)) return "—";
   return nf.format(Math.round(n));
+}
+
+/** B2 — tra loại đơn vị giá từ (market, type) — bản client-safe của bảng
+ *  UNIT_SPECS trong src/lib/eod-sync.ts (server-only vì import db); giữ 2 bên
+ *  đồng bộ theo bảng §3.2 MARKET_EXPANSION_BLUEPRINT. */
+export function unitKindOf(market: string, type: string): UnitKind {
+  if (type === "INDEX") return "INDEX_POINT";
+  if (type === "BOND") return "BOND_PCT";
+  if (market === "US" || market === "HK") return "CENTS";
+  return "VND";
+}
+
+/** B2 — giá DB Int → chuỗi hiển thị theo loại tài sản (giá trị lưu: VND nguyên ·
+ *  index điểm×100 · cents×100 · bond %×100 — chia lại đúng số hiển thị). */
+export function formatUnitPrice(
+  n: number | null | undefined,
+  kind: UnitKind,
+  currency?: string | null
+): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  switch (kind) {
+    case "INDEX_POINT":
+      return nf2.format(n / 100); // 175.339 → "1.753,39" điểm
+    case "CENTS":
+      return `${currency === "HKD" ? "HK$" : "$"}${nf2.format(n / 100)}`;
+    case "BOND_PCT":
+      return `${nf2.format(n / 100)}%`;
+    case "VND":
+    default:
+      return nf.format(n);
+  }
 }
 
 /** "+1.250" / "-3.300" */

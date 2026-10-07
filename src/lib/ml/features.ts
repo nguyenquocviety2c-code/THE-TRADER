@@ -76,10 +76,13 @@ export interface SymbolSeries {
 /**
  * Nạp top-N mã isActive thanh khoản cao nhất kèm toàn bộ bar EOD (date asc).
  * Dùng chung cho buildTrainingSet (topN=20) và rổ Q-learning (topN=10).
+ * B5 (§3.4 MARKET_EXPANSION): khoá rổ ML về HOSE-STOCK — MLP/Q-learning
+ * tiếp tục train trên chuỗi lịch sử sâu nhất; universe đa sàn KHÔNG làm
+ * lệch thành phần rổ (train/serving phải cùng định nghĩa rổ).
  */
 export async function loadTopSeries(topN: number): Promise<SymbolSeries[]> {
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
+    where: { isActive: true, market: "HOSE", type: "STOCK" },
     select: {
       id: true,
       symbol: true,
@@ -345,10 +348,12 @@ export async function buildTrainingSet(topN = 20): Promise<TrainingSet> {
 /**
  * Đặc trưng phiên CUỐI của từng mã top-10 (chỉ nạp 60 bar/mã — nhẹ,
  * dùng cho serving predict). Trả [{symbol, x}] theo thứ tự thanh khoản.
+ * B5: cùng rổ HOSE-STOCK như lúc train (loadTopSeries) — KHÔNG trộn
+ * index/ETF/HNX vào feature serving (drift mô hình).
  */
 export async function latestFeatures(): Promise<{ symbol: string; x: number[] }[]> {
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
+    where: { isActive: true, market: "HOSE", type: "STOCK" },
     select: {
       id: true,
       symbol: true,
@@ -388,6 +393,192 @@ export async function latestFeatures(): Promise<{ symbol: string; x: number[] }[
     if (x != null) out.push({ symbol: t.symbol, x });
   });
   return out;
+}
+
+/* ─────────────────── B5 · Segment baskets (§3.4) ─────────────────── */
+
+/** 5 phân đoạn thị trường VN (INTERNATIONAL thêm ở B13). */
+export const SEGMENT_KEYS = [
+  "VN-HOSE-STOCK",
+  "VN-HNX-STOCK",
+  "VN-UPCOM-STOCK",
+  "VN-ETF",
+  "VN-INDEX",
+] as const;
+export type SegmentKey = (typeof SEGMENT_KEYS)[number];
+
+/** Một mã trong rổ segment — kèm chuỗi closes/volumes đã cắt theo cửa sổ. */
+export interface SegmentSymbol {
+  symbol: string;
+  instrumentId: string;
+  name: string;
+  sector: string;
+  market: string;
+  type: string;
+  closes: number[];
+  volumes: number[];
+  last: number;
+  changePct: number;
+  /** ADTV 20 phiên (VND = close × volume) — 0 khi không đủ 20 phiên. */
+  adtvVnd: number;
+}
+
+/** Rổ một phân đoạn theo §3.4 MARKET_EXPANSION_BLUEPRINT. */
+export interface SegmentBasket {
+  segment: SegmentKey;
+  /** Nhãn tiếng Việt. */
+  label: string;
+  /** Rổ bằng chứng (top-ADTV slice theo §3.4; INDEX = cố định 4 mã). */
+  symbols: SegmentSymbol[];
+  /** Toàn bộ mã có quote của segment — breadth + số liệu nền dùng cái này. */
+  quoted: SegmentSymbol[];
+  /** Σ ADTV 20 phiên của rổ (VND) — trọng số composite; INDEX = null (0,05/index). */
+  adtvVnd: number | null;
+}
+
+/** Chỉ số đứng trong rổ VN-INDEX (§3.4: VNINDEX + VN30 (+ HNX, UPCOM)). */
+const INDEX_BASKET_SYMBOLS = ["VNINDEX", "VN30", "HNX", "UPCOM"];
+
+/**
+ * Nạp rổ 5 phân đoạn VN trong 2 QUERY (instruments+quotes · bars≥cutoff) rồi
+ * phân đoạn IN-MEMORY — pattern B5: load MỘT LẦN, không chạy 7 vòng query
+ * full bar-history (áp lực DB + ngân sách chu kỳ 180s).
+ */
+export async function loadSegmentBaskets(barsPerSymbol = 260): Promise<SegmentBasket[]> {
+  const instruments = await db.instrument.findMany({
+    where: { isActive: true, market: { in: ["HOSE", "HNX", "UPCOM"] } },
+    select: {
+      id: true,
+      symbol: true,
+      name: true,
+      market: true,
+      type: true,
+      sector: true,
+      quotes: {
+        orderBy: { tradedAt: "desc" },
+        take: 1,
+        select: { last: true, changePct: true },
+      },
+    },
+  });
+  const quotedBase = instruments
+    .map((i) => {
+      const q = i.quotes[0];
+      if (!q || !(q.last > 0)) return null;
+      return {
+        id: i.id,
+        symbol: i.symbol,
+        name: i.name,
+        market: i.market,
+        type: i.type,
+        sector: i.sector ?? "Khác",
+        last: q.last,
+        changePct: q.changePct,
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+  if (quotedBase.length === 0) return [];
+
+  // Query bar DUY NHẤT cho toàn bộ quoted (≈ 76 mã × ≤280 phiên ≈ 21k dòng)
+  const cutoff = new Date(Date.now() - 420 * 86_400_000); // ~260 phiên GD ≈ 420 ngày
+  const barRows = await db.bar.findMany({
+    where: { instrumentId: { in: quotedBase.map((q) => q.id) }, date: { gte: cutoff } },
+    orderBy: [{ instrumentId: "asc" }, { date: "asc" }],
+    select: { instrumentId: true, close: true, volume: true },
+  });
+  const seriesById = new Map<string, { closes: number[]; volumes: number[] }>();
+  for (const b of barRows) {
+    if (!(b.close > 0)) continue;
+    let entry = seriesById.get(b.instrumentId);
+    if (!entry) {
+      entry = { closes: [], volumes: [] };
+      seriesById.set(b.instrumentId, entry);
+    }
+    entry.closes.push(b.close);
+    entry.volumes.push(b.volume);
+  }
+
+  const symbols: SegmentSymbol[] = quotedBase.map((q) => {
+    const s = seriesById.get(q.id) ?? { closes: [], volumes: [] };
+    const closes = s.closes.slice(-barsPerSymbol);
+    const volumes = s.volumes.slice(-barsPerSymbol);
+    const tail = closes.slice(-20);
+    const vols = volumes.slice(-20);
+    let adtvVnd = 0;
+    if (tail.length === 20) {
+      let sum = 0;
+      for (let i = 0; i < 20; i++) sum += tail[i] * vols[i];
+      adtvVnd = sum / 20;
+    }
+    return {
+      symbol: q.symbol,
+      instrumentId: q.id,
+      name: q.name,
+      sector: q.sector,
+      market: q.market,
+      type: q.type,
+      closes,
+      volumes,
+      last: q.last,
+      changePct: q.changePct,
+      adtvVnd,
+    };
+  });
+
+  const hoseStock = symbols.filter((s) => s.market === "HOSE" && s.type === "STOCK");
+  const hnxStock = symbols.filter((s) => s.market === "HNX" && s.type === "STOCK");
+  const upcomStock = symbols.filter((s) => s.market === "UPCOM" && s.type === "STOCK");
+  const etfs = symbols.filter((s) => s.type === "ETF");
+  const indexes = symbols.filter(
+    (s) => s.type === "INDEX" && INDEX_BASKET_SYMBOLS.includes(s.symbol)
+  );
+
+  const byAdtv = (arr: SegmentSymbol[]) => [...arr].sort((a, b) => b.adtvVnd - a.adtvVnd);
+  const sumAdtv = (arr: SegmentSymbol[]) =>
+    arr.reduce((s, x) => s + x.adtvVnd, 0);
+
+  const hoseBasket = byAdtv(hoseStock).slice(0, 10);
+  const hnxBasket = byAdtv(hnxStock).slice(0, 5);
+  const upcomBasket = byAdtv(upcomStock).slice(0, 3);
+  const etfBasket = byAdtv(etfs).slice(0, 10);
+
+  return [
+    {
+      segment: "VN-HOSE-STOCK",
+      label: "Cổ phiếu HOSE (top-10 thanh khoản)",
+      symbols: hoseBasket,
+      quoted: hoseStock,
+      adtvVnd: sumAdtv(hoseBasket),
+    },
+    {
+      segment: "VN-HNX-STOCK",
+      label: "Cổ phiếu HNX (top-5 thanh khoản)",
+      symbols: hnxBasket,
+      quoted: hnxStock,
+      adtvVnd: sumAdtv(hnxBasket),
+    },
+    {
+      segment: "VN-UPCOM-STOCK",
+      label: "Cổ phiếu UPCOM (top-3 thanh khoản)",
+      symbols: upcomBasket,
+      quoted: upcomStock,
+      adtvVnd: sumAdtv(upcomBasket),
+    },
+    {
+      segment: "VN-ETF",
+      label: "ETF niêm yết (≤10 mã)",
+      symbols: etfBasket,
+      quoted: etfs,
+      adtvVnd: sumAdtv(etfBasket),
+    },
+    {
+      segment: "VN-INDEX",
+      label: "Chỉ số VN (VNINDEX · VN30 · HNX · UPCOM)",
+      symbols: indexes,
+      quoted: indexes,
+      adtvVnd: null, // §3.4: INDEX không có ADTV VND → trọng số cố định 0,05/index
+    },
+  ];
 }
 
 /**

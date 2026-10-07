@@ -30,19 +30,105 @@
 
 import { db } from "@/lib/db";
 import { markSource } from "@/lib/sources";
+import type { UnitSpec } from "@/lib/types";
 
 export const DCHART_BASE =
   process.env.DCHART_BASE_URL ?? "https://dchart-api.vndirect.com.vn";
 
-/** Giới hạn giá hợp lệ sau ×1000 (VND) — VN30 adjusted 2013→nay, chặn nhiễu nguồn. */
+/** Giới hạn giá hợp lệ STOCK/ETF VN sau ×1000 (VND) — VN30 adjusted 2013→nay. */
 const PRICE_MIN_VND = 500;
 const PRICE_MAX_VND = 5_000_000;
 
 /** Khoảng cách tối thiểu giữa 2 request dchart (tôn trọng nguồn công cộng). */
 const REQUEST_INTERVAL_MS = 300;
 
-/** Số request tối đa trong 1 chu kỳ sync (30 mã + 2 dự phòng). */
-const MAX_SYMBOLS_PER_SYNC = 40;
+/** Số request tối đa trong 1 chu kỳ sync (B4 — 30 HOSE + 21 HNX + ~10 UPCOM
+ *  + 5 ETF + 8 index + dự phòng; quốc tế sync riêng qua intl-eod.ts). */
+const MAX_SYMBOLS_PER_SYNC = 150;
+
+/* ══════════ B2 · UNITSPEC — bảng tra đơn vị theo (market × type) §3.2 ══════════
+ *
+ * SINGLE SOURCE OF TRUTH cho biến đổi giá khi ingest (dchart trả cổ phiếu
+ * theo nghìn VND nhưng index theo điểm thô — đo thực tế 2026-10-07 §2.1).
+ * KHÔNG có cột đơn vị trong Instrument — mọi module tra về đây:
+ *   STOCK/ETF VN  : nghìn VND → ×1000 → round100 → VND nguyên (khớp #33).
+ *   INDEX VN/QT   : điểm thô  → ×100  → nguyên   → điểm×100 (VNINDEX 1753,39 → 175.339).
+ *   STOCK/ETF QT  : USD/HKD  → ×100  → nguyên   → cents (AAPL 231,4 → 23.140).
+ *   BOND (tương lai): % mệnh giá → ×100 → %×100.
+ */
+const UNIT_VND: UnitSpec = {
+  kind: "VND",
+  multiplier: 1000,
+  roundTo: 100,
+  minPrice: PRICE_MIN_VND,
+  maxPrice: PRICE_MAX_VND,
+  hasPriceBand: true,
+  tickUnit: 100,
+};
+const UNIT_INDEX: UnitSpec = {
+  kind: "INDEX_POINT",
+  multiplier: 100,
+  roundTo: 1,
+  minPrice: 100, // 1 điểm
+  maxPrice: 10_000_000, // 100.000 điểm×100 — trùm mọi index VN/QT
+  hasPriceBand: false, // index KHÔNG có trần/sàn ±7%
+  tickUnit: 10, // 0,1 điểm index = 10 đơn vị DB
+};
+const UNIT_CENTS: UnitSpec = {
+  kind: "CENTS",
+  multiplier: 100,
+  roundTo: 1,
+  minPrice: 100, // 1 USD/HKD
+  maxPrice: 5_000_000, // 50.000 USD/HKD
+  hasPriceBand: false, // quốc tế KHÔNG có trần/sàn ±7% kiểu VN
+  tickUnit: 1,
+};
+const UNIT_BOND: UnitSpec = {
+  kind: "BOND_PCT",
+  multiplier: 100,
+  roundTo: 1,
+  minPrice: 100, // 1% mệnh giá
+  maxPrice: 10_000, // 100% mệnh giá
+  hasPriceBand: false,
+  tickUnit: 1,
+};
+
+/** Bảng tra (market:type) → UnitSpec — key thường hoa như enum Prisma. */
+export const UNIT_SPECS: Record<string, UnitSpec> = {
+  "HOSE:STOCK": UNIT_VND,
+  "HNX:STOCK": UNIT_VND,
+  "UPCOM:STOCK": UNIT_VND,
+  "HOSE:ETF": UNIT_VND,
+  "HNX:ETF": UNIT_VND,
+  "UPCOM:ETF": UNIT_VND,
+  "HOSE:FUND": UNIT_VND,
+  "HNX:FUND": UNIT_VND,
+  "UPCOM:FUND": UNIT_VND,
+  "HOSE:INDEX": UNIT_INDEX,
+  "HNX:INDEX": UNIT_INDEX,
+  "UPCOM:INDEX": UNIT_INDEX,
+  "US:STOCK": UNIT_CENTS,
+  "US:ETF": UNIT_CENTS,
+  "US:INDEX": UNIT_INDEX,
+  "HK:STOCK": UNIT_CENTS,
+  "HK:ETF": UNIT_CENTS,
+  "HK:INDEX": UNIT_INDEX,
+  // BOND mọi sàn — khi có nguồn (finfo/chờ egress)
+  "HOSE:BOND": UNIT_BOND,
+  "HNX:BOND": UNIT_BOND,
+  "UPCOM:BOND": UNIT_BOND,
+};
+
+/** Tra UnitSpec theo (market, type) — fallback an toàn về VND (hành vi #33). */
+export function resolveUnitSpec(market: string, type: string): UnitSpec {
+  return UNIT_SPECS[`${market}:${type}`] ?? UNIT_VND;
+}
+
+/** Làm tròn theo bội số roundTo của spec (100 = bội 100₫; 1 = nguyên). */
+function roundTo(v: number, step: number): number {
+  if (step <= 1) return Math.round(v);
+  return Math.round(v / step) * step;
+}
 
 export interface RealBarInput {
   date: Date;
@@ -177,10 +263,16 @@ function round100(v: number): number {
 }
 
 /**
- * Chuyển mảng dchart → RealBarInput đã validate §5.
+ * Chuyển mảng dchart → RealBarInput đã validate §5, theo UnitSpec của mã
+ * (B2 — cổ phiếu ×1000 bội 100 như cũ; index ×100 điểm; KHÔNG áp index
+ * logic ×1000 cũ vì sẽ sai 1.000 lần — §2.1 blueprint).
  * Trả về { bars, skipped } — bar vi phạm nặng bị bỏ + đếm (minh bạch).
  */
-export function toRealBars(symbol: string, h: DchartHistory): { bars: RealBarInput[]; skipped: number } {
+export function toRealBars(
+  symbol: string,
+  h: DchartHistory,
+  unit: UnitSpec = UNIT_VND
+): { bars: RealBarInput[]; skipped: number } {
   const bars: RealBarInput[] = [];
   let skipped = 0;
   const nowMs = Date.now();
@@ -204,18 +296,25 @@ export function toRealBars(symbol: string, h: DchartHistory): { bars: RealBarInp
       continue;
     }
 
-    // Giá dchart = nghìn VND → VND, làm tròn bội 100 (Q1)
-    const open = round100(h.o[i] * 1000);
-    const high = round100(h.h[i] * 1000);
-    const low = round100(h.l[i] * 1000);
-    const close = round100(h.c[i] * 1000);
-    const volume = Math.max(0, Math.round(h.v[i] ?? 0)); // Q3
+    // B2 — biến đổi theo UnitSpec của (market,type): VND nghìn×1000 bội 100,
+    // index điểm×100 nguyên, cents ×100 nguyên (T2.1/T2.2)
+    const open = roundTo(h.o[i] * unit.multiplier, unit.roundTo);
+    const high = roundTo(h.h[i] * unit.multiplier, unit.roundTo);
+    const low = roundTo(h.l[i] * unit.multiplier, unit.roundTo);
+    const close = roundTo(h.c[i] * unit.multiplier, unit.roundTo);
+    // Q3 + B4: volume ≥ 0, kẹp cận INT4 — index có volume = tổng KL toàn sàn
+    // (VNINDEX ~2,6 tỷ cp) vượt Int32 → clamp 2.147.483.647 (minh bạch, không mất
+    // ý nghĩa: volume index chỉ dùng hiển thị, không vào tính toán giá)
+    const volume = Math.min(
+      2_147_483_647,
+      Math.max(0, Math.round(h.v[i] ?? 0))
+    );
 
     if (
-      close < PRICE_MIN_VND ||
-      close > PRICE_MAX_VND ||
-      open < PRICE_MIN_VND ||
-      open > PRICE_MAX_VND
+      close < unit.minPrice ||
+      close > unit.maxPrice ||
+      open < unit.minPrice ||
+      open > unit.maxPrice
     ) {
       skipped++;
       continue;
@@ -250,24 +349,41 @@ export function toRealBars(symbol: string, h: DchartHistory): { bars: RealBarInp
   return { bars, skipped };
 }
 
-/** Neo Quote vào EOD thật từ 2 bar cuối (ref = close bar trước, OHLC = bar cuối). */
-async function anchorQuoteToRealEod(
+/** Neo Quote vào EOD thật từ 2 bar cuối (ref = close bar trước, OHLC = bar cuối).
+ * B2 — theo loại: INDEX/quốc tế KHÔNG trần/sàn ±7% (null); spread theo tick của loại
+ * (0,1 điểm index = 10 đơn vị DB; VND giữ công thức max(100, 0,1% giá) như #33).
+ * Xuất public để intl-eod.ts (B12) TÁI DÙNG cùng neo quote theo UnitSpec. */
+export async function anchorQuoteToRealEod(
   instrumentId: string,
-  bars: RealBarInput[]
+  bars: RealBarInput[],
+  unit: UnitSpec = UNIT_VND
 ): Promise<void> {
   if (bars.length === 0) return;
   const last = bars[bars.length - 1];
   const prev = bars.length >= 2 ? bars[bars.length - 2] : null;
   const ref = prev ? prev.close : last.close;
 
-  const ceiling = round100(Math.min(ref * 1.07, 1_000_000_000));
-  const floor = Math.max(100, round100(ref * 0.93));
+  let ceiling: number | null;
+  let floor: number | null;
+  if (unit.hasPriceBand) {
+    ceiling = round100(Math.min(ref * 1.07, 1_000_000_000));
+    floor = Math.max(100, round100(ref * 0.93));
+  } else {
+    // T2.3 — index/quốc tế không có trần/sàn kiểu VN
+    ceiling = null;
+    floor = null;
+  }
   const change = last.close - ref;
   const changePct = ref > 0 ? Number(((change / ref) * 100).toFixed(2)) : 0;
-  const spread = Math.max(100, round100(last.close * 0.001));
+  const spread =
+    unit.kind === "VND"
+      ? Math.max(100, round100(last.close * 0.001))
+      : Math.max(unit.tickUnit, Math.round(last.close * 0.001));
   // Depth ~1% KLGD phiên chia 2 bên (giá trị hiển thị, đơn vị lô 100 cp)
   const depthLots = Math.max(10, Math.min(500, Math.round(last.volume / 100 / 100)));
   // tradedAt = giờ đóng cửa 15:00 ICT (08:00 UTC) của phiên cuối
+  // (quốc tế: giờ đóng cửa khác nhưng neo cùng convention EOD 15:00 UTC —
+  //  UintSpec không mang múi giờ; hiển thị theo tradedAt không đổi)
   const tradedAt = new Date(
     Date.UTC(
       last.date.getUTCFullYear(),
@@ -295,8 +411,8 @@ async function anchorQuoteToRealEod(
     floorPrice: floor,
     change,
     changePct,
-    bidPrice: Math.max(floor, last.close - spread),
-    askPrice: Math.min(ceiling, last.close + spread),
+    bidPrice: floor != null ? Math.max(floor, last.close - spread) : last.close - spread,
+    askPrice: ceiling != null ? Math.min(ceiling, last.close + spread) : last.close + spread,
     bidVolume: depthLots * 100,
     askVolume: depthLots * 100,
     tradedAt,
@@ -334,8 +450,8 @@ export async function syncEodFromDchart(opts?: {
   const fromSec = toSec - lookbackDays * 86_400;
 
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
-    select: { id: true, symbol: true },
+    where: { isActive: true, market: { in: ["HOSE", "HNX", "UPCOM"] } },
+    select: { id: true, symbol: true, market: true, type: true },
     orderBy: { symbol: "asc" },
     take: MAX_SYMBOLS_PER_SYNC,
   });
@@ -358,7 +474,8 @@ export async function syncEodFromDchart(opts?: {
         symbolsEmpty.push(inst.symbol);
         continue;
       }
-      const { bars, skipped } = toRealBars(inst.symbol, res.bars);
+      const unit = resolveUnitSpec(inst.market, inst.type);
+      const { bars, skipped } = toRealBars(inst.symbol, res.bars, unit);
       barsSkipped += skipped;
       if (bars.length === 0) {
         symbolsEmpty.push(inst.symbol);
@@ -388,7 +505,7 @@ export async function syncEodFromDchart(opts?: {
         });
       }
       barsUpserted += bars.length;
-      await anchorQuoteToRealEod(inst.id, bars);
+      await anchorQuoteToRealEod(inst.id, bars, unit);
       symbolsOk.push(inst.symbol);
       const d = bars[bars.length - 1].date.toISOString().slice(0, 10);
       if (d > (lastTradeDate ?? "")) lastTradeDate = d;
@@ -444,8 +561,8 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
   const toSec = Math.floor(Date.now() / 1000) + 86_400;
 
   const instruments = await db.instrument.findMany({
-    where: { isActive: true },
-    select: { id: true, symbol: true },
+    where: { isActive: true, market: { in: ["HOSE", "HNX", "UPCOM"] } },
+    select: { id: true, symbol: true, market: true, type: true },
     orderBy: { symbol: "asc" },
     take: MAX_SYMBOLS_PER_SYNC,
   });
@@ -469,7 +586,8 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
         symbolsEmpty.push(inst.symbol);
         continue;
       }
-      const { bars, skipped } = toRealBars(inst.symbol, res.bars);
+      const unit = resolveUnitSpec(inst.market, inst.type);
+      const { bars, skipped } = toRealBars(inst.symbol, res.bars, unit);
       barsSkipped += skipped;
       if (bars.length === 0) {
         symbolsEmpty.push(inst.symbol);
@@ -493,7 +611,7 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
         });
       }
       barsUpserted += bars.length;
-      await anchorQuoteToRealEod(inst.id, bars);
+      await anchorQuoteToRealEod(inst.id, bars, unit);
       symbolsOk.push(inst.symbol);
       const d = bars[bars.length - 1].date.toISOString().slice(0, 10);
       if (d > (lastTradeDate ?? "")) lastTradeDate = d;

@@ -1,20 +1,38 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Bot, Loader2, Play } from "lucide-react";
+import { AlertTriangle, Award, Bot, Loader2, Play, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { apiGet } from "@/lib/api";
 import { formatVolume } from "@/lib/format";
 import { useRunAgents } from "@/hooks/use-run-agents";
 import { RateLimitError, useSingleAgentRun } from "@/hooks/use-agent-actions";
 import { AgentRosterCard } from "@/components/dashboard/agent-roster-card";
 import { AgentDetailPanel } from "@/components/dashboard/agent-detail-panel";
+import { CoverageMatrix } from "@/components/dashboard/coverage-matrix";
 import { cn } from "@/lib/utils";
 import type { AgentCard, AgentsResponse } from "@/lib/types";
+import type { ScorecardRow } from "@/lib/research/scorecard";
 
 /** Mở rộng 23 agents — thứ tự 5 nhóm hiển thị trong roster (agent-roster.ts backend). */
 const GROUP_ORDER = ["research", "control", "executive", "platform", "ml"] as const;
@@ -33,6 +51,12 @@ interface AgentGroupSection {
   label: string;
   description: string;
   agents: AgentCard[];
+}
+
+/** GET /api/research/scorecard — shape hợp đồng với route B8. */
+interface ScorecardResponse {
+  agents: ScorecardRow[];
+  generatedAt: string;
 }
 
 /** Chia agents theo nhóm theo GROUP_ORDER — nhóm lạ gom vào section "Khác" cuối danh sách. */
@@ -201,46 +225,57 @@ export function AgentsWorkspace() {
             </p>
           ) : (
             sections.map((section, i) => (
-              <section
-                key={section.key}
-                aria-label={section.label}
-                className={cn("flex flex-col gap-3", i > 0 && "border-t border-border pt-4")}
-              >
-                {/* Header nhóm — dính lên khi cuộn vùng roster ở desktop */}
-                <div className="flex flex-col gap-0.5 xl:sticky xl:top-0 xl:z-10 xl:bg-background/95 xl:py-1 xl:backdrop-blur">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      {section.label}
-                    </h3>
-                    <Badge
-                      variant="secondary"
-                      className="px-1.5 py-0 text-[10px] tabular-nums"
-                    >
-                      {section.agents.length} agent
-                    </Badge>
+              <Fragment key={section.key}>
+                <section
+                  aria-label={section.label}
+                  className={cn("flex flex-col gap-3", i > 0 && "border-t border-border pt-4")}
+                >
+                  {/* Header nhóm — dính lên khi cuộn vùng roster ở desktop */}
+                  <div className="flex flex-col gap-0.5 xl:sticky xl:top-0 xl:z-10 xl:bg-background/95 xl:py-1 xl:backdrop-blur">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                        {section.label}
+                      </h3>
+                      <Badge
+                        variant="secondary"
+                        className="px-1.5 py-0 text-[10px] tabular-nums"
+                      >
+                        {section.agents.length} agent
+                      </Badge>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground/80">
+                      {section.description}
+                    </p>
                   </div>
-                  <p className="text-[11px] text-muted-foreground/80">
-                    {section.description}
-                  </p>
-                </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                  {section.agents.map((a) => (
-                    <AgentRosterCard
-                      key={a.id}
-                      agent={a}
-                      selected={selectedId === a.id}
-                      onSelect={() =>
-                        setSelectedId((cur) => (cur === a.id ? cur : a.id))
-                      }
-                      onRun={() => handleRun(a.id)}
-                      runPending={
-                        singleRun.isPending && singleRun.variables === a.id
-                      }
-                      retryAfterSeconds={retryAfter[a.id] ?? null}
-                    />
-                  ))}
-                </div>
-              </section>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                    {section.agents.map((a) => (
+                      <AgentRosterCard
+                        key={a.id}
+                        agent={a}
+                        selected={selectedId === a.id}
+                        onSelect={() =>
+                          setSelectedId((cur) => (cur === a.id ? cur : a.id))
+                        }
+                        onRun={() => handleRun(a.id)}
+                        runPending={
+                          singleRun.isPending && singleRun.variables === a.id
+                        }
+                        retryAfterSeconds={retryAfter[a.id] ?? null}
+                      />
+                    ))}
+                  </div>
+                </section>
+                {/* B8 — Bảng điểm Hội đồng Nghiên cứu: NGAY DƯỚI section nhóm
+                    research (chốt user §0.3 — blueprint §3.6/Bước 8) */}
+                {/* B14 — Ma trận độ phủ thị trường: ĐẶT SAU scorecard
+                    (§3.7/Bước 14 — cùng tab Đội Agent theo chốt user §0.3) */}
+                {section.key === "research" && (
+                  <>
+                    <ResearchScorecard />
+                    <CoverageMatrix />
+                  </>
+                )}
+              </Fragment>
             ))
           )}
         </div>
@@ -270,6 +305,265 @@ export function AgentsWorkspace() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ═══════════════ B8 — Bảng điểm Hội đồng Nghiên cứu (§3.6 blueprint) ═══════════════ */
+
+const nf0 = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 });
+const nf1 = new Intl.NumberFormat("vi-VN", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+const nf2 = new Intl.NumberFormat("vi-VN", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** "62,5%" — nhập tỷ lệ 0..1 → ×100 (vi-VN, dấu phẩy thập phân). */
+function pct1(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  return `${nf1.format(n * 100)}%`;
+}
+
+/** Health 0..100: ≥70 xanh lá · <50 đỏ · còn lại muted. */
+function healthTone(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return "text-muted-foreground";
+  if (n >= 70) return "text-emerald-600 dark:text-emerald-400";
+  if (n < 50) return "text-rose-600 dark:text-rose-400";
+  return "text-foreground";
+}
+
+/**
+ * Card "Bảng điểm Hội đồng Nghiên cứu" — đặt ngay dưới section nhóm research
+ * (chốt user §0.3). 6 cử tri: hit-rate 5 phiên · Brier · đóng góp posterior
+ * |Δlog-odds| · streak · posterior bandit · health. pulls < 5 → hàng mờ +
+ * badge "chưa đủ dữ liệu" (trung thực, không bịa). TanStack Query
+ * "/api/research/scorecard" + skeleton + error state + retry.
+ */
+function ResearchScorecard() {
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ["research-scorecard"],
+    queryFn: () => apiGet<ScorecardResponse>("/api/research/scorecard"),
+    staleTime: 30_000,
+  });
+  const rows = data?.agents ?? [];
+
+  return (
+    <Card className="gap-4" aria-labelledby="research-scorecard-heading">
+      <CardHeader>
+        <CardTitle
+          id="research-scorecard-heading"
+          className="flex items-center gap-2 text-base"
+        >
+          <Award className="size-4 text-muted-foreground" aria-hidden="true" />
+          Bảng điểm Hội đồng Nghiên cứu
+        </CardTitle>
+        <CardDescription>
+          6 cử tri · hit-rate 5 phiên · Brier · đóng góp posterior — sắp theo
+          hit-rate giảm dần
+        </CardDescription>
+        {data?.generatedAt && (
+          <CardAction>
+            <span className="text-[11px] text-muted-foreground">
+              Cập nhật {new Date(data.generatedAt).toLocaleString("vi-VN", {
+                timeZone: "Asia/Ho_Chi_Minh",
+                day: "2-digit",
+                month: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          </CardAction>
+        )}
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 pb-0">
+        {isLoading ? (
+          <ScorecardSkeleton />
+        ) : isError ? (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center gap-3 rounded-lg border border-down/40 bg-down/10 p-4 text-sm text-down"
+          >
+            <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+            <p className="min-w-40 flex-1 leading-relaxed">
+              Không tải được bảng điểm Hội đồng Nghiên cứu
+              {error?.message ? ` — ${error.message}` : "."}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2"
+              onClick={() => void refetch()}
+            >
+              <RefreshCw className="size-3.5" aria-hidden="true" />
+              Thử lại
+            </Button>
+          </div>
+        ) : (
+          <div className="max-h-96 overflow-y-auto custom-scrollbar rounded-lg border">
+            {/* table-fixed mobile: hàng gộp 1 cell không đẩy bảng rộng hơn container */}
+            <Table className="table-fixed sm:table-auto">
+              <TableHeader>
+                <TableRow className="hidden sm:table-row">
+                  <TableHead className="text-xs">Agent</TableHead>
+                  <TableHead className="text-xs">Pulls</TableHead>
+                  <TableHead className="text-xs">Hit-rate 5 phiên</TableHead>
+                  <TableHead className="text-xs">Brier</TableHead>
+                  <TableHead className="hidden text-xs md:table-cell">
+                    Đóng góp |Δlog-odds|
+                  </TableHead>
+                  <TableHead className="hidden text-xs sm:table-cell">Streak</TableHead>
+                  <TableHead className="text-xs">Posterior bandit</TableHead>
+                  <TableHead className="hidden text-xs lg:table-cell">Health</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((row) => (
+                  <ScorecardRowView key={row.code} row={row} />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+        <p className="pb-4 text-[11px] leading-relaxed text-muted-foreground">
+          Hit-rate = tỉ lệ phiếu đúng hướng giá thực tế sau 5 phiên (BanditEvent
+          đã kết toán) · Brier thấp = tự tin chuẩn · đóng góp posterior = trung
+          bình |Δlog-odds| phiếu trong 30 lần tổng hợp gần nhất.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ScorecardRowView({ row }: { row: ScorecardRow }) {
+  const meta = `${row.code}${row.gen1 ? ` · ${row.gen1}` : ""} · ${nf1.format(row.wins)} wins`;
+  const hitTone =
+    row.hitRate == null
+      ? "text-muted-foreground"
+      : row.hitRate >= 0.5
+        ? "text-emerald-600 dark:text-emerald-400"
+        : "text-rose-600 dark:text-rose-400";
+
+  return (
+    <TableRow className={cn(!row.enoughData && "opacity-60")}>
+      {/* Mobile — 1 hàng gộp (không tràn cột ở 390px) */}
+      <TableCell colSpan={8} className="sm:hidden">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col gap-0.5 leading-tight">
+            <span className="flex items-center gap-1.5">
+              <span className="truncate text-xs font-semibold" title={row.name}>
+                {row.name}
+              </span>
+              {!row.enoughData && (
+                <Badge
+                  variant="outline"
+                  className="px-1 py-0 text-[9px] text-muted-foreground"
+                >
+                  chưa đủ dữ liệu
+                </Badge>
+              )}
+            </span>
+            <span className="truncate text-[10px] text-muted-foreground" title={meta}>
+              {meta}
+            </span>
+          </div>
+          <span className="flex shrink-0 items-center gap-2">
+            <span className="tabular-nums text-[11px] text-muted-foreground">
+              {nf0.format(row.pulls)} pulls
+            </span>
+            <span className={cn("tabular-nums text-xs font-semibold", hitTone)}>
+              {pct1(row.hitRate)}
+            </span>
+            <span className="tabular-nums text-xs">{pct1(row.posteriorMean)}</span>
+          </span>
+        </div>
+      </TableCell>
+
+      {/* Desktop — 8 cột đầy đủ */}
+      <TableCell className="hidden sm:table-cell">
+        <div className="flex flex-col leading-tight">
+          <span className="flex items-center gap-1.5">
+            <span className="max-w-32 truncate text-xs font-semibold" title={row.name}>
+              {row.name}
+            </span>
+            {!row.enoughData && (
+              <Badge
+                variant="outline"
+                className="px-1 py-0 text-[9px] text-muted-foreground"
+                title="Chưa đủ 5 lần kết toán để so sánh đáng tin cậy"
+              >
+                chưa đủ dữ liệu
+              </Badge>
+            )}
+          </span>
+          <span className="font-mono text-[10px] text-muted-foreground" title={meta}>
+            {row.gen1 ? `${row.gen1} · ` : ""}
+            {row.code}
+          </span>
+        </div>
+      </TableCell>
+      <TableCell className="hidden tabular-nums text-xs sm:table-cell">
+        {nf0.format(row.pulls)}
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        <span className={cn("tabular-nums text-xs font-semibold", hitTone)}>
+          {pct1(row.hitRate)}
+        </span>
+      </TableCell>
+      <TableCell className="hidden tabular-nums text-xs text-muted-foreground sm:table-cell">
+        {row.brier == null ? "—" : nf2.format(row.brier)}
+      </TableCell>
+      <TableCell className="hidden tabular-nums text-xs text-muted-foreground md:table-cell">
+        {row.posteriorContribution == null ? "—" : nf2.format(row.posteriorContribution)}
+      </TableCell>
+      <TableCell className="hidden tabular-nums text-xs sm:table-cell">
+        <span
+          className={cn(
+            row.streak >= 3
+              ? "font-semibold text-emerald-600 dark:text-emerald-400"
+              : "text-muted-foreground"
+          )}
+          title="Số lần kết toán liên tiếp gần nhất có reward ≥ 0,5"
+        >
+          {nf0.format(row.streak)}
+        </span>
+      </TableCell>
+      <TableCell className="hidden sm:table-cell">
+        <span className="flex items-center gap-2">
+          <Progress
+            value={row.posteriorMean * 100}
+            className="h-1.5 w-14 [&>div]:bg-emerald-600 dark:[&>div]:bg-emerald-400"
+            aria-label={`Posterior bandit ${pct1(row.posteriorMean)}`}
+          />
+          <span className="tabular-nums text-xs font-semibold">
+            {pct1(row.posteriorMean)}
+          </span>
+        </span>
+      </TableCell>
+      <TableCell
+        className={cn(
+          "hidden tabular-nums text-xs lg:table-cell",
+          healthTone(row.healthScore)
+        )}
+      >
+        {row.healthScore == null ? "—" : nf0.format(row.healthScore)}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function ScorecardSkeleton() {
+  return (
+    <div
+      className="flex flex-col gap-2 py-1"
+      aria-busy="true"
+      aria-label="Đang tải bảng điểm Hội đồng Nghiên cứu"
+    >
+      {Array.from({ length: 6 }).map((_, i) => (
+        <Skeleton key={i} className="h-12 w-full rounded-lg" />
+      ))}
     </div>
   );
 }

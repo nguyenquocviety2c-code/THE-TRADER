@@ -20,6 +20,8 @@ enum Market {
   HOSE // Sở Giao dịch Chứng khoán TP.HCM
   HNX // Sở Giao dịch Chứng khoán Hà Nội
   UPCOM // Thị trường OTC niêm yết
+  US // Sàn quốc tế Mỹ (Yahoo Finance — MARKET_EXPANSION_BLUEPRINT B12)
+  HK // Sàn quốc tế Hồng Kông (Yahoo Finance — MARKET_EXPANSION_BLUEPRINT B12)
 }
 
 enum InstrumentType {
@@ -169,10 +171,13 @@ model BrokerAccount {
 
 model Instrument {
   id String @id @default(cuid())
-  symbol String @unique // VCB, FPT, VHM...
+  symbol String @unique // VCB, FPT, VHM... (quốc tế: giữ nguyên ký hiệu Yahoo — AAPL, 0700.HK, ^GSPC)
   name String
   market Market
   type InstrumentType @default(STOCK)
+  // Đơn vị hiển thị theo (market, type) — bảng tra UnitSpec §3.2 là single source
+  // of truth, KHÔNG có cột đơn vị riêng (tránh 2 nguồn sự thật lệch nhau).
+  currency String? @default("VND") // VND | USD | HKD — display format theo này
   sector String? // banking, real-estate, technology...
   listingDate DateTime?
   outstandingShares BigInt? // số cổ phiếu lưu hành
@@ -188,6 +193,7 @@ model Instrument {
   positions Position[]
   orders Order[]
   trades Trade[]
+  fundamentals FinancialFundamental[]
 
   @@index([market])
   @@index([sector])
@@ -341,6 +347,12 @@ model Signal {
   takeProfit Int? // VND
   agentId String? // originating agent
   agent Agent? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  // B9 — SNAPSHOT cổng đồng thuận lúc Chủ tịch SINH tín hiệu (gate bind theo
+  // assessment tạo ra tín hiệu — convert chu kỳ sau KHÔNG bị đánh giá lại):
+  // "CONSENSUS" | "WEAK_MAJORITY" | "NO_CONSENSUS" | null (chưa có cổng)
+  consensusGate String?
+  /** B9 — ratio trọng số tối đa 0..1 tại snapshot (để audit + hiển thị). */
+  consensusRatio Float?
   expiresAt DateTime?
   actedAt DateTime? // khi được chuyển thành lệnh
   // PHASE3_BLUEPRINT §4.1 — vòng đời tín hiệu: ACTIVE | ACTED | REJECTED | EXPIRED
@@ -572,7 +584,38 @@ model MarketAssessment {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 10. PHÒNG HỌC MÁY (phiên #35 — Task 35-ML)
+// 11. DỮ LIỆU TÀI CHÍNH CƠ BẢN (MARKET_EXPANSION_BLUEPRINT B11 — finfo)
+// ─────────────────────────────────────────────────────────────────
+
+// Báo cáo tài chính theo mã × kỳ. Đơn vị: revenue/netProfit **VND nguyên**
+// (BigInt), eps/bvps VND (Float), roe/roa/pe/pb là TỶ LỆ THÔ (0..n, không %).
+// Kỳ nằm trong `period` ("Q1".."Q4" | "FY") + `year` — không có cột quarter
+// riêng (dư thừa). mode: "real" (finfo sống) | "pending" (chờ egress sandbox).
+model FinancialFundamental {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  period       String // Q1 | Q2 | Q3 | Q4 | FY
+  year         Int
+  revenue      BigInt? // VND nguyên
+  netProfit    BigInt? // VND nguyên
+  eps          Float? // VND
+  bvps         Float? // VND
+  roe          Float? // tỷ lệ thô (0.15 = 15%)
+  roa          Float? // tỷ lệ thô
+  pe           Float? // tỷ lệ thô
+  pb           Float? // tỷ lệ thô
+  source       String @default("finfo")
+  mode         String @default("pending") // real | pending
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([instrumentId, period, year])
+  @@index([instrumentId, year(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 12. PHÒNG HỌC MÁY (phiên #35 — Task 35-ML)
 //    Thuật toán THẬT thuần TypeScript: MLP deep learning (nn.ts),
 //    Q-learning tabular (rl.ts), Thompson sampling Beta-Bernoulli (bandit.ts).
 // ─────────────────────────────────────────────────────────────────
@@ -594,8 +637,9 @@ model MlModel {
   @@index([kind, status])
 }
 
-// Cánh tay Thompson sampling — 5 arms = 5 LLM research agents
-// (market-analyst, fair-value, news-sentiment, liquidity, risk-manager).
+// Cánh tay Thompson sampling — 6 arms = 5 LLM research agents
+// (market-analyst, fair-value, news-sentiment, liquidity, risk-manager)
+// + ml-forecast (B7 — cử tri thứ 6, ensemble MLP+linreg).
 // Posterior Beta(α+1, β+1); reward 1 = vote đúng hướng realized 5 phiên, 0 = sai.
 model BanditArm {
   id           String    @id @default(cuid())
@@ -619,6 +663,8 @@ model BanditEvent {
   castAt       DateTime
   settledAt    DateTime?
   reward       Float?
+  /** B8 — độ tự tin phiếu khi cast (0..1) để tính Brier score; MLP = max(pUp,pDown,pFlat). */
+  confidence   Float?
   createdAt    DateTime @default(now())
 
   @@unique([assessmentId, agentCode])
