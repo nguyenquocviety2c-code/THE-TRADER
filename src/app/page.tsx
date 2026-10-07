@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Header } from "@/components/dashboard/header";
+import { AppSidebar } from "@/components/dashboard/nav";
 import { OverviewWorkspace } from "@/components/dashboard/overview-workspace";
 import { MarketWorkspace } from "@/components/dashboard/market-workspace";
 import { PortfolioWorkspace } from "@/components/dashboard/portfolio-workspace";
@@ -15,13 +16,16 @@ import { useUiStore, type Workspace } from "@/lib/store";
 
 /**
  * PHASE3_BLUEPRINT §3 — App shell (single route `/`):
- * header + workspace nav + workspace switch (Zustand) + sticky footer.
+ * header + workspace switch (Zustand) + sticky footer.
  *
  * Phiên #34 — module "Tổng quan" quá tải được chia thành 7 workspace:
  * overview (gọn) · market · portfolio · signals · agents · synthesis · settings.
  *
+ * Phiên #45 — điều hướng module chuyển từ thanh tab ngang sang SIDEBAR TRÁI
+ * overlay (AppSidebar), mở/đóng bằng nút logo "The Trader" trên Header.
+ *
  * WebSocket realtime (market-engine) gắn MỘT lần ở cấp trang — đặt ngoài
- * workspace component nên đổi tab KHÔNG đứt kết nối realtime.
+ * workspace component nên đổi module KHÔNG đứt kết nối realtime.
  */
 
 /** Các giá trị ?ws= hợp lệ — ngoài danh sách này → "overview". */
@@ -53,6 +57,8 @@ export default function Page() {
 
   return (
     <div className="flex min-h-screen flex-col">
+      {/* Phiên #45 — sidebar trái overlay (z-50) + backdrop (z-40) */}
+      <AppSidebar />
       <Header />
       <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6">
         <h1 className="sr-only">

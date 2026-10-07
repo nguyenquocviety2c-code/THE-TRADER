@@ -85,8 +85,15 @@ interface CandleShapeProps {
  * Nến Nhật vẽ thủ công qua Bar shape (PHASE3_BLUEPRINT §5.1):
  * probe Bar dataKey="high" trên trục giá với domain tường minh [lo, hi]
  * → y = pixel(high), height = pixel(lo) − pixel(high) → suy ra mọi mức giá.
- * Màu: close ≥ open = --up (xanh), ngược lại --down (đỏ) — semantic token.
+ * Màu (phiên #45 — chuẩn tài chính VN): close > open = --up (xanh dương),
+ * close < open = --down (đỏ), close = open (doji) = --flat (vàng).
  */
+function candleColor(open: number, close: number): string {
+  if (close > open) return "var(--up)";
+  if (close < open) return "var(--down)";
+  return "var(--flat)";
+}
+
 function makeCandleShape(lo: number) {
   return function CandleShape(props: CandleShapeProps) {
     const { x, y, width, height, payload } = props;
@@ -95,8 +102,7 @@ function makeCandleShape(lo: number) {
     const range = b.high - lo;
     const ppu = range > 0 ? height / range : 0; // pixel per đơn vị giá
     const yBottom = y + height; // pixel của domain[0]
-    const up = b.close >= b.open;
-    const color = up ? "var(--up)" : "var(--down)";
+    const color = candleColor(b.open, b.close);
     const yHigh = y;
     const yLow = yBottom - (b.low - lo) * ppu;
     const yOpen = yBottom - (b.open - lo) * ppu;
@@ -170,8 +176,18 @@ export function PriceChart() {
     return null;
   }, [chartData]);
 
-  const up = bars.length > 1 && bars[bars.length - 1].close >= bars[0].close;
-  const strokeColor = up ? "var(--up)" : "var(--down)";
+  const lastClose = bars.length > 0 ? bars[bars.length - 1].close : null;
+  const firstClose = bars.length > 0 ? bars[0].close : null;
+  // Phiên #45 — đường/gradient: xanh dương tăng · đỏ giảm · vàng đi ngang
+  const trendColor =
+    lastClose == null || firstClose == null
+      ? "var(--up)"
+      : lastClose > firstClose
+        ? "var(--up)"
+        : lastClose < firstClose
+          ? "var(--down)"
+          : "var(--flat)";
+  const strokeColor = trendColor;
   const gradientId = `priceGrad-${symbol}`;
 
   const renderTip = React.useCallback(
@@ -180,7 +196,8 @@ export function PriceChart() {
       if (!active || !payload?.length || typeof label !== "string") return null;
       const bar: BarPoint | undefined = bars.find((b) => b.date === label);
       if (!bar) return null;
-      const barUp = bar.close >= bar.open;
+      const barUp = bar.close > bar.open;
+      const barFlat = bar.close === bar.open;
       return (
         <div className="rounded-lg border bg-popover px-3 py-2 text-xs shadow-lg">
           <p className="mb-1.5 font-medium">
@@ -188,7 +205,12 @@ export function PriceChart() {
           </p>
           <p className="tabular-nums">
             M: <span className="font-semibold">{formatPrice(bar.open)} ₫</span>
-            <span className={cn("ml-1.5 font-semibold", barUp ? "text-up" : "text-down")}>
+            <span
+              className={cn(
+                "ml-1.5 font-semibold",
+                barFlat ? "text-flat" : barUp ? "text-up" : "text-down"
+              )}
+            >
               ⋯ Đ: {formatPrice(bar.close)} ₫
             </span>
           </p>
@@ -253,10 +275,14 @@ export function PriceChart() {
             <span className="text-lg font-bold tracking-tight">{symbol}</span>
           )}
         </CardTitle>
-        <CardDescription className="max-w-[240px] truncate">
+        <CardDescription className="col-start-1 row-start-2 max-w-[240px] truncate">
           {data?.name ?? "Biểu đồ giá theo phiên"}
         </CardDescription>
-        <CardAction className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+        {/* F-451 (cùng bảng giá): card hẹp → cụm chọn mã/nền/trục xuống hàng 3
+         * full-width (đặt vị trí tường minh — desc giữ hàng 2 cột 1);
+         * card ≥ 48rem (@3xl) → cột phải trải 2 hàng như thiết kế gốc. */}
+        <CardAction className="col-span-2 col-start-1 row-start-3 w-full justify-self-stretch @3xl:col-span-1 @3xl:col-start-2 @3xl:row-span-2 @3xl:row-start-1 @3xl:w-auto @3xl:justify-self-end">
+          <div className="flex flex-wrap items-end justify-end gap-2">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" className="h-9 min-w-11 gap-1.5 font-mono">
@@ -310,6 +336,7 @@ export function PriceChart() {
                 ))}
               </TabsList>
             </Tabs>
+          </div>
           </div>
         </CardAction>
       </CardHeader>
@@ -365,10 +392,10 @@ export function PriceChart() {
                   content={renderTip}
                   cursor={{ stroke: "var(--muted-foreground)", strokeDasharray: "4 4", strokeWidth: 1 }}
                 />
-                {/* Volume histogram — màu theo ngày tăng/giảm (§5.1) */}
+                {/* Volume histogram — màu theo phiên tăng/giảm/đứng (§5.1 + #45) */}
                 <Bar dataKey="volume" yAxisId="vol" isAnimationActive={false} fillOpacity={0.45}>
                   {chartData.map((b, i) => (
-                    <Cell key={i} fill={b.close >= b.open ? "var(--up)" : "var(--down)"} />
+                    <Cell key={i} fill={candleColor(b.open, b.close)} />
                   ))}
                 </Bar>
                 {chartMode === "candle" ? (
@@ -462,7 +489,7 @@ export function PriceChart() {
         )}
         <p className="px-1 py-3 text-[11px] text-muted-foreground">
           {data
-            ? `${data.days} phiên gần nhất · ${chartMode === "candle" ? "nến xanh = đóng ≥ mở" : "diện tích = giá đóng cửa"} · đường đứt: SMA 20 phiên · khối lượng: màu theo phiên tăng/giảm`
+            ? `${data.days} phiên gần nhất · nến xanh dương = đóng > mở · nến đỏ = đóng < mở · nến vàng = đóng = mở · đường đứt: SMA 20 phiên · khối lượng: màu theo phiên tăng/giảm/đứng`
             : ""}
         </p>
       </CardContent>

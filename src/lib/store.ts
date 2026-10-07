@@ -49,6 +49,12 @@ interface UiState {
   activeWorkspace: Workspace;
   setActiveWorkspace: (ws: Workspace) => void;
 
+  /** Phiên #45 — sidebar trái (điều hướng module) mở/đóng bằng nút logo
+   * "The Trader" trên header. Mặc định ĐÓNG — nhấp logo để mở ra/đóng lại. */
+  sidebarOpen: boolean;
+  setSidebarOpen: (open: boolean) => void;
+  toggleSidebar: () => void;
+
   /** PHASE3 B3: biểu đồ giá — nến Nhật hay đường polyline. */
   chartMode: ChartMode;
   setChartMode: (mode: ChartMode) => void;
@@ -79,6 +85,10 @@ export const useUiStore = create<UiState>()((set) => ({
 
   activeWorkspace: "overview",
   setActiveWorkspace: (ws) => set({ activeWorkspace: ws }),
+
+  sidebarOpen: false,
+  setSidebarOpen: (open) => set({ sidebarOpen: open }),
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
   chartMode: "candle",
   setChartMode: (mode) => set({ chartMode: mode }),

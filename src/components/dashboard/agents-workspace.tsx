@@ -104,6 +104,9 @@ export function AgentsWorkspace() {
 
   // Agent đang mở panel chi tiết (local state — không cần Zustand).
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Phiên #45 — bộ lọc nhóm agent: mặc định "all" (hiển thị toàn bộ 23);
+  // chọn 1 nhóm để rút ngắn danh sách roster quá dài theo yêu cầu user.
+  const [groupFilter, setGroupFilter] = useState<string>("all");
   // retryAfterSeconds theo agent id — set khi chạy riêng dính 429;
   // workspace là chủ duy nhất của đồng hồ đếm ngược (tick giảm mỗi giây).
   const [retryAfter, setRetryAfter] = useState<Record<string, number>>({});
@@ -142,6 +145,13 @@ export function AgentsWorkspace() {
 
   const agents = agentsQuery.data?.agents ?? [];
   const sections = groupAgentsBySection(agents);
+  // Phiên #45 — roster lọc theo nhóm đang chọn ("all" = mọi nhóm).
+  const visibleSections =
+    groupFilter === "all"
+      ? sections
+      : sections.filter((s) => s.key === groupFilter);
+  // Scorecard + ma trận độ phủ chỉ gắn bối cảnh nhóm research — ẩn khi lọc nhóm khác.
+  const showResearchExtras = groupFilter === "all" || groupFilter === "research";
   const totals = agentsQuery.data?.totals;
   const totalTokens =
     totals ? totals.totalTokensIn + totals.totalTokensOut : null;
@@ -213,6 +223,32 @@ export function AgentsWorkspace() {
         <div
           className="flex flex-col gap-4 self-start xl:col-span-2 xl:max-h-[calc(100vh-13rem)] xl:overflow-y-auto xl:pr-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border"
         >
+          {/* Phiên #45 — nút chọn nhóm agent: rút ngắn roster 23 agents
+           * (yêu cầu user — hiển thị luôn tất cả hơi dài). Pill toggle, touch ≥44px. */}
+          {!agentsQuery.isLoading && !agentsQuery.isError && sections.length > 0 && (
+            <div
+              role="group"
+              aria-label="Chọn nhóm agent hiển thị"
+              className="flex flex-wrap gap-2"
+            >
+              <GroupFilterButton
+                active={groupFilter === "all"}
+                onClick={() => setGroupFilter("all")}
+                label="Tất cả"
+                count={agents.length}
+              />
+              {sections.map((s) => (
+                <GroupFilterButton
+                  key={s.key}
+                  active={groupFilter === s.key}
+                  onClick={() => setGroupFilter(s.key)}
+                  label={s.label}
+                  count={s.agents.length}
+                />
+              ))}
+            </div>
+          )}
+
           {agentsQuery.isLoading ? (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
               {Array.from({ length: 8 }).map((_, i) => (
@@ -224,7 +260,7 @@ export function AgentsWorkspace() {
               {agentsQuery.error?.message ?? "Không tải được danh sách agent."}
             </p>
           ) : (
-            sections.map((section, i) => (
+            visibleSections.map((section, i) => (
               <Fragment key={section.key}>
                 <section
                   aria-label={section.label}
@@ -269,7 +305,7 @@ export function AgentsWorkspace() {
                     research (chốt user §0.3 — blueprint §3.6/Bước 8) */}
                 {/* B14 — Ma trận độ phủ thị trường: ĐẶT SAU scorecard
                     (§3.7/Bước 14 — cùng tab Đội Agent theo chốt user §0.3) */}
-                {section.key === "research" && (
+                {section.key === "research" && showResearchExtras && (
                   <>
                     <ResearchScorecard />
                     <CoverageMatrix />
@@ -306,6 +342,46 @@ export function AgentsWorkspace() {
         </div>
       </div>
     </div>
+  );
+}
+
+/* ═══════════════ Phiên #45 — nút lọc nhóm agent (pill toggle) ═══════════════ */
+
+function GroupFilterButton({
+  active,
+  onClick,
+  label,
+  count,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  count: number;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 sm:min-h-9",
+        active
+          ? "border-primary bg-primary text-primary-foreground"
+          : "border-border/70 bg-background text-muted-foreground hover:border-border hover:bg-accent hover:text-foreground"
+      )}
+    >
+      {label}
+      <span
+        className={cn(
+          "rounded-full px-1.5 py-0 text-[10px] tabular-nums",
+          active
+            ? "bg-primary-foreground/15 text-primary-foreground"
+            : "bg-muted text-muted-foreground"
+        )}
+      >
+        {count}
+      </span>
+    </button>
   );
 }
 

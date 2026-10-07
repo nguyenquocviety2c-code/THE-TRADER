@@ -62,15 +62,15 @@ const MODE_LABEL: Record<string, string> = {
 };
 
 function modeDotClass(mode: string, stale: boolean): string {
-  if (stale) return "bg-amber-500";
+  if (stale) return "bg-flat"; // vàng cảnh báo stale (phiên #45 — token chủ đề)
   switch (mode) {
     case "live":
-    case "real": // EOD thật từ VNDIRECT dchart — xanh như live
+    case "real": // EOD thật từ VNDIRECT dchart — xanh dương như live
       return "bg-up";
     case "simulated":
-      return "bg-amber-500/80";
+      return "bg-flat/80";
     case "fallback":
-      return "bg-red-500";
+      return "bg-down";
     default:
       return "bg-muted-foreground";
   }

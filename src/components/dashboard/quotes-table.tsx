@@ -149,8 +149,17 @@ export function QuotesTable() {
         <CardTitle className="text-base">
           {watchlistOnly ? "Danh mục theo dõi" : "Bảng giá đa sàn"}
         </CardTitle>
-        <CardDescription>Nhấp vào một mã để xem biểu đồ giá</CardDescription>
-        <CardAction>
+        <CardDescription className="col-start-1 row-start-2">
+          Nhấp vào một mã để xem biểu đồ giá
+        </CardDescription>
+        {/* F-451 (VLM browser-verify): card bảng giá nằm cột hẹp ~540px trong grid
+         * xl:grid-cols-5 — cụm search + 2 switch chiếm 445px khiến grid ép
+         * tiêu đề về min-content 40px (chữ xếp dọc từng từ). Vá bằng container
+         * query + đặt vị trí tường minh (desc phải ở hàng 2 cột 1, nếu không
+         * auto-placement sẽ đẩy desc lên cột 2 cạnh tiêu đề): card hẹp → cụm
+         * điều khiển xuống HÀNG 3 full-width; card ≥ 48rem (@3xl) → trở về
+         * cột phải trải 2 hàng như thiết kế gốc. */}
+        <CardAction className="col-span-2 col-start-1 row-start-3 w-full justify-self-stretch @3xl:col-span-1 @3xl:col-start-2 @3xl:row-span-2 @3xl:row-start-1 @3xl:w-auto @3xl:justify-self-end">
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
             {/* PHASE3 B3 §5.2 — cột mở rộng: Trần/Sàn/TC/Cao/Thấp */}
             <div
@@ -306,7 +315,9 @@ export function QuotesTable() {
                         </p>
                       </TableCell>
                       <TableCell className="tabular-nums py-2.5 text-right font-medium">
-                        {/* Q2 HOSE: chạm trần ⌃ / chạm sàn ⌄ */}
+                        {/* Phiên #45 — giá tô màu theo hướng so tham chiếu:
+                         * tăng xanh dương · giảm đỏ · đứng giá vàng (chuẩn bảng giá VN).
+                         * Q2 HOSE: chạm trần ⌃ / chạm sàn ⌄ đậm hơn. */}
                         {q.ceilingPrice != null && q.last >= q.ceilingPrice ? (
                           <span className="font-bold text-up">
                             ⌃ {fmtP(q.last, q)}
@@ -316,7 +327,18 @@ export function QuotesTable() {
                             ⌄ {fmtP(q.last, q)}
                           </span>
                         ) : (
-                          fmtP(q.last, q)
+                          <span
+                            className={cn(
+                              "font-semibold",
+                              q.change > 0
+                                ? "text-up"
+                                : q.change < 0
+                                  ? "text-down"
+                                  : "text-flat"
+                            )}
+                          >
+                            {fmtP(q.last, q)}
+                          </span>
                         )}
                       </TableCell>
                       <TableCell className={`tabular-nums py-2.5 text-right ${changeColor(q.change)}`}>
@@ -335,7 +357,7 @@ export function QuotesTable() {
                         <span className="text-muted-foreground"> / </span>
                         <span className="text-down">{fmtP(q.askPrice, q)}</span>
                       </TableCell>
-                      {/* PHASE3 B3 §5.2 — hàng cột mở rộng (≥ sm) */}
+                      {/* Cột trần/sàn: trần = xanh dương · sàn = đỏ (phiên #45) */}
                       <TableCell className="hidden tabular-nums py-2.5 text-right font-semibold text-up sm:table-cell">
                         {fmtP(q.ceilingPrice, q)}
                       </TableCell>

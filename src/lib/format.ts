@@ -99,14 +99,15 @@ export function formatVndCompact(n: number | null | undefined): string {
   return formatVnd(n);
 }
 
-/** CSS class for change coloring */
+/** Phiên #45 — màu biến động giá chuẩn tài chính VN: tăng = xanh dương
+ * (text-up) · giảm = đỏ (text-down) · đứng giá/0 = vàng (text-flat). */
 export function changeColor(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n) || n === 0) return "text-muted-foreground";
+  if (n == null || Number.isNaN(n) || n === 0) return "text-flat";
   return n > 0 ? "text-up" : "text-down";
 }
 
 export function bgColor(n: number | null | undefined): string {
-  if (n == null || Number.isNaN(n) || n === 0) return "bg-muted";
+  if (n == null || Number.isNaN(n) || n === 0) return "bg-flat";
   return n > 0 ? "bg-up" : "bg-down";
 }
 

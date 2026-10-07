@@ -3,18 +3,39 @@
 import * as React from "react";
 import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
-import { Loader2, Moon, Play, Radio, RefreshCw, Sun, TrendingUp, Wallet } from "lucide-react";
+import {
+  Loader2,
+  Moon,
+  PanelLeft,
+  PanelLeftClose,
+  Play,
+  Radio,
+  RefreshCw,
+  Sun,
+  TrendingUp,
+  Wallet,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { WorkspaceNav } from "@/components/dashboard/nav";
 import { apiGet } from "@/lib/api";
 import { useRunAgents } from "@/hooks/use-run-agents";
-import { useUiStore } from "@/lib/store";
+import { useUiStore, type Workspace } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { formatVnd, isMarketOpen, vnClock, vnDate } from "@/lib/format";
 import type { PortfolioResponse } from "@/lib/types";
+
+/** Nhãn module hiện tại — hiển thị cạnh logo để định vị khi sidebar đóng. */
+const WORKSPACE_LABELS: Record<Workspace, string> = {
+  overview: "Tổng quan",
+  market: "Thị trường",
+  portfolio: "Danh mục",
+  signals: "Tín hiệu",
+  agents: "Đội Agent",
+  synthesis: "Tổng hợp",
+  settings: "Cài đặt",
+};
 
 const emptySubscribe = () => () => {};
 
@@ -50,6 +71,9 @@ export function Header() {
   const queryClient = useQueryClient();
   const runAgents = useRunAgents();
   const realtimeConnected = useUiStore((s) => s.realtimeConnected);
+  const sidebarOpen = useUiStore((s) => s.sidebarOpen);
+  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const activeWorkspace = useUiStore((s) => s.activeWorkspace);
 
   const { data: portfolio } = useQuery({
     queryKey: ["portfolio"],
@@ -86,21 +110,56 @@ export function Header() {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="mx-auto flex w-full max-w-[1440px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
-        {/* Brand */}
-        <div className="flex items-center gap-3">
+        {/* Phiên #45 — logo "The Trader" là nút bật/tắt sidebar trái (module nav).
+         * Thanh tab ngang cũ được thay bằng sidebar — xem nav.tsx AppSidebar. */}
+        <button
+          type="button"
+          aria-expanded={sidebarOpen}
+          aria-controls="app-sidebar"
+          aria-label={
+            sidebarOpen
+              ? "Đóng thanh điều hướng module"
+              : "Mở thanh điều hướng module"
+          }
+          onClick={toggleSidebar}
+          className="group flex min-h-11 items-center gap-2 rounded-lg px-1.5 py-1 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40 sm:min-h-0"
+        >
+          <span className="relative block size-4 shrink-0" aria-hidden="true">
+            <PanelLeftClose
+              className={cn(
+                "absolute inset-0 size-4 text-muted-foreground transition-opacity",
+                sidebarOpen ? "opacity-100" : "opacity-0"
+              )}
+            />
+            <PanelLeft
+              className={cn(
+                "absolute inset-0 size-4 text-muted-foreground transition-transform group-hover:scale-110",
+                sidebarOpen ? "opacity-0" : "opacity-100"
+              )}
+            />
+          </span>
           <div
             className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground"
             aria-hidden="true"
           >
             <TrendingUp className="size-5" />
           </div>
-          <div className="leading-tight">
+          <div className="leading-tight text-left">
             <p className="text-base font-semibold tracking-tight">The Trader</p>
             <p className="text-xs text-muted-foreground">
               Multi-Agent Trading · VNDIRECT
             </p>
           </div>
-        </div>
+        </button>
+
+        {/* Module hiện tại — định vị nhanh khi sidebar đóng (phiên #45) */}
+        <Badge
+          variant="outline"
+          className="hidden items-center gap-1.5 px-2.5 py-1 text-xs text-muted-foreground md:inline-flex"
+          title={`Module đang mở: ${WORKSPACE_LABELS[activeWorkspace]} — nhấp logo “The Trader” để đổi`}
+        >
+          {WORKSPACE_LABELS[activeWorkspace]}
+        </Badge>
 
         {/* Right cluster */}
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -269,9 +328,6 @@ export function Header() {
           </Button>
         </div>
       </div>
-
-      {/* PHASE3 B1: thanh tab workspace — hàng dưới thanh logo (§3.2) */}
-      <WorkspaceNav />
     </header>
   );
 }

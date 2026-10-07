@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import {
   Bot,
   Brain,
@@ -8,97 +9,242 @@ import {
   LayoutDashboard,
   Radar,
   Settings,
+  TrendingUp,
+  X,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useUiStore, type Workspace } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 /**
- * PHASE3_BLUEPRINT §3.2 + phiên #34 — thanh tab workspace (7 module), render
- * bên trong Header (hàng dưới thanh logo). Chuyển workspace bằng Zustand —
- * KHÔNG reload trang, KHÔNG thêm route (bất biến single-route `/`).
+ * PHASE3_BLUEPRINT §3.2 + phiên #34 → PHIÊN #45 (yêu cầu user):
+ * thanh tab workspace ngang trên header được thay bằng SIDEBAR TRÁI overlay.
  *
- * Mobile (<sm): hàng tab cuộn ngang (overflow-x-auto + snap-x + scrollbar ẩn),
- * mỗi tab flex-none min-w-max, touch target ≥ 44px — không ép 7 tab chia đôi.
- * Desktop (≥sm): các tab flex-none như cũ.
+ * - Sidebar ĐÓNG mặc định; nhấp nút logo "The Trader" trên header để mở/đóng
+ *   (aria-expanded/aria-controls gắn với nút đó, id="app-sidebar").
+ * - Chọn một module → chuyển workspace (Zustand) + tự đóng sidebar.
+ * - Đóng bằng: nút X · Esc · nhấp vùng tối phía dưới (backdrop).
+ * - Giữ id nút `workspace-tab-<id>` để `aria-labelledby` của các workspace
+ *   panel (role="tabpanel") vẫn trỏ đúng phần tử — không đổi href/route,
+ *   vẫn bất biến single-route `/` + deep-link ?ws=.
+ *
+ * A11y: vai trò tab dọc (WAI-ARIA tabs) — mũi tên Lên/Xuống chuyển module,
+ * Home/End nhảy đầu/cuối; sidebar dùng `inert` khi đóng để không nuốt focus
+ * bàn phím; body khoá cuộn khi mở (mobile).
  */
 
-const TABS: { id: Workspace; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: "overview", label: "Tổng quan", icon: LayoutDashboard },
-  { id: "market", label: "Thị trường", icon: ChartCandlestick },
-  { id: "portfolio", label: "Danh mục", icon: Briefcase },
-  { id: "signals", label: "Tín hiệu", icon: Radar },
-  { id: "agents", label: "Đội Agent", icon: Bot },
-  { id: "synthesis", label: "Tổng hợp", icon: Brain },
-  { id: "settings", label: "Cài đặt", icon: Settings },
+const WORKSPACE_ITEMS: {
+  id: Workspace;
+  label: string;
+  description: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
+  {
+    id: "overview",
+    label: "Tổng quan",
+    description: "Tin nhanh thị trường · nhận định · tín hiệu",
+    icon: LayoutDashboard,
+  },
+  {
+    id: "market",
+    label: "Thị trường",
+    description: "Bảng giá đa sàn · biểu đồ giá · dòng tiền",
+    icon: ChartCandlestick,
+  },
+  {
+    id: "portfolio",
+    label: "Danh mục",
+    description: "Vị thế · lệnh · khớp lệnh · sức mua",
+    icon: Briefcase,
+  },
+  {
+    id: "signals",
+    label: "Tín hiệu",
+    description: "Tín hiệu MUA/BÁN · rủi ro · vận hành",
+    icon: Radar,
+  },
+  {
+    id: "agents",
+    label: "Đội Agent",
+    description: "23 agents · 5 nhóm · bảng điểm · độ phủ",
+    icon: Bot,
+  },
+  {
+    id: "synthesis",
+    label: "Tổng hợp",
+    description: "Bộ tổng hợp Bayes · cổng đồng thuận 80%",
+    icon: Brain,
+  },
+  {
+    id: "settings",
+    label: "Cài đặt",
+    description: "Nguồn dữ liệu VNDIRECT · chế độ giao dịch",
+    icon: Settings,
+  },
 ];
 
-export function WorkspaceNav() {
+export function AppSidebar() {
   const active = useUiStore((s) => s.activeWorkspace);
   const setActive = useUiStore((s) => s.setActiveWorkspace);
+  const open = useUiStore((s) => s.sidebarOpen);
+  const setOpen = useUiStore((s) => s.setSidebarOpen);
   const realtimeConnected = useUiStore((s) => s.realtimeConnected);
 
+  // Esc để đóng + khoá cuộn body khi mở (tránh cuộn lạc phía sau overlay).
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open, setOpen]);
+
+  /** Mũi tên Lên/Xuống/Home/End — điều hướng tab dọc (chuẩn WAI-ARIA tabs). */
+  const onItemKeyDown = (e: React.KeyboardEvent, id: Workspace) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") {
+      return;
+    }
+    e.preventDefault();
+    const idx = WORKSPACE_ITEMS.findIndex((t) => t.id === id);
+    let next = idx;
+    if (e.key === "ArrowDown") next = (idx + 1) % WORKSPACE_ITEMS.length;
+    else if (e.key === "ArrowUp") next = (idx - 1 + WORKSPACE_ITEMS.length) % WORKSPACE_ITEMS.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = WORKSPACE_ITEMS.length - 1;
+    setActive(WORKSPACE_ITEMS[next].id);
+    document.getElementById(`workspace-tab-${WORKSPACE_ITEMS[next].id}`)?.focus();
+  };
+
   return (
-    <nav
-      aria-label="Chuyển vùng làm việc"
-      className="border-t border-border/60 bg-background/60"
-    >
+    <>
+      {/* Backdrop — nhấp để đóng; chỉ tương tác khi sidebar mở */}
       <div
-        role="tablist"
-        aria-label="Vùng làm việc"
-        className="mx-auto flex w-full max-w-[1440px] items-stretch gap-1 overflow-x-auto px-2 pt-1.5 pb-1 [scrollbar-width:hidden] [ms-overflow-style:none] snap-x snap-mandatory sm:gap-2 sm:px-6 [&::-webkit-scrollbar]:hidden"
+        aria-hidden="true"
+        onClick={() => setOpen(false)}
+        className={cn(
+          "fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] transition-opacity duration-300",
+          open ? "opacity-100" : "pointer-events-none opacity-0"
+        )}
+      />
+
+      <aside
+        id="app-sidebar"
+        aria-label="Thanh điều hướng module"
+        inert={!open}
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-border/60 bg-background shadow-xl transition-transform duration-300 ease-out",
+          open ? "translate-x-0" : "-translate-x-full"
+        )}
       >
-        {TABS.map((tab) => {
-          const selected = active === tab.id;
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              id={`workspace-tab-${tab.id}`}
-              aria-selected={selected}
-              aria-controls={`workspace-panel-${tab.id}`}
-              tabIndex={selected ? 0 : -1}
-              onClick={() => setActive(tab.id)}
-              onKeyDown={(e) => {
-                // Đ.phím mũi tên trái/phải chuyển tab (chuẩn WAI-ARIA tabs,
-                // modulo theo số tab hiện có — 7 tab phiên #34)
-                if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
-                  e.preventDefault();
-                  const idx = TABS.findIndex((t) => t.id === tab.id);
-                  const next = (idx + (e.key === "ArrowRight" ? 1 : -1) + TABS.length) % TABS.length;
-                  setActive(TABS[next].id);
-                  document.getElementById(`workspace-tab-${TABS[next].id}`)?.focus();
-                }
-              }}
-              className={cn(
-                // Mobile: cuộn ngang, mỗi tab flex-none min-w-max ≥44px;
-                // desktop: nút dạng tab flex-none như cũ
-                "relative flex min-h-11 min-w-max flex-none snap-start items-center justify-center gap-2 rounded-t-lg border-b-2 px-3 text-sm font-medium transition-colors sm:min-h-10 sm:px-4",
-                selected
-                  ? "border-primary text-foreground"
-                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
-              )}
-            >
-              <Icon className="size-4 shrink-0" aria-hidden="true" />
-              <span className="whitespace-nowrap">{tab.label}</span>
-              {/* Badge chấm realtime khi workspace Đội Agent mở & engine đang nối */}
-              {tab.id === "agents" && realtimeConnected && (
-                <span
-                  className="relative flex size-2 shrink-0"
-                  title="market-engine đang phát realtime"
-                >
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-60" />
-                  <span className="relative inline-flex size-2 rounded-full bg-up" />
+        {/* Đầu sidebar: logo + tên + nút đóng */}
+        <div className="flex items-center gap-3 border-b border-border/60 px-4 py-4">
+          <div
+            className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground"
+            aria-hidden="true"
+          >
+            <TrendingUp className="size-5" />
+          </div>
+          <div className="min-w-0 flex-1 leading-tight">
+            <p className="text-base font-semibold tracking-tight">The Trader</p>
+            <p className="truncate text-xs text-muted-foreground">
+              Multi-Agent Trading · VNDIRECT
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Đóng thanh điều hướng"
+            onClick={() => setOpen(false)}
+            className="size-9 shrink-0"
+          >
+            <X className="size-4" />
+          </Button>
+        </div>
+
+        {/* Danh sách module */}
+        <nav
+          aria-label="Vùng làm việc"
+          role="tablist"
+          aria-orientation="vertical"
+          className="custom-scrollbar flex-1 space-y-1 overflow-y-auto px-3 py-3"
+        >
+          {WORKSPACE_ITEMS.map((item) => {
+            const selected = active === item.id;
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                id={`workspace-tab-${item.id}`}
+                aria-selected={selected}
+                aria-controls={`workspace-panel-${item.id}`}
+                tabIndex={selected ? 0 : -1}
+                onClick={() => {
+                  setActive(item.id);
+                  setOpen(false); // chọn module xong tự đóng sidebar
+                }}
+                onKeyDown={(e) => onItemKeyDown(e, item.id)}
+                className={cn(
+                  "flex w-full items-start gap-3 rounded-lg border px-3 py-2.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                  selected
+                    ? "border-primary/30 bg-accent text-accent-foreground"
+                    : "border-transparent text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                )}
+              >
+                <Icon
+                  className={cn(
+                    "mt-0.5 size-4 shrink-0",
+                    selected ? "text-foreground" : "text-muted-foreground"
+                  )}
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2 text-sm font-medium">
+                    {item.label}
+                    {selected && <span className="sr-only">(đang mở)</span>}
+                    {/* Chấm realtime khi workspace Đội Agent & engine đang nối */}
+                    {item.id === "agents" && realtimeConnected && (
+                      <span
+                        className="relative flex size-2 shrink-0"
+                        title="market-engine đang phát realtime"
+                      >
+                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-up opacity-60" />
+                        <span className="relative inline-flex size-2 rounded-full bg-up" />
+                      </span>
+                    )}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/80">
+                    {item.description}
+                  </span>
                 </span>
-              )}
-              {selected && (
-                <span className="sr-only">(đang mở)</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </nav>
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Chân sidebar — chú thích màu chuẩn tài chính (phiên #45) */}
+        <div className="space-y-2 border-t border-border/60 px-4 py-3 text-[11px] text-muted-foreground">
+          <p className="flex items-center gap-3">
+            <span className="flex items-center gap-1">
+              <span className="size-2 rounded-sm bg-up" aria-hidden="true" /> tăng
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="size-2 rounded-sm bg-down" aria-hidden="true" /> giảm
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="size-2 rounded-sm bg-flat" aria-hidden="true" /> đứng giá
+            </span>
+          </p>
+          <p>7 module · nhấp logo “The Trader” để mở/đóng</p>
+        </div>
+      </aside>
+    </>
   );
 }

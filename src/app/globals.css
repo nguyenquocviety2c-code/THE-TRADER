@@ -37,8 +37,12 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-  --up: oklch(0.646 0.222 41.116);
+  /* Phiên #45 — chuẩn mực hệ thống tài chính VN (yêu cầu user):
+   * tăng = XANH DƯƠNG · giảm = ĐỎ · đứng giá = VÀNG (amber).
+   * Trước đây --up trùng --chart-1 (đỏ cam) khiến tăng/giảm đều đỏ — khó quan sát. */
+  --up: oklch(0.546 0.245 262.881);
   --down: oklch(0.577 0.245 27.325);
+  --flat: oklch(0.666 0.179 58.318);
 }
 
 .dark {
@@ -74,8 +78,9 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  --up: oklch(0.7 0.19 25);
+  --up: oklch(0.707 0.165 254.624);
   --down: oklch(0.65 0.22 20);
+  --flat: oklch(0.828 0.189 84.429);
 }
 
 @theme inline {
@@ -113,6 +118,7 @@
   --color-sidebar-ring: var(--sidebar-ring);
   --color-up: var(--up);
   --color-down: var(--down);
+  --color-flat: var(--flat);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

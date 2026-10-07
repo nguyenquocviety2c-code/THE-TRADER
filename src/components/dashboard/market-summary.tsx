@@ -71,6 +71,7 @@ export function MarketSummary() {
   const breadthTotal = Math.max(1, s.advancing + s.declining + s.unchanged);
   const upPct = (s.advancing / breadthTotal) * 100;
   const downPct = (s.declining / breadthTotal) * 100;
+  const flatPct = (s.unchanged / breadthTotal) * 100;
 
   return (
     <>
@@ -116,10 +117,12 @@ export function MarketSummary() {
         sub={
           <span className="flex flex-col gap-1.5">
             <span className="tabular-nums text-muted-foreground">
-              {s.unchanged} mã tham chiếu
+              {s.unchanged} mã đứng giá
             </span>
+            {/* Phiên #45 — 3 sắc thái: xanh dương tăng · đỏ giảm · vàng đứng giá */}
             <span className="flex h-1.5 w-full overflow-hidden rounded-full bg-muted">
               <span className="bg-up" style={{ width: `${upPct}%` }} />
+              <span className="bg-flat" style={{ width: `${flatPct}%` }} />
               <span className="bg-down" style={{ width: `${downPct}%` }} />
             </span>
           </span>
