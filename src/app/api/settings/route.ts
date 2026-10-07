@@ -12,6 +12,7 @@ import {
   saveVndirectSettings,
   setMarketDataMode,
 } from "@/lib/settings";
+import { resetRiskQuantLimits } from "@/lib/risk/engine";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -127,6 +128,11 @@ export async function PUT(req: Request): Promise<NextResponse> {
     }
     if (vnd) {
       await saveVndirectSettings(vnd);
+    }
+    // Phiên #51 — CRB-7: nút reset thủ công Beta limit-learning (nghiệm thu
+    // CRB-7.4) — prior Beta(1,99), ghi AuditLog minh bạch.
+    if (body.riskQuantReset === true) {
+      await resetRiskQuantLimits();
     }
 
     return NextResponse.json(await buildSettingsResponse());

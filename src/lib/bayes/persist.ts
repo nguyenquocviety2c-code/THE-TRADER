@@ -103,6 +103,8 @@ function rowToView(
     segments: (parsed.segments as MarketAssessmentView["segments"]) ?? [],
     // B9 — cổng đồng thuận (row cũ trước #38 không có → null)
     consensus: (parsed.consensus as MarketAssessmentView["consensus"]) ?? null,
+    // Phiên #51 — CRB: khối quant Ủy ban Kiểm soát Định lượng (row cũ → null)
+    riskQuant: (parsed.riskQuant as MarketAssessmentView["riskQuant"]) ?? null,
   };
 }
 
@@ -131,6 +133,11 @@ export async function saveMarketAssessment(
     direction: v.direction,
     confidence: Number(v.confidence.toFixed(4)),
   }));
+  // Phiên #51 — CRB §7: khối quant Ủy ban Kiểm soát Định lượng vào detail
+  // (additive — row cũ không có trường này, UI xử lý null).
+  if (input.riskQuant) {
+    detail.riskQuant = input.riskQuant;
+  }
   const row = await db.marketAssessment.create({
     data: {
       source: options.source,
@@ -163,6 +170,35 @@ export async function attachCycleRunId(
     where: { id: assessmentId },
     data: { cycleRunId },
   });
+}
+
+/**
+ * Phiên #51 — CRB-9: cập nhật kellyHint vào detail.riskQuant của assessment
+ * SAU khi Chủ tịch ra tín hiệu (Kelly cần target/stop — không biết trước).
+ * Đọc-sửa-ghi detail JSON; lỗi im lặng (Kelly chỉ tham mưu).
+ */
+export async function attachRiskQuantKelly(
+  assessmentId: string | null | undefined,
+  kellyHint: number | null
+): Promise<void> {
+  if (!assessmentId) return;
+  try {
+    const row = await db.marketAssessment.findUnique({
+      where: { id: assessmentId },
+      select: { detail: true },
+    });
+    if (!row) return;
+    const detail = JSON.parse(row.detail) as Record<string, unknown>;
+    const rq = detail.riskQuant as { kellyHint?: number | null } | undefined;
+    if (!rq) return;
+    rq.kellyHint = kellyHint;
+    await db.marketAssessment.update({
+      where: { id: assessmentId },
+      data: { detail: JSON.stringify(detail) },
+    });
+  } catch {
+    // detail hỏng/parse lỗi — bỏ qua (kellyHint đã có trong RiskQuantSnapshot)
+  }
 }
 
 /** Bản assessment mới nhất (parse detail) — null khi chưa có bản nào. */

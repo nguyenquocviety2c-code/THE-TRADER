@@ -1,10 +1,10 @@
 # ML LEARNING BLUEPRINT — PHÒNG HỌC MÁY: TÍCH LUỸ TRI THỨC & HỌC TỪ KẾT QUẢ
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/ML_LEARNING_BLUEPRINT.md` · **Version:** 1.0 · **Updated:** 2026-10-07
-> **Status:** **KẾ HOẠCH TƯƠNG LAI — CHƯA PHÊ DUYỆT TRIỂN KHAI** (user #50: "file này coi như là kế hoạch tương lai"; mỗi giai đoạn L1–L5 cần được phê duyệt riêng khi quyết định kích hoạt, xem §6 cổng kích hoạt)
-> **Cross-refs:** [CONTROL_RISK_QUANT_BLUEPRINT.md](./CONTROL_RISK_QUANT_BLUEPRINT.md) (CRB-6 đặc trưng logistic · CRB-1 σ cho state RL) · [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (B7 ensemble · B8 scorecard/Brier · B9 đồng thuận) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [DATA_SOURCES.md](./DATA_SOURCES.md)
-> **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #50)
+> **Document:** `docs/ML_LEARNING_BLUEPRINT.md` · **Version:** 1.0.1 · **Updated:** 2026-10-08
+> **Status:** **ĐÃ ĐƯỢC DUYỆT (phiên #51) — KẾ HOẠCH TƯƠNG LAI, CHỜ KÍCH HOẠT THEO CỔNG DỮ LIỆU** (user #51: "Về ML Learning thì tôi duyệt" — phê duyệt định hướng; từng giai đoạn L1–L5 chỉ triển khai khi cổng dữ liệu §6 đạt, CRB đã cho thấy mô hình dưới ngưỡng AUC sẽ KHÔNG serving — cùng văn hoá trung thực)
+> **Cross-refs:** [CONTROL_RISK_QUANT_BLUEPRINT.md](./CONTROL_RISK_QUANT_BLUEPRINT.md) (CRB-6 đặc trưng logistic · CRB-1 σ cho state RL — **ĐÃ TRIỂN KHAI #51**) · [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (B7 ensemble · B8 scorecard/Brier · B9 đồng thuận) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [DATA_SOURCES.md](./DATA_SOURCES.md)
+> **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #50–#51)
 
 ---
 

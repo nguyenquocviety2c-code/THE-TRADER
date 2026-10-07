@@ -18,8 +18,15 @@ import { AGENT_ROSTER } from "@/lib/agent-roster";
 import { runServiceAgent, type ServiceRunResult } from "@/lib/agent-service-runs";
 import { buildEvidenceBundle, type LlmVoteInput } from "@/lib/bayes/evidence";
 import { synthesizeMarketAssessment } from "@/lib/bayes/synthesis";
-import { saveMarketAssessment, attachCycleRunId } from "@/lib/bayes/persist";
+import { saveMarketAssessment, attachCycleRunId, attachRiskQuantKelly } from "@/lib/bayes/persist";
 import { maybeAutoEnableConsensus } from "@/lib/consensus";
+import {
+  runRiskQuantEngine,
+  toRiskQuantView,
+  attachKellyHint,
+  type RiskQuantResult,
+} from "@/lib/risk/engine";
+import { fractionalKelly, alignedCouncilP, type CouncilVote } from "@/lib/risk/sizing";
 import type { CycleAssessmentSummary, MarketAssessmentView } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -264,6 +271,37 @@ function buildBayesPromptBlock(view: MarketAssessmentView): string {
   ].join("\n");
 }
 
+/**
+ * Phiên #51 — CRB v1.1 §6: khối QUANT Ủy ban Kiểm soát Định lượng cho prompt
+ * Chủ tịch — hạn mức động (ràng buộc tín hiệu MUA), rủi ro đuôi, CUSUM, và
+ * dòng Kelly ¼ THAM MƯU (hệ thống tự tính gợi ý khi tín hiệu có target/stop).
+ */
+function buildQuantChairmanBlock(rq: RiskQuantResult): string {
+  const fmt1 = (n: number) => n.toFixed(1).replace(".", ",");
+  const lines = [
+    "ỦY BAN KIỂM SOÁT ĐỊNH LƯỢNG — KHỐI QUANT (CRB v1.1 · deterministic):",
+    `- Hạn mức động: vị thế tối đa ${fmt1(rq.dynMaxPositionPct)}% NAV · ngành ${fmt1(rq.dynMaxSectorPct)}% (tĩnh ${fmt1(rq.staticMaxPositionPct)}/${fmt1(rq.staticMaxSectorPct)}% × hệ số ${rq.vol.mult.toFixed(2).replace(".", ",")}${rq.vol.mult > 1 ? " — nới theo biến động thấp" : ""}) — tín hiệu MUA không được vượt hạn mức này.`,
+    `- Rủi ro đuôi 5 phiên: VaR95 ${rq.tail.var95Pct.toFixed(2).replace(".", ",")}% · CVaR95 ${rq.tail.cvar95Pct.toFixed(2).replace(".", ",")}% NAV${rq.mc.paths > 0 ? ` · Monte Carlo ${rq.mc.paths.toLocaleString("vi-VN")} path: P(chạm DD 15%) = ${fmt1(rq.mc.pDd * 100)}%` : ""}.`,
+  ];
+  if (rq.pBreach != null) {
+    lines.push(
+      `- P(vi phạm hạn mức trong 5 phiên): ${fmt1(rq.pBreach * 100)} (logistic CRB-6, AUC ${fmt1(rq.logit.auc * 100)}).`
+    );
+  }
+  if (rq.drift.alarm) {
+    lines.push(
+      `- CUSUM: TRÔI DỆT XUỐNG phát hiện sớm${rq.drift.sessionsToDd != null ? ` — theo trend hiện tại còn ~${rq.drift.sessionsToDd} phiên tới DD 15%` : ""}.`
+    );
+  }
+  if (rq.proxyMode) {
+    lines.push("- LƯU Ý: số đo trên rổ proxy top-10 thanh khoản (danh mục chưa đủ dữ liệu — proxyMode).");
+  }
+  lines.push(
+    "- Kelly ¼ (CHỈ THAM MƯU): nếu đưa tín hiệu MUA/BÁN kèm targetPrice/stopLoss hợp lệ, hệ thống tính gợi ý tỷ trọng tối đa từ bandit posterior cử tri đồng hướng + chặn hạn mức động — KHÔNG tự đặt khối lượng (trader phê duyệt bắt buộc)."
+  );
+  return lines.join("\n");
+}
+
 export async function POST() {
   // F-203 (audit 19-b): guard 60s giữa 2 chu kỳ — trả 429 kèm thời gian chờ còn lại
   const now = Date.now();
@@ -348,12 +386,16 @@ export async function POST() {
   }[] = [];
   const failures: string[] = [];
 
-  /** Chạy + persist MỘT service agent (deterministic) — trả về result để đọc verdict VETO. */
-  async function runOneServiceAgent(code: string): Promise<ServiceRunResult | null> {
+  /** Chạy + persist MỘT service agent (deterministic) — trả về result để đọc verdict VETO.
+   *  ctx (phiên #51 — CRB): truyền kết quả RiskQuantEngine (exposure A7 đọc hạn mức động). */
+  async function runOneServiceAgent(
+    code: string,
+    ctx?: { riskQuant?: RiskQuantResult | null }
+  ): Promise<ServiceRunResult | null> {
     const agent = byCode.get(code)!;
     const startedAt = Date.now();
     try {
-      const result: ServiceRunResult = await runServiceAgent(code);
+      const result: ServiceRunResult = await runServiceAgent(code, ctx);
       await persistRun(
         agent.id,
         true,
@@ -425,18 +467,19 @@ export async function POST() {
         system: ROLE_PROMPTS["liquidity"].system,
         user: [marketBlock, liquidityBlock].join("\n\n"),
       },
-      "risk-manager": {
-        system: ROLE_PROMPTS["risk-manager"].system,
-        user: [marketBlock, flowsBlock].join("\n\n"),
-      },
+      // risk-manager KHÔNG build ở đây — prompt cần khối QUANT của
+      // RiskQuantEngine (chạy sau đợt B, trước đợt C — phiên #51 CRB §2)
     };
 
     // ══ ĐỢT A · Nền tảng dữ liệu (4 service, song song) ════════════
     await Promise.all(WAVE_A_CODES.map((code) => runOneServiceAgent(code)));
 
     // ══ ĐỢT B · Nghiên cứu + Học máy ═══════════════════════════════
-    // Service agents (8) song song trước — nhanh, 0 LLM
-    await Promise.all(WAVE_B_SERVICE_CODES.map((code) => runOneServiceAgent(code)));
+    // Service agents (8) song song trước — nhanh, 0 LLM. Giữ kết quả để
+    // đọc direction ml-forecast (cử tri thứ 6 — đầu vào votes cho Kelly CRB-9)
+    const waveBServiceResults = await Promise.all(
+      WAVE_B_SERVICE_CODES.map((code) => runOneServiceAgent(code))
+    );
 
     // LLM research agents (4) tuần tự — tôn trọng rate-limit gateway
     for (const code of WAVE_B_LLM_CODES) {
@@ -520,6 +563,53 @@ export async function POST() {
       );
     }
 
+    // ══ [CRB-0] RISKQUANT ENGINE (phiên #51 — CONTROL_RISK_QUANT_BLUEPRINT v1.1 §2) ══
+    // Chạy TRƯỚC đợt C: (a) risk-manager LLM cần con số định lượng trong prompt;
+    // (b) exposure A7 cần hạn mức ĐỘNG (CRB-1 hai chiều × CRB-7 hợp nhất min);
+    // (c) deterministic ~1s — không phụ thuộc đầu ra LLM. Engine lỗi → giữ hạn
+    // mức tĩnh như trước khi có engine (fail-safe §0.1 — VETO vẫn luật cứng).
+    // Direction cử tri thứ 6 (ml-forecast) — dùng cho votes engine + Kelly CRB-9
+    const mlForecastIdx = WAVE_B_SERVICE_CODES.indexOf("ml-forecast");
+    const mlForecastDirRaw =
+      mlForecastIdx >= 0
+        ? (waveBServiceResults[mlForecastIdx]?.output as { ensemble?: { direction?: unknown } })
+            ?.ensemble?.direction
+        : undefined;
+    const mlForecastDirection =
+      mlForecastDirRaw === "UP" || mlForecastDirRaw === "DOWN" || mlForecastDirRaw === "FLAT"
+        ? mlForecastDirRaw
+        : null;
+    let riskQuant: RiskQuantResult | null = null;
+    try {
+      riskQuant = await runRiskQuantEngine();
+      if (riskQuant.ok) {
+        console.log(
+          `[risk-quant] snapshot ${riskQuant.snapshotId} · proxy=${riskQuant.proxyMode} · vol×${riskQuant.vol.volRatio.toFixed(2)} mult=${riskQuant.vol.mult.toFixed(2)} → hạn động ${riskQuant.dynMaxPositionPct.toFixed(1)}/${riskQuant.dynMaxSectorPct.toFixed(1)}% · CVaR95(5p) ${riskQuant.tail.cvar95Pct.toFixed(2)}% · alerts=${riskQuant.alerts.length} · evidence=${riskQuant.evidence.length} · ${riskQuant.durationMs}ms`
+        );
+      }
+    } catch (quantErr) {
+      console.error("[risk-quant] engine lỗi — chu kỳ tiếp tục hạn mức tĩnh:", quantErr);
+      riskQuant = null;
+    }
+
+    // Prompt risk-manager (A6) — có khối QUANT từ engine (điểm nối §3 CRB v1.1)
+    const quantPromptBlock =
+      riskQuant?.ok && riskQuant.promptLines.length > 0
+        ? [
+            "KHỐI QUANT ỦY BAN KIỂM SOÁT ĐỊNH LƯỢNG (CRB v1.1 — deterministic: EWMA/VaR/CVaR/Monte Carlo/HHI/CUSUM):",
+            ...riskQuant.promptLines,
+            riskQuant.proxyMode
+              ? "- LƯU Ý: danh mục chưa đủ dữ liệu — số đo trên rổ proxy top-10 thanh khoản (proxyMode, không phải NAV thật)."
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : null;
+    prompts["risk-manager"] = {
+      system: ROLE_PROMPTS["risk-manager"].system,
+      user: [marketBlock, flowsBlock, ...(quantPromptBlock ? [quantPromptBlock] : [])].join("\n\n"),
+    };
+
     // ══ ĐỢT C · Ủy ban Kiểm soát (VETO) — risk LLM + 2 service ═════
     const controlResults = await Promise.all([
       (async () => {
@@ -576,7 +666,7 @@ export async function POST() {
           ).catch(() => undefined);
         }
       })(),
-      ...WAVE_C_SERVICE_CODES.map((code) => runOneServiceAgent(code)),
+      ...WAVE_C_SERVICE_CODES.map((code) => runOneServiceAgent(code, { riskQuant })),
     ]);
 
     // ══ AUD-CODE #6: ENFORCE VETO — Ủy ban Kiểm soát có quyền phủ quyết THẠT ══
@@ -603,27 +693,28 @@ export async function POST() {
 
     // ══ ĐỢT D · BỘ TỔNG HỢP BAYES (phiên #34 — 0 LLM, deterministic ~1-2s) ══
     // Sau Ủy ban Kiểm soát, TRƯỚC Chủ tịch: tổng hợp mọi bằng chứng định lượng
-    // (breadth/lexicon/flows/Holt/regime + assessment JSON của 5 agent LLM) theo
-    // log-odds 3 bậc nhân quả → posterior + drivers + narrative → lưu bảng
-    // MarketAssessment. Lỗi tổng hợp KHÔNG được làm hỏng chu kỳ (spec #34):
-    // log + assessment = null, Chủ tịch vẫn đọc digest text như cũ.
+    // (breadth/lexicon/flows/Holt/regime + assessment JSON của 5 agent LLM +
+    // bằng chứng quant CRB) theo log-odds 3 bậc nhân quả → posterior + drivers
+    // + narrative → lưu bảng MarketAssessment. Lỗi tổng hợp KHÔNG được làm hỏng
+    // chu kỳ (spec #34): log + assessment = null, Chủ tịch vẫn đọc digest như cũ.
     let assessmentSummary: CycleAssessmentSummary | null = null;
     let bayesView: MarketAssessmentView | null = null;
+    // Phiếu LLM 5 cử tri — dùng cho Bayes (llm-vote) + Kelly CRB-9 (hướng đồng thuận)
+    const llmVotes: LlmVoteInput[] = [...WAVE_B_LLM_CODES, ...WAVE_C_LLM_CODES].flatMap(
+      (code) => {
+        const an = analyses.get(code);
+        if (!an?.assessment) return [];
+        return [
+          {
+            code,
+            direction: an.assessment.direction,
+            confidence: an.assessment.confidence,
+            evidence: an.assessment.evidence,
+          },
+        ];
+      }
+    );
     try {
-      const llmVotes: LlmVoteInput[] = [...WAVE_B_LLM_CODES, ...WAVE_C_LLM_CODES].flatMap(
-        (code) => {
-          const an = analyses.get(code);
-          if (!an?.assessment) return [];
-          return [
-            {
-              code,
-              direction: an.assessment.direction,
-              confidence: an.assessment.confidence,
-              evidence: an.assessment.evidence,
-            },
-          ];
-        }
-      );
       const bundle = await buildEvidenceBundle({
         llmVotes,
         veto: vetoBlocked
@@ -634,7 +725,14 @@ export async function POST() {
                 : "Exposure A7 VETO — danh mục vượt hạn mức phơi nhiễm",
             }
           : { blocked: false, reason: null },
+        // Phiên #51 — CRB §0.6/T7.5: bằng chứng quant vào Bayes ĐÚNG MỘT LẦN
+        // (source quant-tail:/quant-drift: — không thêm cử tri thứ 7 cổng 80%)
+        quantEvidence: riskQuant?.ok ? riskQuant.evidence : undefined,
       });
+      // CRB §7: khối quant vào detail.riskQuant của assessment (UI Tổng hợp)
+      if (riskQuant?.ok) {
+        bundle.riskQuant = toRiskQuantView(riskQuant);
+      }
       const draft = synthesizeMarketAssessment(bundle);
       bayesView = await saveMarketAssessment(bundle, draft, { source: "cycle" });
       // B9 — shadow log "đã-sẽ-chặn" + auto-enable enforcement sau ≥10 chu kỳ
@@ -698,6 +796,8 @@ export async function POST() {
       `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`,
       // Phiên #34 — khối Bayes: con số định lượng, Chủ tịch PHẢI nhất quán
       ...(bayesView ? ["", buildBayesPromptBlock(bayesView)] : []),
+      // Phiên #51 — CRB v1.1 §6: khối QUANT + gợi ý Kelly ¼ (chỉ tham mưu)
+      ...(riskQuant?.ok ? ["", buildQuantChairmanBlock(riskQuant)] : []),
       "",
       `BÁO CÁO TỪ ${digestLines.length} AGENTS CỦA HỘI ĐỒNG (để tổng hợp):`,
       ...digestLines,
@@ -709,6 +809,8 @@ export async function POST() {
     const strategistStart = Date.now();
     let strategist: StrategistResult | null = null;
     let strategistRunId = "";
+    // CRB-9 — kellyHint của chu kỳ (null = bỏ/skip — tham mưu)
+    let kellyHintF: number | null = null;
     try {
       const { raw, tokensIn, tokensOut } = await callLlmWithRetry(
         ROLE_PROMPTS[CHAIRMAN_CODE].system,
@@ -769,6 +871,62 @@ export async function POST() {
       }
 
       strategist = { summary, recommendation, confidence, signal };
+
+      // ══ Phiên #51 — CRB-9 · ¼-KELLY (TUYỆT ĐỐI THAM MƯU) ══════════════
+      // Tính gợi ý tỷ trọng cho tín hiệu MUA/BÁN từ bandit posterior cử tri
+      // ĐỒNG HƯỚNG + hệ số thưởng:rủi (target/stop vs giá hiện tại), chặn hạn
+      // mức ĐỘNG — chỉ nhúng vào rationale + UI, KHÔNG tự đặt khối lượng.
+      try {
+        const sig = strategist.signal;
+        if (
+          riskQuant?.ok &&
+          sig &&
+          (sig.direction === "BUY" || sig.direction === "SELL")
+        ) {
+          const entryInstrumentId = market.instrumentIdBySymbol.get(sig.symbol);
+          const entryRow = entryInstrumentId
+            ? await db.instrument
+                .findFirst({
+                  where: { id: entryInstrumentId },
+                  select: { quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true } } },
+                })
+                .catch(() => null)
+            : null;
+          const entry = entryRow?.quotes[0]?.last ?? 0;
+          if (entry > 0) {
+            const kellyVotes: CouncilVote[] = [
+              ...llmVotes.map((v) => ({ code: v.code, direction: v.direction })),
+              ...(mlForecastDirection
+                ? [{ code: "ml-forecast", direction: mlForecastDirection }]
+                : []),
+            ];
+            const kellyP = alignedCouncilP(
+              riskQuant.arms,
+              kellyVotes,
+              sig.direction === "BUY" ? "UP" : "DOWN"
+            );
+            const hint = fractionalKelly({
+              direction: sig.direction,
+              entry,
+              targetPrice: sig.targetPrice,
+              stopLoss: sig.stopLoss,
+              p: kellyP,
+              dynMaxPositionPct: riskQuant.dynMaxPositionPct,
+            });
+            if (!hint.skipped && hint.f > 0) {
+              kellyHintF = hint.f;
+              sig.rationale = `${sig.rationale} [${hint.note}]`;
+            }
+          }
+        }
+      } catch (kellyErr) {
+        console.error("[risk-quant] Kelly CRB-9 lỗi (tham mưu — bỏ qua):", kellyErr);
+      }
+      // Gắn kellyHint vào snapshot + assessment detail (CRB-9 — tham mưu)
+      if (riskQuant?.ok) {
+        await attachKellyHint(riskQuant.snapshotId, kellyHintF);
+        await attachRiskQuantKelly(bayesView?.id, kellyHintF);
+      }
 
       const run = await persistRun(
         strategistAgent.id,

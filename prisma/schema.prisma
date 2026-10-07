@@ -670,3 +670,35 @@ model BanditEvent {
   @@unique([assessmentId, agentCode])
   @@index([settledAt, castAt])
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 13. RISK QUANT ENGINE (phiên #51 — CONTROL_RISK_QUANT_BLUEPRINT v1.1 §7)
+//    Snapshot 1 dòng/chu kỳ của Ủy ban Kiểm soát Định lượng — nguồn chuỗi
+//    NAV cho CRB-6/8 PHA 2 + truy hồi lịch sử. detail = JSON string
+//    (chuẩn codebase: MarketAssessment.detail cũng là String).
+model RiskQuantSnapshot {
+  id               String   @id @default(cuid())
+  createdAt        DateTime @default(now())
+  nav              BigInt   @default(0) // VND — equity danh mục lúc chụp
+  proxyMode        Boolean  @default(false) // true = rổ top-10 thay danh mục thật (§0.4)
+  volEwmaAnnPct    Float    @default(0) // σ EWMA20 năm hoá (%)
+  volRatio         Float    @default(1) // σ_now / σ_ref (1 = bình thường)
+  dynMaxPositionPct Float  @default(25) // hạn mức vị thế động (% NAV — CRB-1×CRB-7)
+  dynMaxSectorPct  Float   @default(40) // hạn mức ngành động (% NAV)
+  var95Pct         Float    @default(0) // HS-VaR95 5 phiên (% NAV)
+  cvar95Pct        Float    @default(0) // HS-CVaR95 5 phiên (% NAV)
+  var95Vnd         BigInt   @default(0) // HS-VaR95 5 phiên (VND)
+  mcLoss5Pct       Float    @default(0) // MC bootstrap: lỗ percentile 5% 5 bước (% NAV)
+  mcPDd            Float    @default(0) // MC: P(chạm DD 15%)
+  hhiSector        Float    @default(0) // CRB-4 — HHI ngành
+  hhiPosition      Float    @default(0) // CRB-4 — HHI vị thế
+  effSectors       Float    @default(0) // 1/HHI_sector — số ngành hiệu quả
+  effBets          Float    @default(0) // CRB-5 — N_eff_bets
+  avgCorr          Float    @default(0) // CRB-5 — tương quan TB các cặp vị thế
+  cusumS           Float    @default(0) // CRB-8 — CUSUM downside hiện tại
+  pBreach5d        Float? // CRB-6 — P(vi phạm 5 phiên) khi AUC ≥ 0,55, ngược lại null
+  kellyHint        Float? // CRB-9 — ¼-Kelly gợi ý (% NAV / 100) cho tín hiệu chu kỳ
+  detail           String   @default("{}") // JSON: limits, alerts, model metrics, breach flags…
+
+  @@index([createdAt(sort: Desc)])
+}

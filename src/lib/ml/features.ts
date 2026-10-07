@@ -79,8 +79,13 @@ export interface SymbolSeries {
  * B5 (§3.4 MARKET_EXPANSION): khoá rổ ML về HOSE-STOCK — MLP/Q-learning
  * tiếp tục train trên chuỗi lịch sử sâu nhất; universe đa sàn KHÔNG làm
  * lệch thành phần rổ (train/serving phải cùng định nghĩa rổ).
+ * Phiên #51 — CRB: options.sinceDays cắt cửa sổ bar theo ngày (risk engine
+ * chỉ cần ~500 phiên cho CRB-6/8 — thay vì nạp full-history 30k dòng).
  */
-export async function loadTopSeries(topN: number): Promise<SymbolSeries[]> {
+export async function loadTopSeries(
+  topN: number,
+  options: { sinceDays?: number } = {}
+): Promise<SymbolSeries[]> {
   const instruments = await db.instrument.findMany({
     where: { isActive: true, market: "HOSE", type: "STOCK" },
     select: {
@@ -103,8 +108,16 @@ export async function loadTopSeries(topN: number): Promise<SymbolSeries[]> {
     .slice(0, topN);
   if (ranked.length === 0) return [];
 
+  // Phiên #51 — CRB: cutoff ngày tùy chọn (mặc định giữ nguyên toàn lịch sử)
+  const since =
+    options.sinceDays != null && options.sinceDays > 0
+      ? new Date(Date.now() - options.sinceDays * 86_400_000)
+      : null;
   const bars = await db.bar.findMany({
-    where: { instrumentId: { in: ranked.map((r) => r.id) } },
+    where: {
+      instrumentId: { in: ranked.map((r) => r.id) },
+      ...(since ? { date: { gte: since } } : {}),
+    },
     orderBy: { date: "asc" },
     select: { instrumentId: true, date: true, close: true, volume: true },
   });

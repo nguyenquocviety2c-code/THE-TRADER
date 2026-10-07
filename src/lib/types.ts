@@ -552,6 +552,8 @@ export interface UpdateSettingsPayload {
     accountNumber?: string;
   };
   marketData?: { mode?: MarketDataMode };
+  /** Phiên #51 — CRB-7: reset Beta limit-learning về prior Beta(1,99) (ghi AuditLog). */
+  riskQuantReset?: boolean;
 }
 
 /** POST /api/settings/test — kiểm tra kết nối VNDIRECT (dùng creds vừa nhập hoặc đã lưu). */
@@ -685,6 +687,38 @@ export interface ConsensusSnapshot {
   note: string;
 }
 
+/**
+ * Phiên #51 — CRB (CONTROL_RISK_QUANT_BLUEPRINT v1.1 §7): khối QUANT của
+ * Ủy ban Kiểm soát Định lượng nhúng trong MarketAssessment.detail.riskQuant
+ * (additive — row cũ không có → undefined, UI xử lý null).
+ */
+export interface RiskQuantView {
+  proxyMode: boolean;
+  volEwmaAnnPct: number;
+  volRatio: number;
+  mult: number;
+  dynMaxPositionPct: number;
+  dynMaxSectorPct: number;
+  staticMaxPositionPct: number;
+  staticMaxSectorPct: number;
+  var95Pct: number;
+  cvar95Pct: number;
+  var95Vnd: number;
+  mcPDd: number;
+  mcLoss5Pct: number;
+  hhiSector: number;
+  hhiPosition: number;
+  effSectors: number;
+  effBets: number;
+  avgCorr: number;
+  cusumS: number;
+  cusumAlarm: boolean;
+  pBreach5d: number | null;
+  kellyHint: number | null;
+  alerts: { severity: string; code: string; message: string }[];
+  notes: string[];
+}
+
 /** Bộ tổng hợp Bayes — khung nhìn đầy đủ cho UI module Tổng hợp. */
 export interface MarketAssessmentView {
   id: string;
@@ -737,6 +771,8 @@ export interface MarketAssessmentView {
   segments?: SegmentAssessment[];
   /** B9 — cổng đồng thuận 6 cử tri tại assessment này; null/undefined ở row cũ. */
   consensus?: ConsensusSnapshot | null;
+  /** Phiên #51 — CRB: khối quant Ủy ban Kiểm soát Định lượng; null/undefined ở row cũ. */
+  riskQuant?: RiskQuantView | null;
 }
 
 /** GET /api/assessment — bản mới nhất + lịch sử (30 bản gần nhất). */

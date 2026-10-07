@@ -6,7 +6,7 @@
  * đó. File này chỉ định nghĩa bằng chứng / đầu vào của engine.
  */
 
-import type { MarketAssessmentView } from "@/lib/types";
+import type { MarketAssessmentView, RiskQuantView } from "@/lib/types";
 
 /** Hướng quan điểm mà một bằng chứng ủng hộ. */
 export type EvidenceDirection = "UP" | "DOWN" | "FLAT";
@@ -148,6 +148,8 @@ export interface SynthesisInput {
   segments?: SegmentInput[];
   /** B9 — AppSetting consensus.enforce (false = shadow-mode: cổng tính nhưng KHÔNG chặn). */
   consensusEnforce?: boolean;
+  /** Phiên #51 — CRB: khối quant Ủy ban Kiểm soát Định lượng (lưu detail.riskQuant). */
+  riskQuant?: RiskQuantView | null;
   /** Số liệu nền cho khối hiển thị (market/sectors/symbols). */
   context: SynthesisContext;
 }

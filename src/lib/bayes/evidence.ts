@@ -69,6 +69,10 @@ export interface BuildEvidenceOptions {
   llmVotes?: LlmVoteInput[];
   /** Trạng thái VETO từ Ủy ban Kiểm soát của chu kỳ. */
   veto?: BayesVeto;
+  /** Phiên #51 — CRB: bằng chứng quant của Ủy ban Kiểm soát Định lượng
+   *  (source "quant-tail:*"/"quant-drift:*") — vào Bayes đúng MỘT lần với
+   *  source riêng (T7.5 §0.6 — KHÔNG thêm cử tri thứ 7 cho cổng đồng thuận). */
+  quantEvidence?: BayesEvidence[];
 }
 
 /** Số phiên lấy cho mỗi mã (base-rate 250 + biên an toàn). */
@@ -94,6 +98,12 @@ export async function buildEvidenceBundle(
   const veto: BayesVeto = options.veto ?? { blocked: false, reason: null };
   const marketEvidence: BayesEvidence[] = [];
   const symbolEvidence: SymbolEvidence[] = [];
+  // Phiên #51 — CRB: bằng chứng quant vào segment chính VN-HOSE-STOCK (một
+  // lần, source riêng — T7.5). Lọc chặt nguồn bắt đầu "quant-" để chống đếm
+  // kép nếu caller truyền trùng.
+  const quantEvidence = (options.quantEvidence ?? []).filter(
+    (e) => typeof e.source === "string" && e.source.startsWith("quant-")
+  );
 
   /* ── 1. Rổ 5 segment VN — load MỘT LẦN, phân đoạn in-memory (B5) ────── */
   const baskets = await loadSegmentBaskets(BARS_PER_SYMBOL);
@@ -205,6 +215,12 @@ export async function buildEvidenceBundle(
       note: `Chế độ ${regime.label} (SMA20 ${regime.sma20 != null ? Math.round(regime.sma20 * 100) / 100 : "—"} vs SMA50 ${regime.sma50 != null ? Math.round(regime.sma50 * 100) / 100 : "—"} của rổ HOSE)`,
     });
   }
+
+  /* ── 3e. (phiên #51 — CRB) Bằng chứng quant Ủy ban Kiểm soát Định lượng ──
+   * HS-CVaR/HHI/P(vi phạm)/CUSUM — vào segment chính MỘT LẦN với source
+   * "quant-tail:*"/"quant-drift:*" riêng (T7.5 §0.6 — không trùng phiếu
+   * llm-vote của 6 cử tri, không thêm cử tri thứ 7 cho cổng 80%). */
+  marketEvidence.push(...quantEvidence);
 
   /* ── 4. Phiếu LLM (chu kỳ ưu tiên, fallback DB 24h) → evidence + votes ── */
   const votes = await resolveLlmVotes(options.llmVotes);

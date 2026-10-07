@@ -27,6 +27,7 @@ import {
   pendingSettleCount,
   settlePendingRewards,
 } from "@/lib/ml/bandit";
+import type { RiskQuantResult } from "@/lib/risk/engine";
 
 export interface ServiceRunResult {
   content: string;
@@ -370,14 +371,25 @@ async function runMlForecast(): Promise<ServiceRunResult> {
 
 /* ─────────────────────── Nhóm 2 · control (service) ─────────────────────── */
 
-/** A7 Exposure — VETO phơi nhiễm ngành & vị thế đơn. */
-async function runExposure(): Promise<ServiceRunResult> {
+/** Ngữ cảnh chu kỳ truyền vào service agents (phiên #51 — CRB). */
+export interface ServiceRunContext {
+  /** Kết quả RiskQuantEngine của chu kỳ — exposure A7 đọc hạn mức ĐỘNG. */
+  riskQuant?: RiskQuantResult | null;
+}
+
+/** A7 Exposure — VETO phơi nhiễm ngành & vị thế đơn (phiên #51 — CRB: ngưỡng ĐỘNG). */
+async function runExposure(ctx?: ServiceRunContext): Promise<ServiceRunResult> {
   // AUD-CODE #15: hạn mức đọc từ roster config — MỘT nguồn duy nhất (không mirror tay)
   const exposureCfg = ROSTER_BY_CODE.get("exposure")?.config as
     | { maxSectorWeightPct?: number; maxPositionPct?: number }
     | undefined;
-  const MAX_SECTOR = exposureCfg?.maxSectorWeightPct ?? 40; // % NAV
-  const MAX_POSITION = exposureCfg?.maxPositionPct ?? 25; // % NAV
+  const MAX_SECTOR = exposureCfg?.maxSectorWeightPct ?? 40; // % NAV (tĩnh)
+  const MAX_POSITION = exposureCfg?.maxPositionPct ?? 25; // % NAV (tĩnh)
+  // CRB v1.1 §3: engine ok → ngưỡng VETO dùng hạn mức ĐỘNG (CRB-1 hai chiều
+  // hợp nhất CRB-7 min); engine lỗi/thiếu → fallback tĩnh (fail-safe VETO-cứng)
+  const rq = ctx?.riskQuant?.ok ? ctx.riskQuant : null;
+  const dynSector = rq ? rq.dynMaxSectorPct : MAX_SECTOR;
+  const dynPosition = rq ? rq.dynMaxPositionPct : MAX_POSITION;
   const snap = await portfolioSnapshot();
   const topSector = snap.sectorWeights[0];
   const topPosition = [...snap.positions].sort((a, b) => b.mv - a.mv)[0];
@@ -385,19 +397,44 @@ async function runExposure(): Promise<ServiceRunResult> {
     topPosition && snap.equity > 0 ? (topPosition.mv / snap.equity) * 100 : 0;
 
   const breaches: string[] = [];
-  if (topSector && topSector.pct > MAX_SECTOR) {
-    breaches.push(`ngành ${topSector.sector} ${topSector.pct.toFixed(1)}% > ${MAX_SECTOR}%`);
+  if (topSector && topSector.pct > dynSector) {
+    breaches.push(`ngành ${topSector.sector} ${topSector.pct.toFixed(1)}% > ${dynSector.toFixed(1)}%`);
   }
-  if (topPosition && positionPct > MAX_POSITION) {
-    breaches.push(`vị thế ${topPosition.symbol} ${positionPct.toFixed(1)}% > ${MAX_POSITION}%`);
+  if (topPosition && positionPct > dynPosition) {
+    breaches.push(`vị thế ${topPosition.symbol} ${positionPct.toFixed(1)}% > ${dynPosition.toFixed(1)}%`);
   }
   const verdict = breaches.length ? "VETO tín hiệu tăng phơi nhiễm" : "ĐẠT";
+  // Hệ số hợp nhất thực tế (CRB-1 volMult × CRB-7 learning, kẹp [0,6 · 1,15])
+  const mergedFactor = MAX_POSITION > 0 ? dynPosition / MAX_POSITION : 1;
+  const dynNote = rq
+    ? ` Hạn mức động CRB: ${dynPosition.toFixed(1).replace(".", ",")}%/vị thế · ${dynSector.toFixed(1).replace(".", ",")}%/ngành (tĩnh ${MAX_POSITION}/${MAX_SECTOR}% × hệ số ${mergedFactor.toFixed(2).replace(".", ",")}${mergedFactor > 1 + 1e-9 ? " — nới theo biến động thấp, đã phát INFO alert" : ""}).`
+    : "";
 
   return {
-    content: `Kiểm tra phơi nhiễm (NAV ${vnd(snap.equity)} ₫): ngành lớn nhất ${topSector ? `${topSector.sector} ${topSector.pct.toFixed(1)}%` : "—"} (hạn ${MAX_SECTOR}%) · vị thế lớn nhất ${topPosition ? `${topPosition.symbol} ${positionPct.toFixed(1)}%` : "—"} (hạn ${MAX_POSITION}%) → ${verdict}.${breaches.length ? " Danh mục đã vượt hạn mức — ưu tiên SELL cắt tỷ trọng." : ""}`,
-    reasoning: "Tính tỷ trọng ngành/vị thế từ Position × giá hiện tại / equity F-102.",
+    content: `Kiểm tra phơi nhiễm (NAV ${vnd(snap.equity)} ₫): ngành lớn nhất ${topSector ? `${topSector.sector} ${topSector.pct.toFixed(1)}%` : "—"} (hạn ${dynSector.toFixed(1).replace(".", ",")}%) · vị thế lớn nhất ${topPosition ? `${topPosition.symbol} ${positionPct.toFixed(1)}%` : "—"} (hạn ${dynPosition.toFixed(1).replace(".", ",")}%) → ${verdict}.${dynNote}${breaches.length ? " Danh mục đã vượt hạn mức — ưu tiên SELL cắt tỷ trọng." : ""}`,
+    reasoning: rq
+      ? "Tỷ trọng ngành/vị thế từ Position × giá / equity F-102; ngưỡng = hạn mức ĐỘNG CRB-1×CRB-7 — VETO giữ nguyên ngữ nghĩa, chỉ ngưỡng thay đổi."
+      : "Tính tỷ trọng ngành/vị thế từ Position × giá hiện tại / equity F-102.",
     sentiment: breaches.length ? "bearish" : "neutral",
-    output: { verdict, breaches, topSector, topPositionPct: Number(positionPct.toFixed(2)) },
+    output: {
+      verdict,
+      breaches,
+      topSector,
+      topPositionPct: Number(positionPct.toFixed(2)),
+      dynamic: rq
+        ? {
+            enabled: true,
+            staticSectorPct: MAX_SECTOR,
+            staticPositionPct: MAX_POSITION,
+            dynSectorPct: Number(dynSector.toFixed(2)),
+            dynPositionPct: Number(dynPosition.toFixed(2)),
+            volMult: Number(rq.vol.mult.toFixed(3)),
+            mergedMult: Number(mergedFactor.toFixed(3)),
+            volRatio: Number(rq.vol.volRatio.toFixed(3)),
+            proxyMode: rq.proxyMode,
+          }
+        : { enabled: false },
+    },
   };
 }
 
@@ -820,7 +857,7 @@ async function runModelRegistry(): Promise<ServiceRunResult> {
 
 /* ───────────────────────────── Cổng gọi chung ───────────────────────────── */
 
-const SERVICE_RUNNERS: Record<string, () => Promise<ServiceRunResult>> = {
+const SERVICE_RUNNERS: Record<string, (ctx?: ServiceRunContext) => Promise<ServiceRunResult>> = {
   "data-collector": runDataCollector,
   "notification-officer": runNotificationOfficer,
   "feature-store": runFeatureStore,
@@ -841,12 +878,16 @@ const SERVICE_RUNNERS: Record<string, () => Promise<ServiceRunResult>> = {
 
 /**
  * Chạy một service agent (deterministic). Ném lỗi nếu code không phải
- * service agent — caller xử lý persist FAILED như LLM agents.
+ * service agent — caller xử lý persist FAILED như LLM agents. ctx (phiên
+ * #51 — CRB) truyền kết quả RiskQuantEngine cho các agent cần (exposure A7).
  */
-export function runServiceAgent(code: string): Promise<ServiceRunResult> {
+export function runServiceAgent(
+  code: string,
+  ctx?: ServiceRunContext
+): Promise<ServiceRunResult> {
   const runner = SERVICE_RUNNERS[code];
   if (!runner) {
     throw new Error(`"${code}" không phải service agent (kiểm tra agent-roster.ts kind).`);
   }
-  return runner();
+  return runner(ctx);
 }

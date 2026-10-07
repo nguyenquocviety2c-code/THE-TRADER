@@ -1,11 +1,12 @@
 # CONTROL BLUEPRINT — ỦY BAN KIỂM SOÁT ĐỊNH LƯỢNG (QUANT RISK ENGINE)
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/CONTROL_RISK_QUANT_BLUEPRINT.md` · **Version:** 1.1 (chốt 5 câu hỏi §9 + review toàn văn vá 7 lỗi) · **Updated:** 2026-10-07
-> **Status:** **ĐÃ CHỐT THIẾT KẾ — CHỜ LỆNH TRIỂN KHAI** theo 2 đợt G1 → G2 (user #50: chưa triển khai vội, chỉ xác nhận thiết kế)
-> **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (B7 ensemble · B8 scorecard · B9 cổng đồng thuận) · [ML_LEARNING_BLUEPRINT.md](./ML_LEARNING_BLUEPRINT.md) (kế hoạch tương lai Phòng Học máy) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md)
+> **Document:** `docs/CONTROL_RISK_QUANT_BLUEPRINT.md` · **Version:** 1.1.1 (triển khai G1+G2 phiên #51 + erratum hợp nhất CRB-1×CRB-7) · **Updated:** 2026-10-08
+> **Status:** **ĐÃ TRIỂN KHAI G1 + G2 (phiên #51)** — 9 bước CRB-0→9 chạy thật trong chu kỳ 23 agents; kiểm định E2E 2 chu kỳ PASS (engine ~1,0-1,2s ≤ ngân sách 1,5s · hạn mức động 2 chiều hoạt động · bằng chứng quant vào Bayes đúng 1 lần T7.5)
+> **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (B7 ensemble · B8 scorecard · B9 cổng đồng thuận) · [ML_LEARNING_BLUEPRINT.md](./ML_LEARNING_BLUEPRINT.md) (kế hoạch tương lai Phòng Học máy — ĐÃ ĐƯỢC DUYỆT phiên #51, chờ cổng dữ liệu) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md)
+> **Changelog v1.1.1 (phiên #51 — triển khai):** (1) **ERRATUM công thức hợp nhất CRB-7**: `min(volMult, mult_ℓ)` → `clamp(volMult × mult_ℓ, 0,6, 1,15)` — min() với mult_ℓ = 1 trung tính (chưa có lịch sử vi phạm) chặn VĨNH VIỄN việc nới, mâu thuẫn quyết định Q2; tích thỏa cả 3 ràng buộc (nới chỉ từ volMult · mult_ℓ một chiều siết · dải cứng §0.3); phát hiện bằng chạy thật chu kỳ đầu (mult 1.15 nhưng dyn vẫn 25/40). (2) Hiệu năng: bar vị thế cắt cửa sổ 420 ngày · rổ proxy sinceDays 800 · banditArm đọc trực tiếp 1 query (bỏ ensureArms 6 upsert) → engine 3.471ms → **1.061-1.249ms**. (3) Alert dedupe 24h nâng cấp: điều kiện kéo dài → CẬP NHẬT thông điệp dòng cũ bằng số liệu mới (không spam, số liệu không lỗi thời). (4) Nghiệm thu CRB-6 PHA 1 thực tế: AUC 51,4% < 0,55 → KHÔNG serving (trung thực đúng thiết kế).
 > **Changelog v1.1 (phiên #50):** Chốt §9 — Q1 HS-VaR · Q2 **CHO PHÉP NỚI** hạn mức khi thị trường yên bình (mult ∈ [0,6 · 1,15], trần +15% cứng) → sửa §0.3 + CRB-1 + nghiệm thu · Q3/Q4 theo đề xuất · Q5 triển khai 2 đợt. Review toàn văn vá 7 lỗi: (a) tham chiếu treo CRB-11/CRB-12 → CRB-0/UI-G1; (b) sai vị trí dấu căn giới hạn EWMA chart CRB-8 (phải NHÂN √(μ/(2−μ))) + tách ký hiệu μ (chart) khỏi λ (RiskMetrics); (c) ngữ nghĩa P(chạm DD) trong MC CRB-3 → tỉ lệ path; (d) mâu thuẫn vị trí file CRB-6 (ml/ → risk/forecast.ts); (e) ký tự lạ lọt vào nghiệm thu CRB-6; (f) lỗi đánh máy CRB-7; (g) diễn đạt gap §1.2.
-> **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #49–#50)
+> **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #49–#51)
 
 ---
 
@@ -204,7 +205,11 @@ Mỗi loại giới hạn ℓ ∈ {sector, position, dd, dailyLoss}:
   posteriorMean = (α+1)/(α+β+2)
   tightening mult_ℓ = 1 − 0,5 × max(0, posteriorMean − 0,05)   (floor 0,75)
   → dynLimit_ℓ = static_ℓ × mult_ℓ — hợp nhất với CRB-1 bằng
-    min(volMult, mult_ℓ): mult_ℓ ≤ 1 MỘT CHIỀU (chỉ siết), NỚI chỉ đến từ volMult
+    clamp(volMult × mult_ℓ, 0,6, 1,15) [ERRATUM v1.1.1 — phiên #51]:
+    KHÔNG dùng min(volMult, mult_ℓ) như bản v1.1 — min() với mult_ℓ = 1
+    trung tính chặn vĩnh viễn việc nới (mâu thuẫn Q2). Tích: nới chỉ khi
+    volMult > 1 VÀ mult_ℓ = 1 (learning không phản đối) — vẫn đúng nghĩa
+    "mult_ℓ ≤ 1 MỘT CHIỀU (chỉ siết), NỚI chỉ đến từ volMult".
 ```
 Lưu `AppSetting` key `risk-quant-limits` (JSON {alpha, beta per limit}) — cache in-process 60s như `consensus.ts`. Giới hạn chỉ SIẾT dần theo dữ liệu thật, floor 0,75× tĩnh, và **reset nút bấm thủ công** (AppSetting ghi đè) — mọi thay đổi ghi AuditLog.
 
@@ -276,14 +281,14 @@ CLT **không phải module cài thêm** — nó đã là nền của 3 chỗ tro
 | 2 | Hạn mức động có được phép NỚI khi thị trường YÊN BÌNH? | **Được phép** | §0.3 + CRB-1 sửa v1.1: mult ∈ [0,6 · **1,15**], trần +15% cứng, INFO alert mỗi lần nới, nghiệm thu thêm 3b |
 | 3 | CRB-6 PHA 1 train nhãn trên proxy rổ top-10 — chấp nhận? | **Theo đề xuất** | §5 CRB-6: PHA 1 nhãn proxy rổ → PHA 2 retrain nhãn vi phạm thật khi đủ 250 snapshot NAV |
 | 4 | ¼-Kelly xuất hiện ở đâu? | **Theo đề xuất** | §6 CRB-9: chỉ trong rationale tín hiệu + UI — tuyệt đối tham mưu, không tự đặt khối lượng |
-| 5 | Triển khai 2 đợt hay một lần cả 4 gói? | **2 đợt** | §10: G1 (CRB-1→5) trước → G2 (CRB-6→9) sau; user #50 chỉ thị "chưa triển khai vội" — chờ lệnh khởi động G1 |
+| 5 | Triển khai 2 đợt hay một lần cả 4 gói? | **2 đợt** | §10: G1 (CRB-1→5) trước → G2 (CRB-6→9) sau; user #50 chỉ thị "chưa triển khai vội" — phiên #51 user ra lệnh khởi động → **G1 + G2 ĐÃ TRIỂN KHAI TOÀN BỘ cùng phiên #51** (2 đợt được triển khai liên tiếp sau khi G1 nghiệm thu trong chu kỳ đầu) |
 
 ## §10. Ngân sách hiệu năng & lộ trình
 
-| Giai đoạn | Nội dung | Thêm vào chu kỳ | Giá ước tính |
-|---|---|---|---|
-| G1 (chốt #50 Q5) | CRB-1→5 (EWMA · VaR/CVaR · MC · HHI · corr) + schema + UI tổng hợp | ≤ 1,0s deterministic | ~400 dòng TS thuần |
-| G2 (sau G1 nghiệm thu) | CRB-6→9 (logistic · Beta-learning · CUSUM · Kelly) + Bayes evidence | +0,3s (1 forward logistic) | ~350 dòng |
-| Tổng | 9 bước · 6 file mới `src/lib/risk/` · 1 model mới · 0 dependency · 0 route mới | **≤ 1,5s** | ≤ 800 dòng |
+| Giai đoạn | Nội dung | Thêm vào chu kỳ | Giá ước tính | Trạng thái |
+|---|---|---|---|---|
+| G1 (chốt #50 Q5) | CRB-1→5 (EWMA · VaR/CVaR · MC · HHI · corr) + schema + UI tổng hợp | ≤ 1,0s deterministic | ~400 dòng TS thuần | **ĐÃ TRIỂN KHAI #51** |
+| G2 (sau G1 nghiệm thu) | CRB-6→9 (logistic · Beta-learning · CUSUM · Kelly) + Bayes evidence | +0,3s (1 forward logistic) | ~350 dòng | **ĐÃ TRIỂN KHAI #51** |
+| Tổng | 9 bước · 6 file mới `src/lib/risk/` · 1 model mới · 0 dependency · 0 route mới | **≤ 1,5s** | ≤ 800 dòng | **ĐO THẬT: 1.061–1.249ms/chu kỳ** |
 
-Ràng buộc cứng: chu kỳ tổng sau khi gộp ≤ 185s (ngân sách MEB 180s + 5s dự phòng) — nếu vượt, MC cắt N_PATHS 5.000 → 2.000 (ước lượng ảnh hưởng ±0,3% percentile, đo lại khi cắt).
+Ràng buộc cứng: chu kỳ tổng sau khi gộp ≤ 185s (ngân sách MEB 180s + 5s dự phòng) — nếu vượt, MC cắt N_PATHS 5.000 → 2.000 (ước lượng ảnh hưởng ±0,3% percentile, đo lại khi cắt). **Đo thật phiên #51: chu kỳ 44–50s (gồm engine ~1,1s) — dư địa lớn.**
