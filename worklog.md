@@ -1204,3 +1204,18 @@ Stage Summary:
 - Vá bug #42 (P0 vận hành): regex parseWeekly sai format mặc định "SUN:04:00" → REPROBE_SCHEDULE null → TypeError giết event loop engine ~2h. 3 lớp vá: regex đúng + fail-safe hằng + try/catch scheduler. Weekly re-probe Chủ nhật 04:00 ICT (B14) giờ thực sự chạy được
 - Bài học mới xác nhận lại: (1) assertion "!" trên hàm parse fallback cũng phải được test bằng input mặc định thật — fallback sai thì null! vẫn null; (2) uncaught exception trong timer callback của Bun làm chết event loop mà tiến trình vẫn "sống" (ps thấy nhưng không làm gì) — luôn try/catch callback scheduler; (3) restart mini-service PHẢI dùng double-fork subshell pattern (worklog 593) — "setsid nohup &" trần trụi bị reaper giết
 - Engine hiện hoạt động đầy đủ: tick 10s · news 15 phút · eod-sync 15:45 ICT · intl-sync 06:15 ICT (chờ Yahoo hồi) · reprobe CN 04:00 ICT · hot-reload bun --hot
+
+---
+Task ID: 43-FIXBUG-DOC
+Agent: main-orchestrator (Z.ai Code)
+Task: Tạo Fixbug.md chuẩn hoá "giao thức Fixbug" theo chỉ thị user phiên #43 — khi user yêu cầu "kích hoạt giao thức Fixbug phần X" thì rà soát lỗi phần X, thấy lỗi thì fix, test kiểm định, rà soát lại, lặp đến khi không còn lỗi và vận hành triệt để thì kết thúc vòng lặp + báo cáo.
+
+Work Log:
+- Tạo /home/z/my-project/Fixbug.md (178 dòng, v1.0) với 10 mục: §1 cách kích hoạt (4 mẫu câu + nghĩa) · §2 danh mục 9 scope chuẩn (database/api/market-engine/bayes-ml/sync-data/frontend/agents/docs/full + thứ tự chạy full) · §3 vòng lặp lõi (rà soát toàn scope → findings? → fix P0→P1→P2 → test → vòng mới rà lại TỪ ĐẦU; chỉ dừng khi 1 vòng sạch + Vòng Xác Nhận độc lập) · §4 4 lớp rà soát bắt buộc (tĩnh-code · tĩnh-dữ liệu · động-runtime · động-browser) + phân biệt 3 bẫy môi trường sandbox (reaper · DATABASE_URL stale · Yahoo 429 không phải bug code) · §5 test kiểm định không-dùng-test-suite (spot fix · regression scope · E2E tối thiểu · idempotency — mọi kết quả phải có bằng chứng) · §6 phân loại P0/P1/P2 + nguyên tắc fix gốc-rễ + xử lý finding ngoài scope · §7 điều kiện dừng + Vòng Xác Nhận độc lập đổi góc nhìn · §8 giới hạn an toàn (trần 8 vòng + không tự ý đổi thiết kế blueprint + backup DB + không tự tăng scope) · §9 template báo cáo bắt buộc + quy ước Task ID `<số>-FIXBUG-<scope>` + worklog + commit/push · §10 7 nguyên tắc vàng rút từ sự cố thật (#42 parseWeekly `null!` · timer callback try/catch · log chảy đúng chu kỳ · double-fork subshell · probe phải log lỗi · không bịa dữ liệu · tái hiện điều kiện gây bug)
+- Tự áp dụng quy tắc §10 ngay trong chính file: quét encoding Python phát hiện 1 ký tự CJK lỗi lọt vào dòng browser-test ("click/s恶化 tab") + 1 lỗi thiếu space ("lặng,WS") → vá cả 2 ngay; quét lại toàn file: chỉ còn en-dash/ellipsis hợp lệ — 0 ký tự lạ
+- README.md: thêm dòng link Fixbug.md vào mục "Tài liệu chi tiết" (mô tả ngắn cách kích hoạt + điều kiện kết thúc)
+
+Stage Summary:
+- Giao thức Fixbug hoạt động từ phiên #43: user chỉ cần nói "kích hoạt giao thức Fixbug phần X" — hệ thống tự chạy vòng lặp rà-soát/fix/test/rà-lại đến triệt để rồi báo cáo theo template §9
+- Điểm thiết kế chính: vòng mới LUÔN rà lại toàn scope (chống mù điểm "chỗ mới fix chắc ổn"); kết thúc cần 2 tín hiệu sạch liên tiếp (1 vòng rà soát hoàn chỉnh 0 finding + Vòng Xác Nhận độc lập đổi góc nhìn); trần 8 vòng chống treo vĩnh viễn; mọi kết luận phải có bằng chứng (HTTP/log/screenshot) — cấm báo "sạch" khi chưa sạch
+- Kế thừa bài học sự cố thật #42 + #38 vào §10 để các lần chạy sau không mắc lại
