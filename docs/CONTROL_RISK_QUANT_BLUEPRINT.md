@@ -1,10 +1,11 @@
 # CONTROL BLUEPRINT — ỦY BAN KIỂM SOÁT ĐỊNH LƯỢNG (QUANT RISK ENGINE)
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/CONTROL_RISK_QUANT_BLUEPRINT.md` · **Version:** 1.0 · **Updated:** 2026-10-07
-> **Status:** **CHỜ PHÊ DUYỆT TRIỂN KHAI** — 4 gói Ưu tiên 1–4 (phiên #49), 5 câu hỏi chốt ở §9
-> **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (B7 ensemble · B8 scorecard · B9 cổng đồng thuận) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md)
-> **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #49)
+> **Document:** `docs/CONTROL_RISK_QUANT_BLUEPRINT.md` · **Version:** 1.1 (chốt 5 câu hỏi §9 + review toàn văn vá 7 lỗi) · **Updated:** 2026-10-07
+> **Status:** **ĐÃ CHỐT THIẾT KẾ — CHỜ LỆNH TRIỂN KHAI** theo 2 đợt G1 → G2 (user #50: chưa triển khai vội, chỉ xác nhận thiết kế)
+> **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (B7 ensemble · B8 scorecard · B9 cổng đồng thuận) · [ML_LEARNING_BLUEPRINT.md](./ML_LEARNING_BLUEPRINT.md) (kế hoạch tương lai Phòng Học máy) · [DB_SCHEMA.md](./DB_SCHEMA.md) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md)
+> **Changelog v1.1 (phiên #50):** Chốt §9 — Q1 HS-VaR · Q2 **CHO PHÉP NỚI** hạn mức khi thị trường yên bình (mult ∈ [0,6 · 1,15], trần +15% cứng) → sửa §0.3 + CRB-1 + nghiệm thu · Q3/Q4 theo đề xuất · Q5 triển khai 2 đợt. Review toàn văn vá 7 lỗi: (a) tham chiếu treo CRB-11/CRB-12 → CRB-0/UI-G1; (b) sai vị trí dấu căn giới hạn EWMA chart CRB-8 (phải NHÂN √(μ/(2−μ))) + tách ký hiệu μ (chart) khỏi λ (RiskMetrics); (c) ngữ nghĩa P(chạm DD) trong MC CRB-3 → tỉ lệ path; (d) mâu thuẫn vị trí file CRB-6 (ml/ → risk/forecast.ts); (e) ký tự lạ lọt vào nghiệm thu CRB-6; (f) lỗi đánh máy CRB-7; (g) diễn đạt gap §1.2.
+> **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #49–#50)
 
 ---
 
@@ -12,7 +13,7 @@
 
 1. **VETO vẫn là luật cứng trong mã** (AUD-CODE #6). Toàn bộ thuật toán trong blueprint này phục vụ **đo lường, dự báo, điều chỉnh hạn mức động** — KHÔNG BAO GIỜ thay phán quyết binary của Ủy ban bằng xác suất. Xác suất chỉ có 2 lối ra: (a) bằng chứng vào Bộ tổng hợp Bayes, (b) cảnh báo RiskAlert. Nguyên văn `consensus.ts`: *"VETO Ủy ban Kiểm soát vẫn TUYỆT ĐỐI — cổng không vượt veto"* — quant engine cũng chịu ràng buộc này.
 2. **Viết tay TypeScript thuần** — đúng phong cách codebase: `Float64Array` phẳng, RNG `mulberry32` seed cố định (deterministic, tái lập được), 0 dependency mới, 0 chi phí LLM.
-3. **Một nguồn sự thật cho hạn mức**: roster config (`agent-roster.ts`, AUD-CODE #15) vẫn là gốc; mọi hệ số động chỉ được **SIÊT CHẶT HƠN** hạn mức tĩnh, không được nới lỏng vượt mức gốc (multiplier ∈ [0,6 · 1,0]).
+3. **Một nguồn sự thật cho hạn mức**: roster config (`agent-roster.ts`, AUD-CODE #15) vẫn là gốc; hệ số động điều chỉnh **hai chiều có trần** (sửa v1.1 theo user #50 Q2): SIẾT khi biến động cao hơn mốc bình thường, NỚI tối đa +15% khi thị trường yên bình hơn mốc — multiplier ∈ [0,6 · 1,15]. Mọi lần NỚI (mult > 1) phát RiskAlert INFO để kiểm toán; trần 1,15 là cứng trong mã.
 4. **Không bịa dữ liệu** (văn hoá hệ thống): danh mục rỗng/thiếu lịch sử → quant engine chạy **chế độ proxy** trên rổ top-10 thanh khoản và GHI RÕ `proxyMode: true` trong snapshot + UI. Không tô đỏ/đen bằng số liệu rỗng.
 5. **Schema additive** — không phá cột cũ, không migration destructive (chuẩn mọi blueprint trước).
 6. **Chống đếm kép (T7.5)**: bằng chứng quant vào Bayes đúng MỘT lần với `source` riêng (`quant-tail:`, `quant-drift:`) — không trùng phiếu llm-vote của 6 cử tri; quant KHÔNG thêm cử tri thứ 7 cho cổng đồng thuận 80%.
@@ -24,7 +25,7 @@
 | # | Khoảng trống (file hiện tại) | Hệ quả | Gói | Bước vá |
 |---|---|---|---|---|
 | 1 | Hạn mức tĩnh 40%/25%/15% mọi chế độ thị trường (`agent-roster.ts` config) | Biến động 3%/ngày vẫn cho vị thế 25% NAV như lúc yên bình | P1 | CRB-1 |
-| 2 | Exposure A7 chỉ check ngành/vị thế **LỚN NHẤT** (`runExposure`) | 3 ngành × 39% = tập trung thực ~ tập trung 1 ngành nhưng A7 báo "ĐẠT" | P2 | CRB-4 |
+| 2 | Exposure A7 chỉ check ngành/vị thế **LỚN NHẤT** (`runExposure`) | 3 ngành 39/39/20% NAV → HHI 0,34 ≈ chỉ ~3 ngành hiệu quả, nhưng A7 vẫn báo "ĐẠT" vì mỗi ngành < 40% | P2 | CRB-4 |
 | 3 | Không có VaR/CVaR — không ai trả lời "P(lỗ > x% NAV trong 5 phiên)?" | Risk Manager A6 chỉ suy luận định tính trên snapshot | P1 | CRB-2, CRB-3 |
 | 4 | Không dự báo drawdown — chỉ biết DD hiện tại (maxDrawdown trong backtest A14) | Phát hiện muộn, phản ứng sau khi chạm ngưỡng | P1+P3 | CRB-3, CRB-6, CRB-8 |
 | 5 | Không đo tương quan giữa các vị thế | 8 mã "khác nhau" cùng ngành, corr 0,8 = 1 cược khổng lồ | P2 | CRB-5 |
@@ -43,7 +44,7 @@ src/lib/risk/
   concentration.ts   CRB-4/5 HHI ngành & vị thế + ma trận tương quan
   forecast.ts        CRB-6/8 hồi quy logistic P(vi phạm 5 phiên) + CUSUM/EWMA chart
   sizing.ts          CRB-9 Fractional Kelly (¼-Kelly) tư vấn bet sizing
-  engine.ts          CRB-11 ORCHESTRATOR — gọi tất cả, trả RiskQuantResult
+  engine.ts          CRB-0  ORCHESTRATOR — gọi tất cả, trả RiskQuantResult + persist snapshot
   (CRB-7 Bayesian limit-learning nằm trong engine.ts — cập nhật AppSetting)
 ```
 
@@ -74,21 +75,23 @@ Lý do quant chạy **trước** đợt C: (a) risk-manager LLM cần con số �
 ```
 Chuỗi đầu vào: daily returns **của danh mục thật** (tổng hợp Position × Bar hiện hữu theo thời gian giữ — F-102); danh mục rỗng/<60 phiên → rổ top-10 thanh khoản (proxy mode, §0.4).
 
-**Hạn mức động (siết chặt một chiều — §0.3):**
+**Hạn mức động (hai chiều có trần — §0.3, chốt user #50 Q2):**
 ```
 volRef   = median(σ_ewma 250 phiên gần nhất của chuỗi)     — mốc "bình thường"
-mult     = clamp(volRef / σ_ewma,20 hiện tại, 0,6, 1,0)     — CHỈ SIẾT, KHÔNG NỚI
-dynMaxPositionPct = maxPositionPct × mult                  (25% → tối thiểu 15%)
-dynMaxSectorPct    = maxSectorWeightPct × mult             (40% → tối thiểu 24%)
+mult     = clamp(volRef / σ_ewma,20 hiện tại, 0,6, 1,15)    — SIẾT khi vol cao hơn mốc,
+                                                             NỚI tối đa +15% khi YÊN BÌNH hơn mốc
+dynMaxPositionPct = maxPositionPct × mult                  (25% → [15% · 28,75%])
+dynMaxSectorPct    = maxSectorWeightPct × mult             (40% → [24% · 46%])
+mult > 1 → RiskAlert INFO "nới hạn mức theo biến động thấp hơn mốc" (kiểm toán được)
 ```
 Kèm **vol ratio** hiển thị: `σ_now/σ_ref` (1,0 = bình thường; 1,5 = biến động cao 50%).
 
 **Điểm nối:**
-- `runExposure` (A7): đọc `dynMaxSectorPct/dynMaxPositionPct` từ RiskQuantResult thay số tĩnh — **điều kiện VETO giữ nguyên ngữ nghĩa, chỉ ngưỡng thay đổi** (luôn ≤ mức tĩnh).
+- `runExposure` (A7): đọc `dynMaxSectorPct/dynMaxPositionPct` từ RiskQuantResult thay số tĩnh — **điều kiện VETO giữ nguyên ngữ nghĩa, chỉ ngưỡng thay đổi** (ngưỡng động ∈ [0,6 · 1,15]× tĩnh — nới chỉ khi thị trường yên bình hơn mốc và luôn phát INFO alert).
 - Prompt risk-manager (A6): thêm dòng `- Biến động EWMA20 năm hoá: x,x% (×1,4 mốc bình thường) → hạn mức vị thế động y,y% NAV`.
 - RiskAlert WARN khi `mult ≤ 0,75` (biến động gấp ~1,33 lần bình thường).
 
-**Nghiệm thu:** (1) λ=0,94 tái lập trên chuỗi giả 250 điểm — so sánh với công thức tham chiếu viết độc lập; (2) mốc volRef dùng median (không mean — chống nhiễu đỉnh spike); (3) mult không bao giờ > 1,0 (property test 10.000 lần quét ngẫu nhiên); (4) danh mục rỗng → proxyMode=true hiện rõ trong output.
+**Nghiệm thu:** (1) λ=0,94 tái lập trên chuỗi giả 250 điểm — so sánh với công thức tham chiếu viết độc lập; (2) mốc volRef dùng median (không mean — chống nhiễu đỉnh spike); (3) mult ∈ [0,6 · 1,15] mọi đầu vào (property test 10.000 lần quét ngẫu nhiên); (3b) mult > 1 chỉ xảy ra khi σ_now < σ_ref (yên bình hơn mốc) và luôn kèm INFO alert; (4) danh mục rỗng → proxyMode=true hiện rõ trong output.
 
 ### CRB-2 · Historical Simulation VaR/CVaR
 
@@ -119,10 +122,10 @@ mỗi path: 5 lần rút CÓ HOÀN TRẢ từ phân phối kinh nghiệm r_p (25
 P&L_path = Π(1+r̃ⱼ) − 1
 Báo cáo: P(lỗ > 2% NAV) · P(lỗ > 5% NAV) · lỗ percentile 5% (MC-VaR khớp chéo
 HS-VaR CRB-2 — sai lệch > 20% phải log) · worst-path observed ·
-P(chạm DD 15%) = 1 nếu (DD_hiện_tại + lỗ_path) > 15% cho từng path
+P(chạm DD 15%) = |{path : DD_hiện_tại + lỗ_path > 15%}| / N_PATHS
 ```
 
-**Điểm nối:** prompt risk-manager + khối QUANT trong Tổng hợp (UI CRB-12); RiskAlert CRITICAL khi `P(chạm DD 15%) ≥ 0,10`.
+**Điểm nối:** prompt risk-manager + khối QUANT trong Tổng hợp (UI thuộc G1, §10); RiskAlert CRITICAL khi `P(chạm DD 15%) ≥ 0,10`.
 
 **Nghiệm thu:** (1) cùng seed → kết quả byte-identical giữa 2 lần chạy; (2) MC-VaR5% lệch HS-VaR95 ≤ 20% trên dữ liệu thật (khớp chéo 2 phương pháp — nếu lệch lớn hơn là dấu hiệu phân phối đuôi nặng, log để review chứ không chắn); (3) runtime ≤ 300ms (5.000×5 phép nhân trên Float64Array).
 
@@ -166,7 +169,7 @@ N_eff_bets = N / (1 + (N−1)·avgCorr)     — "số cược độc lập" củ
 
 ### CRB-6 · Hồi quy logistic P(vi phạm giới hạn trong 5 phiên)
 
-**Mô hình viết tay (phong cách `ml/nn.ts` — cùng container `ml/`):**
+**Mô hình viết tay (phong cách `ml/nn.ts` — đặt tại `src/lib/risk/forecast.ts` theo §2):**
 ```
 8 đặc trưng (TẤT CẢ có sẵn, không lookahead):
   x1 volZ     = (σ_ewma20 − volRef)/volRef          (CRB-1)
@@ -189,18 +192,19 @@ Serving: p_breach = σ(βᵀx) → LR = clamp( (p/(1−p)) / (p₀/(1−p₀)), 
 
 **Điểm nối:** Bayes evidence `quant-drift:breach-prob` — direction DOWN khi p > 0,35, weight = clamp(p×1,5, 0,3, 0,8); prompt risk-manager; UI.
 
-**Nghiệm thu:** (1) AUC val ≥ 0,55 mới được serving (dưới ngưỡng → chỉ log, không vào Bayes — trung thực); (2) deterministic cùng seed; (3) LR luôn trong [0,5 · 3,0] (ràng buộc synthesis); (4) không dùng bất kỳ đặc trưng nào需要 dữ liệu tương lai.
+**Nghiệm thu:** (1) AUC val ≥ 0,55 mới được serving (dưới ngưỡng → chỉ log, không vào Bayes — trung thực); (2) deterministic cùng seed; (3) LR luôn trong [0,5 · 3,0] (ràng buộc synthesis); (4) không dùng bất kỳ đặc trưng nào cần dữ liệu tương lai.
 
 ### CRB-7 · Bayesian limit-learning — hạn mức tự học từ lịch sử vi phạm
 
 **Công thức (Beta-Bernoulli conjugate — tái dùng pattern `bandit.ts`):**
 ```
 Mỗi loại giới hạn ℓ ∈ {sector, position, dd, dailyLoss}:
-  prior Beta(α₀=1, β₀=99)  — prior kesk nhiệm, base 1%
+  prior Beta(α₀=1, β₀=99)  — prior khiêm tốn, base 1%
   mỗi chu kỳ: vi phạm (snapshot vượt hạn động) → α += 1, không → β += 1
   posteriorMean = (α+1)/(α+β+2)
   tightening mult_ℓ = 1 − 0,5 × max(0, posteriorMean − 0,05)   (floor 0,75)
-  → dynLimit_ℓ = static_ℓ × mult_ℓ (cộng hưởng với mult CRB-1: lấy min)
+  → dynLimit_ℓ = static_ℓ × mult_ℓ — hợp nhất với CRB-1 bằng
+    min(volMult, mult_ℓ): mult_ℓ ≤ 1 MỘT CHIỀU (chỉ siết), NỚI chỉ đến từ volMult
 ```
 Lưu `AppSetting` key `risk-quant-limits` (JSON {alpha, beta per limit}) — cache in-process 60s như `consensus.ts`. Giới hạn chỉ SIẾT dần theo dữ liệu thật, floor 0,75× tĩnh, và **reset nút bấm thủ công** (AppSetting ghi đè) — mọi thay đổi ghi AuditLog.
 
@@ -216,7 +220,8 @@ Sₜ = max(0, Sₜ₋₁ + (−rₜ − k))        — hạ vệ downside
 Sₜ⁺ = max(0, Sₜ₋₁⁺ + (rₜ − k))        — upside (thông tin chế độ, không báo động)
 BÁO ĐỘNG khi Sₜ > h → RiskAlert WARN "trôi dạt xuống phát hiện sớm, cách DD
 ngưỡng còn z phiên theo trend hiện tại" (ngoại suy tuyến tính — chỉ mô tả, không dự báo)
-EWMA chart biến động: zₜ = 0,1·rₜ + 0,9·zₜ₋₁; vượt ±2,7σ/√(λ/(2−λ)) → WARN vol-shift
+EWMA chart biến động: zₜ = μ·rₜ + (1−μ)·zₜ₋₁ với μ = 0,1 (hệ số làm mượt chart —
+  tách ký hiệu khỏi λ RiskMetrics CRB-1); vượt ±L·σ·√(μ/(2−μ)), L = 2,7 → WARN vol-shift
 ```
 
 **Điểm nối:** RiskAlert (đây là kênh CHÍNH của CRB-8 — cảnh báo sớm trước khi DD chạm 15%, vá gap §1.4); Bayes evidence `quant-drift:cusum` khi báo động (weight 0,3).
@@ -263,22 +268,22 @@ CLT **không phải module cài thêm** — nó đã là nền của 3 chỗ tro
 
 ---
 
-## §9. Câu hỏi chốt cho user (trả lời xong mới triển khai)
+## §9. Quyết định đã chốt từ câu trả lời của user (phiên #50)
 
-| # | Câu hỏi | Đề xuất mặc định của blueprint |
-|---|---|---|
-| 1 | CRB-2 dùng HS-VaR (empirical) hay VaR analytic (giả định chuẩn)? | **HS** — đuôi FAT thị trường VN, không giả định |
-| 2 | Hạn mức động có được phép NỚI ra khi thị trường YÊN BÌNH (mult đến 1,15) không? | **Không** — chỉ siết (§0.3); nới phải là quyết định tay của trader |
-| 3 | CRB-6 PHA 1 train nhãn trên proxy rổ top-10 — chấp nhận trung thực này? | **Có** — đúng kiểu ml-forecast; PHA 2 tự lên khi đủ 250 snapshot NAV |
-| 4 | ¼-Kelly xuất hiện ở đâu? | **Chỉ rationale tín hiệu + UI** — không tự đặt khối lượng |
-| 5 | Triển khai theo 2 đợt (P1+P2 trước, P3+P4 sau) hay một lần cả 4 gói? | **2 đợt** — P1+P2 ≈ 400 dòng không phụ thuộc gì; P3+P4 cần P1/2 làm nền |
+| # | Câu hỏi | Câu trả lời của user | Khoản triển khai trong blueprint này |
+|---|---|---|---|
+| 1 | CRB-2 dùng HS-VaR (empirical) hay VaR analytic (giả định chuẩn)? | **HS-VaR** | §3 CRB-2 giữ nguyên — percentile empirical, không giả định chuẩn (đuôi FAT VN) |
+| 2 | Hạn mức động có được phép NỚI khi thị trường YÊN BÌNH? | **Được phép** | §0.3 + CRB-1 sửa v1.1: mult ∈ [0,6 · **1,15**], trần +15% cứng, INFO alert mỗi lần nới, nghiệm thu thêm 3b |
+| 3 | CRB-6 PHA 1 train nhãn trên proxy rổ top-10 — chấp nhận? | **Theo đề xuất** | §5 CRB-6: PHA 1 nhãn proxy rổ → PHA 2 retrain nhãn vi phạm thật khi đủ 250 snapshot NAV |
+| 4 | ¼-Kelly xuất hiện ở đâu? | **Theo đề xuất** | §6 CRB-9: chỉ trong rationale tín hiệu + UI — tuyệt đối tham mưu, không tự đặt khối lượng |
+| 5 | Triển khai 2 đợt hay một lần cả 4 gói? | **2 đợt** | §10: G1 (CRB-1→5) trước → G2 (CRB-6→9) sau; user #50 chỉ thị "chưa triển khai vội" — chờ lệnh khởi động G1 |
 
 ## §10. Ngân sách hiệu năng & lộ trình
 
 | Giai đoạn | Nội dung | Thêm vào chu kỳ | Giá ước tính |
 |---|---|---|---|
-| G1 | CRB-1→5 (EWMA · VaR/CVaR · MC · HHI · corr) + schema + UI tổng hợp | ≤ 1,0s deterministic | ~400 dòng TS thuần |
-| G2 | CRB-6→9 (logistic · Beta-learning · CUSUM · Kelly) + Bayes evidence | +0,3s (1 forward logistic) | ~350 dòng |
+| G1 (chốt #50 Q5) | CRB-1→5 (EWMA · VaR/CVaR · MC · HHI · corr) + schema + UI tổng hợp | ≤ 1,0s deterministic | ~400 dòng TS thuần |
+| G2 (sau G1 nghiệm thu) | CRB-6→9 (logistic · Beta-learning · CUSUM · Kelly) + Bayes evidence | +0,3s (1 forward logistic) | ~350 dòng |
 | Tổng | 9 bước · 6 file mới `src/lib/risk/` · 1 model mới · 0 dependency · 0 route mới | **≤ 1,5s** | ≤ 800 dòng |
 
 Ràng buộc cứng: chu kỳ tổng sau khi gộp ≤ 185s (ngân sách MEB 180s + 5s dự phòng) — nếu vượt, MC cắt N_PATHS 5.000 → 2.000 (ước lượng ảnh hưởng ±0,3% percentile, đo lại khi cắt).
