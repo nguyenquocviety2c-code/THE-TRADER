@@ -328,6 +328,8 @@ Việc code: phần reward đã có `settlePendingRewards()`; thêm hàm tổng 
 
 ## §9. Câu hỏi mở cần chốt (trước khi triển khai đợt 1)
 
+> **✅ ĐÃ CHỐT TOÀN BỘ (phiên #37, 2026-10-07):** (1) chốt cả 3 nâng cấp P0; (2) phiếu bầu theo số đông — **cổng đồng thuận ≥ 80%**; (3) scorecard để ở **tab Đội Agent**; (4) **nới** ràng buộc ≤ 90s (→ ≤ 180s); (5) **nạp luôn** HNX. Kèm yêu cầu chủ: **15/15 tổ hợp vận hành + HNX + ETF + dữ liệu cơ bản + sàn quốc tế**. Toàn bộ ánh xạ thành **15 bước / 7 giai đoạn** tại [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) §0–§4 (Bước 6–8 = 3 nâng cấp P0 ở §7 tài liệu này).
+
 1. **Phạm vi đợt 1:** chốt cả 3 nâng cấp P0 (7.1 bảng chỉ báo mở rộng + 7.2 MLP ensemble + 7.6 scorecard) hay từng phần?
 2. **Độ ưu tiên MLP trong phiếu bầu:** MLP forecast có nên trở thành phiếu bầu ĐỘC LẬP trong Bayes (hiện là bằng chứng quant weight 0,6) hay giữ hiện trạng? (Ảnh hưởng cân bằng 4 phiếu LLM vs quant.)
 3. **Scorecard trưng diện:** để ở tab Đội Agent (chi tiết từng agent) hay workspace Tổng hợp (tổng hợp nhóm)?
