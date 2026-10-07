@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useIsMutating, useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { vi } from "date-fns/locale";
 import {
@@ -14,7 +14,6 @@ import {
   CircleX,
   Loader2,
   Newspaper,
-  Play,
   Radio,
   ShieldAlert,
   Zap,
@@ -25,8 +24,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
-import { useRunAgents } from "@/hooks/use-run-agents";
 import { useSignalDecision } from "@/hooks/use-agent-actions";
+import { RUN_AGENTS_MUTATION_KEY } from "@/hooks/use-run-agents";
 import { useUiStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AgentMessageRow, AgentsResponse, SignalRow } from "@/lib/types";
@@ -50,7 +49,6 @@ const DIRECTION: Record<string, { label: string; className: string }> = {
 };
 
 export function AgentsPanel() {
-  const runAgents = useRunAgents();
   const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
 
   const agentsQuery = useQuery({
@@ -71,7 +69,12 @@ export function AgentsPanel() {
     staleTime: 30_000,
   });
 
-  const isRunning = runAgents.isPending;
+  // Phiên #47 — nút "Chạy chu kỳ phân tích" đã XOÁ (nút "Chạy agent" trên
+  // thanh bar trên cùng là duy nhất). isRunning giờ đếm mutation đang chạy
+  // TOÀN APP qua useIsMutating + mutationKey chia sẻ — nên hàng pulse
+  // "Chu kỳ đa tác tử đang chạy" vẫn hiện đúng kể cả khi chu kỳ được kích
+  // hoạt từ nút Header (trước đây state per-instance không thấy nhau).
+  const isRunning = useIsMutating({ mutationKey: RUN_AGENTS_MUTATION_KEY }) > 0;
 
   const agents = agentsQuery.data?.agents ?? [];
   const tasks = agentsQuery.data?.tasks ?? [];
@@ -127,24 +130,9 @@ export function AgentsPanel() {
                 </>
               ) : null}
             </div>
-            <Button
-              onClick={() => runAgents.mutate()}
-              disabled={isRunning}
-              className="min-h-11 gap-2"
-              size="lg"
-            >
-              {isRunning ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Đang phân tích…
-                </>
-              ) : (
-                <>
-                  <Play className="size-4" aria-hidden="true" />
-                  Chạy chu kỳ phân tích
-                </>
-              )}
-            </Button>
+            {/* Phiên #47 — nút "Chạy chu kỳ phân tích" XOÁ: dùng nút "Chạy agent"
+                duy nhất trên thanh bar trên cùng. Hàng pulse “Chu kỳ đa tác tử
+                đang chạy” phía dưới vẫn hiện đúng trạng thái đó qua useIsMutating. */}
           </div>
         </CardContent>
       </Card>
@@ -234,7 +222,8 @@ export function AgentsPanel() {
                 ))}
                 {messages.length === 0 && !isRunning && (
                   <li className="py-6 text-sm text-muted-foreground">
-                    Chưa có tin nhắn. Hãy chạy chu kỳ phân tích đầu tiên.
+                    Chưa có tin nhắn. Hãy chạy chu kỳ đầu tiên bằng nút “Chạy
+                    agent” trên thanh bar trên cùng.
                   </li>
                 )}
               </ul>

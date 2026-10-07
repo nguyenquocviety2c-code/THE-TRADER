@@ -6,14 +6,22 @@ import { apiPost } from "@/lib/api";
 import type { RunCycleResponse } from "@/lib/types";
 
 /**
+ * Mutation key CHIA SẺ — dùng kèm useIsMutating({ mutationKey }) để mọi nơi
+ * (vd AgentsPanel) đếm được chu kỳ đang chạy dù nút chạy nằm ở Header
+ * (phiên #47 — nút "Chạy agent" trên thanh bar trên cùng là DUY NHẤT).
+ */
+export const RUN_AGENTS_MUTATION_KEY = ["run-agents-cycle"] as const;
+
+/**
  * Shared mutation for POST /api/agents/run (the full multi-agent cycle).
- * Used by both the Header button and the Agents panel, so the
- * "running" state and the invalidations stay consistent everywhere.
+ * Used by the Header button, so the "running" state and the invalidations
+ * stay consistent everywhere.
  */
 export function useRunAgents() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    mutationKey: RUN_AGENTS_MUTATION_KEY,
     mutationFn: () => apiPost<RunCycleResponse>("/api/agents/run"),
     onSuccess: (res) => {
       void queryClient.invalidateQueries({ queryKey: ["agents"] });

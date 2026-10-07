@@ -27,7 +27,8 @@ export function SignalsWorkspace() {
         </div>
         <div className="flex flex-col gap-6">
           <RiskAlerts />
-          {/* AgentsPanel: feed broadcast + nút chạy chu kỳ + phê duyệt tín hiệu */}
+          {/* AgentsPanel: feed broadcast + phê duyệt tín hiệu (phiên #47 —
+              nút chạy chu kỳ đã dời về nút "Chạy agent" duy nhất trên Header) */}
           <AgentsPanel />
         </div>
       </div>

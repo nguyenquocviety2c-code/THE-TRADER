@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Bot, Loader2, Play } from "lucide-react";
+import { ArrowRight, Bot } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiGet } from "@/lib/api";
-import { useRunAgents } from "@/hooks/use-run-agents";
 import { useUiStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AgentsResponse } from "@/lib/types";
@@ -23,8 +22,9 @@ import type { AgentsResponse } from "@/lib/types";
 /**
  * Phiên #34 — card tóm tắt hệ thống 23 agents (5 nhóm) trên Tổng quan.
  * Mỗi nhóm 1 hàng: tên + badge số lượng + chấm trạng thái tổng (đỏ khi có
- * agent ERROR, xanh nhấp nháy khi có agent RUNNING). Hàng cuối: nút chạy
- * chu kỳ + link sang workspace Đội Agent + model LLM đang chạy.
+ * agent ERROR, xanh nhấp nháy khi có agent RUNNING). Hàng cuối: link sang
+ * workspace Đội Agent + model LLM đang chạy (phiên #47 — nút chạy chu kỳ
+ * dời hết về nút "Chạy agent" duy nhất trên thanh bar trên cùng).
  */
 
 /** Thứ tự 5 nhóm — đồng bộ GROUP_ORDER agents-workspace (agent-roster.ts backend). */
@@ -72,7 +72,6 @@ function groupStatuses(agents: AgentsResponse["agents"]): GroupStatus[] {
 }
 
 export function AgentSystemBrief() {
-  const runAgents = useRunAgents();
   const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
 
   const { data, isLoading, isError, error } = useQuery({
@@ -184,24 +183,8 @@ export function AgentSystemBrief() {
                 {data?.llm?.modelLabel ?? data?.llm?.model ?? "…"}
               </span>
             </p>
-            <Button
-              onClick={() => runAgents.mutate()}
-              disabled={runAgents.isPending}
-              size="sm"
-              className="min-h-11 gap-2"
-            >
-              {runAgents.isPending ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Đang phân tích…
-                </>
-              ) : (
-                <>
-                  <Play className="size-4" aria-hidden="true" />
-                  Chạy chu kỳ 23 agents
-                </>
-              )}
-            </Button>
+            {/* Phiên #47 — nút "Chạy chu kỳ 23 agents" bị XOÁ: nút "Chạy agent"
+                trên thanh bar trên cùng là nút chạy chu kỳ DUY NHẤT của app. */}
           </div>
         </CardContent>
       </Card>

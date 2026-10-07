@@ -2,9 +2,18 @@
 
 import { Fragment, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Award, Bot, Loader2, Play, RefreshCw } from "lucide-react";
+import { AlertTriangle, Award, Bot, ListFilter, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Card,
   CardAction,
@@ -25,8 +34,7 @@ import {
 } from "@/components/ui/table";
 import { apiGet } from "@/lib/api";
 import { formatVolume } from "@/lib/format";
-import { useRunAgents } from "@/hooks/use-run-agents";
-import { RateLimitError, useSingleAgentRun } from "@/hooks/use-agent-actions";
+import { useSingleAgentRun, RateLimitError } from "@/hooks/use-agent-actions";
 import { AgentRosterCard } from "@/components/dashboard/agent-roster-card";
 import { AgentDetailPanel } from "@/components/dashboard/agent-detail-panel";
 import { CoverageMatrix } from "@/components/dashboard/coverage-matrix";
@@ -91,9 +99,15 @@ function groupAgentsBySection(agents: AgentCard[]): AgentGroupSection[] {
  * PHASE3_BLUEPRINT §4.7 — workspace "Đội Agent" (B2 thay placeholder B1):
  * roster 23 card chia 5 nhóm + panel chi tiết/chat. Mobile stack dọc, desktop 2 cột xl:.
  * Mutation "chạy riêng" sống ở đây để nút roster + panel đồng bộ trạng thái.
+ *
+ * PHIÊN #47 (yêu cầu user):
+ * - Nút "Chạy chu kỳ đầy đủ" bị XOÁ — nút "Chạy agent" trên thanh bar trên
+ *   cùng (Header) là nút chạy chu kỳ DUY NHẤT của cả app (trước đó xuất hiện
+ *   6 nơi: overview ×2 · signals · synthesis ×2 · đây).
+ * - Bộ lọc nhóm chuyển từ hàng pill bày sẵn (#45) sang MỘT nút "Nhóm hiển thị"
+ *   trong ô header workspace: mở DropdownMenu tick ĐA CHỌN nhóm nào được render.
  */
 export function AgentsWorkspace() {
-  const runAgents = useRunAgents();
   const singleRun = useSingleAgentRun();
 
   const agentsQuery = useQuery({
@@ -104,9 +118,19 @@ export function AgentsWorkspace() {
 
   // Agent đang mở panel chi tiết (local state — không cần Zustand).
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Phiên #45 — bộ lọc nhóm agent: mặc định "all" (hiển thị toàn bộ 23);
-  // chọn 1 nhóm để rút ngắn danh sách roster quá dài theo yêu cầu user.
-  const [groupFilter, setGroupFilter] = useState<string>("all");
+  // Phiên #47 — bộ lọc nhóm agent ĐA CHỌN (tick trong dropdown): mặc định tick
+  // đủ mọi nhóm (= hiển thị toàn bộ 23 như trước); bỏ tick nhóm nào để ẨN nhóm
+  // đó khỏi roster — thay hàng pill đơn chọn 1 nhóm của phiên #45.
+  const [selectedGroups, setSelectedGroups] = useState<ReadonlySet<string>>(
+    () => new Set([...GROUP_ORDER, "other"])
+  );
+  const toggleGroup = (key: string) =>
+    setSelectedGroups((cur) => {
+      const next = new Set(cur);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   // retryAfterSeconds theo agent id — set khi chạy riêng dính 429;
   // workspace là chủ duy nhất của đồng hồ đếm ngược (tick giảm mỗi giây).
   const [retryAfter, setRetryAfter] = useState<Record<string, number>>({});
@@ -145,13 +169,18 @@ export function AgentsWorkspace() {
 
   const agents = agentsQuery.data?.agents ?? [];
   const sections = groupAgentsBySection(agents);
-  // Phiên #45 — roster lọc theo nhóm đang chọn ("all" = mọi nhóm).
-  const visibleSections =
-    groupFilter === "all"
-      ? sections
-      : sections.filter((s) => s.key === groupFilter);
-  // Scorecard + ma trận độ phủ chỉ gắn bối cảnh nhóm research — ẩn khi lọc nhóm khác.
-  const showResearchExtras = groupFilter === "all" || groupFilter === "research";
+  // Phiên #47 — roster chỉ render các nhóm đang được tick trong dropdown.
+  const visibleSections = sections.filter((s) => selectedGroups.has(s.key));
+  // Scorecard + ma trận độ phủ gắn bối cảnh nhóm research — chỉ hiện khi nhóm
+  // research đang được chọn (phiên #45: khi "all" hoặc "research").
+  const showResearchExtras = selectedGroups.has("research");
+  const selectedGroupCount = sections.filter((s) => selectedGroups.has(s.key)).length;
+  const allGroupsSelected =
+    sections.length > 0 && selectedGroupCount === sections.length;
+  const visibleAgentCount = visibleSections.reduce(
+    (n, s) => n + s.agents.length,
+    0
+  );
   const totals = agentsQuery.data?.totals;
   const totalTokens =
     totals ? totals.totalTokensIn + totals.totalTokensOut : null;
@@ -165,7 +194,9 @@ export function AgentsWorkspace() {
       aria-labelledby="workspace-tab-agents"
       className="flex flex-col gap-6"
     >
-      {/* Header workspace: mô tả đội + tổng chi phí AI + chạy chu kỳ đầy đủ */}
+      {/* Header workspace: mô tả đội + tổng chi phí AI + nút chọn nhóm
+          hiển thị (phiên #47 — thay nút "Chạy chu kỳ đầy đủ" đã dời về
+          nút "Chạy agent" duy nhất trên thanh bar trên cùng) */}
       <Card>
         <CardContent className="flex flex-col gap-4 py-5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
@@ -191,29 +222,77 @@ export function AgentsWorkspace() {
 
           <div className="flex flex-wrap items-center justify-between gap-3 lg:justify-end">
             <p className="tabular-nums text-xs text-muted-foreground">
-              {agents.length} agent
+              {agentsQuery.isLoading
+                ? "…"
+                : `${visibleAgentCount}/${agents.length} đang xem`}
               {totals
                 ? ` · $${totals.totalCostUsd.toFixed(2)} chi phí AI lũy kế · ${formatVolume(totalTokens ?? 0)} tokens`
                 : ""}
             </p>
-            <Button
-              onClick={() => runAgents.mutate()}
-              disabled={runAgents.isPending}
-              className="min-h-11 gap-2"
-              aria-label={`Chạy chu kỳ đầy đủ${agentCount ? ` ${agentCount} agent` : ""}`}
-            >
-              {runAgents.isPending ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Đang phân tích…
-                </>
-              ) : (
-                <>
-                  <Play className="size-4" aria-hidden="true" />
-                  Chạy chu kỳ đầy đủ{agentCount ? ` (${agentCount} agents)` : ""}
-                </>
-              )}
-            </Button>
+
+            {/* Phiên #47 — MỘT nút mở dropdown tick đa chọn nhóm hiển thị,
+                thay hàng pill 6 nút bày sẵn của phiên #45 (user: kém thẩm mỹ). */}
+            {!agentsQuery.isLoading && !agentsQuery.isError && sections.length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    className="min-h-11 gap-2"
+                    aria-label="Chọn nhóm agent hiển thị"
+                  >
+                    <ListFilter className="size-4" aria-hidden="true" />
+                    Nhóm hiển thị
+                    <Badge
+                      variant="secondary"
+                      className="px-1.5 tabular-nums"
+                      aria-hidden="true"
+                    >
+                      {selectedGroupCount}/{sections.length}
+                    </Badge>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-80">
+                  <DropdownMenuLabel>Nhóm agents hiển thị</DropdownMenuLabel>
+                  {sections.map((s) => (
+                    <DropdownMenuCheckboxItem
+                      key={s.key}
+                      checked={selectedGroups.has(s.key)}
+                      onCheckedChange={() => toggleGroup(s.key)}
+                      // Giữ menu mở sau mỗi tick — người dùng tick/detick
+                      // nhiều nhóm liên tiếp (mặc định Radix đóng menu).
+                      onSelect={(e) => e.preventDefault()}
+                      className="min-h-11 gap-2 sm:min-h-9"
+                      aria-label={`${s.label} — ${s.agents.length} agent`}
+                    >
+                      <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                        <span className="truncate text-sm">{s.label}</span>
+                        <span className="truncate text-[11px] text-muted-foreground">
+                          {s.description}
+                        </span>
+                      </span>
+                      <Badge
+                        variant="secondary"
+                        className="ml-auto shrink-0 px-1.5 text-[10px] tabular-nums"
+                      >
+                        {s.agents.length}
+                      </Badge>
+                    </DropdownMenuCheckboxItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      setSelectedGroups(
+                        allGroupsSelected ? new Set() : new Set(sections.map((s) => s.key))
+                      )
+                    }
+                    className="min-h-11 gap-2 sm:min-h-9"
+                  >
+                    <ListFilter className="size-4" aria-hidden="true" />
+                    {allGroupsSelected ? "Bỏ chọn tất cả" : "Chọn tất cả"}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -223,31 +302,6 @@ export function AgentsWorkspace() {
         <div
           className="flex flex-col gap-4 self-start xl:col-span-2 xl:max-h-[calc(100vh-13rem)] xl:overflow-y-auto xl:pr-1.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-border"
         >
-          {/* Phiên #45 — nút chọn nhóm agent: rút ngắn roster 23 agents
-           * (yêu cầu user — hiển thị luôn tất cả hơi dài). Pill toggle, touch ≥44px. */}
-          {!agentsQuery.isLoading && !agentsQuery.isError && sections.length > 0 && (
-            <div
-              role="group"
-              aria-label="Chọn nhóm agent hiển thị"
-              className="flex flex-wrap gap-2"
-            >
-              <GroupFilterButton
-                active={groupFilter === "all"}
-                onClick={() => setGroupFilter("all")}
-                label="Tất cả"
-                count={agents.length}
-              />
-              {sections.map((s) => (
-                <GroupFilterButton
-                  key={s.key}
-                  active={groupFilter === s.key}
-                  onClick={() => setGroupFilter(s.key)}
-                  label={s.label}
-                  count={s.agents.length}
-                />
-              ))}
-            </div>
-          )}
 
           {agentsQuery.isLoading ? (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1">
@@ -259,6 +313,15 @@ export function AgentsWorkspace() {
             <p className="text-sm text-down">
               {agentsQuery.error?.message ?? "Không tải được danh sách agent."}
             </p>
+          ) : visibleSections.length === 0 ? (
+            /* Phiên #47 — người dùng bỏ tick hết mọi nhóm */
+            <div className="flex min-h-40 flex-col items-center justify-center gap-3 rounded-xl border border-dashed p-8 text-center">
+              <ListFilter className="size-8 text-muted-foreground" aria-hidden="true" />
+              <p className="max-w-sm text-sm text-muted-foreground">
+                Chưa chọn nhóm nào — mở “Nhóm hiển thị” ở trên để tick chọn
+                nhóm agent cần xem.
+              </p>
+            </div>
           ) : (
             visibleSections.map((section, i) => (
               <Fragment key={section.key}>
@@ -342,46 +405,6 @@ export function AgentsWorkspace() {
         </div>
       </div>
     </div>
-  );
-}
-
-/* ═══════════════ Phiên #45 — nút lọc nhóm agent (pill toggle) ═══════════════ */
-
-function GroupFilterButton({
-  active,
-  onClick,
-  label,
-  count,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  count: number;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        "inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 sm:min-h-9",
-        active
-          ? "border-primary bg-primary text-primary-foreground"
-          : "border-border/70 bg-background text-muted-foreground hover:border-border hover:bg-accent hover:text-foreground"
-      )}
-    >
-      {label}
-      <span
-        className={cn(
-          "rounded-full px-1.5 py-0 text-[10px] tabular-nums",
-          active
-            ? "bg-primary-foreground/15 text-primary-foreground"
-            : "bg-muted text-muted-foreground"
-        )}
-      >
-        {count}
-      </span>
-    </button>
   );
 }
 

@@ -12,13 +12,11 @@ import {
   type TooltipContentProps,
 } from "recharts";
 import {
-  ArrowRight,
   Brain,
   Globe,
   History,
   Loader2,
   MoveRight,
-  Play,
   RefreshCw,
   ShieldAlert,
   Sigma,
@@ -47,7 +45,6 @@ import {
 } from "@/components/ui/table";
 import { Tooltip as UiTooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAssessment, useSynthesizeNow } from "@/hooks/use-assessment";
-import { useRunAgents } from "@/hooks/use-run-agents";
 import { MlPanel } from "@/components/dashboard/ml-panel";
 import { changeColor, formatDateTime, formatVnd } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -137,7 +134,6 @@ interface HistoryRow {
 export function SynthesisWorkspace() {
   const { data, isLoading, isError, error, refetch } = useAssessment();
   const synthesizeNow = useSynthesizeNow();
-  const runAgents = useRunAgents();
 
   const assessment = data?.assessment ?? null;
   // Giữ tham chiếu ổn định từ cache (tránh useMemo deps đổi mỗi render).
@@ -151,7 +147,7 @@ export function SynthesisWorkspace() {
   }, [history]);
   const historyAsc = React.useMemo(() => [...historyDesc].reverse(), [historyDesc]);
 
-  const busy = synthesizeNow.isPending || runAgents.isPending;
+  const busy = synthesizeNow.isPending;
 
   return (
     <div
@@ -204,24 +200,8 @@ export function SynthesisWorkspace() {
                 </TooltipContent>
               </UiTooltip>
             </TooltipProvider>
-            <Button
-              onClick={() => runAgents.mutate()}
-              disabled={busy}
-              className="min-h-11 gap-2"
-            >
-              {runAgents.isPending ? (
-                <>
-                  <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                  Đang chạy chu kỳ…
-                </>
-              ) : (
-                <>
-                  <Play className="size-4" aria-hidden="true" />
-                  Chạy chu kỳ đầy đủ
-                  <ArrowRight className="size-3.5 opacity-60" aria-hidden="true" />
-                </>
-              )}
-            </Button>
+            {/* Phiên #47 — nút "Chạy chu kỳ đầy đủ" bị XOÁ: nút "Chạy agent"
+                trên thanh bar trên cùng là nút chạy chu kỳ DUY NHẤT của app. */}
           </div>
         </CardContent>
       </Card>
@@ -246,9 +226,7 @@ export function SynthesisWorkspace() {
         </Card>
       ) : !assessment ? (
         <EmptyState
-          runPending={runAgents.isPending}
           synthesizePending={synthesizeNow.isPending}
-          onRunCycle={() => runAgents.mutate()}
           onSynthesize={() => synthesizeNow.mutate()}
         />
       ) : (
@@ -1526,14 +1504,10 @@ function HistoryCard({
 /* ─────────────────── Empty state ─────────────────── */
 
 function EmptyState({
-  runPending,
   synthesizePending,
-  onRunCycle,
   onSynthesize,
 }: {
-  runPending: boolean;
   synthesizePending: boolean;
-  onRunCycle: () => void;
   onSynthesize: () => void;
 }) {
   return (
@@ -1548,32 +1522,15 @@ function EmptyState({
       <CardContent className="flex flex-col gap-4">
         <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
           Bộ tổng hợp Bayes tổng hợp đánh giá của toàn bộ 23 agents theo mô hình
-          nhân quả (thị trường → ngành → cổ phiếu). Chạy chu kỳ đầy đủ để cả đội
-          agent sinh bằng chứng, hoặc tổng hợp ngay từ dữ liệu định lượng hiện
-          có — không tốn LLM.
+          nhân quả (thị trường → ngành → cổ phiếu). Dùng nút “Chạy agent” trên
+          thanh bar trên cùng để cả đội sinh bằng chứng, hoặc tổng hợp ngay từ
+          dữ liệu định lượng hiện có — không tốn LLM.
         </p>
         <div className="flex flex-wrap gap-3">
           <Button
-            onClick={onRunCycle}
-            disabled={runPending || synthesizePending}
-            className="min-h-11 gap-2"
-          >
-            {runPending ? (
-              <>
-                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                Đang chạy chu kỳ…
-              </>
-            ) : (
-              <>
-                <Play className="size-4" aria-hidden="true" />
-                Chạy chu kỳ 23 agents
-              </>
-            )}
-          </Button>
-          <Button
             variant="outline"
             onClick={onSynthesize}
-            disabled={runPending || synthesizePending}
+            disabled={synthesizePending}
             className="min-h-11 gap-2"
           >
             {synthesizePending ? (

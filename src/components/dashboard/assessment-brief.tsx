@@ -1,9 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { useRunAgents } from "@/hooks/use-run-agents";
 import { useAssessment } from "@/hooks/use-assessment";
-import { ArrowRight, Brain, Loader2, MoveRight, Play, TrendingDown, TrendingUp } from "lucide-react";
+import { ArrowRight, Brain, MoveRight, TrendingDown, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,7 +27,8 @@ import type {
  * Phiên #34 — bản tóm tắt nhận định Bayes trên workspace Tổng quan.
  * Card gọn: badge hướng + stacked probability bar + 3 stat + caption nguồn;
  * nhấn "Xem chi tiết" → workspace synthesis. Chưa có assessment → empty state
- * kèm nút chạy chu kỳ 23 agents (assessment tự invalidate sau chu kỳ).
+ * hướng dẫn dùng nút "Chạy agent" trên thanh bar trên cùng (phiên #47 — nút
+ * chạy chu kỳ chỉ còn duy nhất ở đó; assessment tự invalidate sau chu kỳ).
  */
 
 const DIRECTION: Record<string, { label: string; className: string }> = {
@@ -45,7 +45,6 @@ function pct1(n: number | null | undefined): string {
 
 export function AssessmentBrief() {
   const { data, isLoading, isError, error, refetch } = useAssessment();
-  const runAgents = useRunAgents();
   const setActiveWorkspace = useUiStore((s) => s.setActiveWorkspace);
   const assessment = data?.assessment ?? null;
 
@@ -96,29 +95,14 @@ export function AssessmentBrief() {
               </Button>
             </div>
           ) : !assessment ? (
-            /* Empty state — chưa chạy chu kỳ nào */
-            <div className="flex flex-col items-start gap-3 rounded-lg border border-dashed p-4">
+            /* Empty state — chưa chạy chu kỳ nào (phiên #47: hướng dẫn sang nút
+             * "Chạy agent" duy nhất trên thanh bar trên cùng) */
+            <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed p-4">
               <p className="text-sm text-muted-foreground">
-                Bộ tổng hợp Bayes chưa chạy — chạy chu kỳ 23 agents để có nhận
-                định thị trường.
+                Bộ tổng hợp Bayes chưa chạy — dùng nút “Chạy agent” trên thanh
+                bar trên cùng để cả đội phân tích, nhận định thị trường sẽ hiện
+                ở đây ngay sau chu kỳ.
               </p>
-              <Button
-                onClick={() => runAgents.mutate()}
-                disabled={runAgents.isPending}
-                className="min-h-11 gap-2"
-              >
-                {runAgents.isPending ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-                    Đang phân tích…
-                  </>
-                ) : (
-                  <>
-                    <Play className="size-4" aria-hidden="true" />
-                    Chạy chu kỳ 23 agents
-                  </>
-                )}
-              </Button>
             </div>
           ) : (
             <AssessmentBriefBody assessment={assessment} />
