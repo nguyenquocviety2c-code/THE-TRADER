@@ -6,8 +6,6 @@ import { useTheme } from "next-themes";
 import {
   Loader2,
   Moon,
-  PanelLeft,
-  PanelLeftClose,
   Play,
   Radio,
   RefreshCw,
@@ -81,6 +79,27 @@ export function Header() {
     staleTime: 60_000,
   });
 
+  // PHIÊN #46 — công bố chiều cao header THẬT qua biến CSS --header-h
+  // (header flex-wrap ở mobile nên cao thay đổi) để AppSidebar neo BÊN DƯỚI
+  // mép dưới header thay vì che cả thanh bar trên cùng.
+  const headerRef = React.useRef<HTMLElement | null>(null);
+  React.useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const publish = () =>
+      document.documentElement.style.setProperty(
+        "--header-h",
+        `${Math.round(el.getBoundingClientRect().height)}px`
+      );
+    publish();
+    const ro = new ResizeObserver(publish);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--header-h");
+    };
+  }, []);
+
   const isRefreshing = useIsFetching() > 0;
 
   const open = now ? isMarketOpen(now) : false;
@@ -108,36 +127,31 @@ export function Header() {
   }
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+    <header
+      ref={headerRef}
+      className="sticky top-0 z-40 w-full border-b border-border/60 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60"
+    >
       <div className="mx-auto flex w-full max-w-[1440px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
-        {/* Phiên #45 — logo "The Trader" là nút bật/tắt sidebar trái (module nav).
-         * Thanh tab ngang cũ được thay bằng sidebar — xem nav.tsx AppSidebar. */}
+        {/* Phiên #45/#46 — logo "The Trader" CHÍNH LÀ nút bật/tắt sidebar trái:
+         * nhấp logo để mở, nhấp lại đúng logo để đóng — không còn nút icon
+         * nhỏ bên cạnh (yêu cầu user phiên #46). Sidebar trượt ra BÊN DƯỚI
+         * thanh header này nên logo luôn nhìn thấy & bấm được khi sidebar mở. */}
         <button
           type="button"
           aria-expanded={sidebarOpen}
           aria-controls="app-sidebar"
+          title="Mở/đóng danh sách module"
           aria-label={
             sidebarOpen
               ? "Đóng thanh điều hướng module"
               : "Mở thanh điều hướng module"
           }
           onClick={toggleSidebar}
-          className="group flex min-h-11 items-center gap-2 rounded-lg px-1.5 py-1 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40 sm:min-h-0"
+          className={cn(
+            "flex min-h-11 items-center gap-2.5 rounded-lg px-1.5 py-1 outline-none transition-colors hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring/40 sm:min-h-0",
+            sidebarOpen && "bg-accent/70"
+          )}
         >
-          <span className="relative block size-4 shrink-0" aria-hidden="true">
-            <PanelLeftClose
-              className={cn(
-                "absolute inset-0 size-4 text-muted-foreground transition-opacity",
-                sidebarOpen ? "opacity-100" : "opacity-0"
-              )}
-            />
-            <PanelLeft
-              className={cn(
-                "absolute inset-0 size-4 text-muted-foreground transition-transform group-hover:scale-110",
-                sidebarOpen ? "opacity-0" : "opacity-100"
-              )}
-            />
-          </span>
           <div
             className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground"
             aria-hidden="true"

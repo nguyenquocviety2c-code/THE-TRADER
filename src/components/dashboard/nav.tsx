@@ -9,7 +9,6 @@ import {
   LayoutDashboard,
   Radar,
   Settings,
-  TrendingUp,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,13 +16,21 @@ import { useUiStore, type Workspace } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
 /**
- * PHASE3_BLUEPRINT §3.2 + phiên #34 → PHIÊN #45 (yêu cầu user):
+ * PHASE3_BLUEPRINT §3.2 + phiên #34 → phiên #45 → PHIÊN #46 (tinh chỉnh user):
  * thanh tab workspace ngang trên header được thay bằng SIDEBAR TRÁI overlay.
  *
- * - Sidebar ĐÓNG mặc định; nhấp nút logo "The Trader" trên header để mở/đóng
- *   (aria-expanded/aria-controls gắn với nút đó, id="app-sidebar").
+ * PHIÊN #46:
+ * - Sidebar + backdrop neo từ mép DƯỚI thanh header (top-[var(--header-h)])
+ *   — KHÔNG che thanh bar trên cùng nữa; header (chứa logo) luôn nhìn thấy
+ *   và bấm được khi sidebar mở. Biến --header-h do Header đo & công bố
+ *   (ResizeObserver, co giãn theo flex-wrap mobile).
+ * - Logo "The Trader" trên header là nút bật/tắt DUY NHẤT — không còn nút
+ *   icon nhỏ cạnh logo: nhấp logo mở, nhấp lại đúng logo để đóng.
+ * - Sidebar không lặp lại logo trong đầu panel (logo thật đã ở header) —
+ * chỉ còn nhãn "Module" + nút X đóng nhanh.
+ *
  * - Chọn một module → chuyển workspace (Zustand) + tự đóng sidebar.
- * - Đóng bằng: nút X · Esc · nhấp vùng tối phía dưới (backdrop).
+ * - Đóng bằng: nhấp lại logo trên header · nút X · Esc · nhấp vùng tối.
  * - Giữ id nút `workspace-tab-<id>` để `aria-labelledby` của các workspace
  *   panel (role="tabpanel") vẫn trỏ đúng phần tử — không đổi href/route,
  *   vẫn bất biến single-route `/` + deep-link ?ws=.
@@ -123,12 +130,13 @@ export function AppSidebar() {
 
   return (
     <>
-      {/* Backdrop — nhấp để đóng; chỉ tương tác khi sidebar mở */}
+      {/* Backdrop — nhấp để đóng; chỉ phủ VÙNG DƯỚI header (phiên #46):
+       * thanh bar trên cùng (chứa logo bật/tắt) không bị che, luôn bấm được */}
       <div
         aria-hidden="true"
         onClick={() => setOpen(false)}
         className={cn(
-          "fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px] transition-opacity duration-300",
+          "fixed bottom-0 left-0 right-0 top-[var(--header-h,4.25rem)] z-40 bg-black/50 backdrop-blur-[2px] transition-opacity duration-300",
           open ? "opacity-100" : "pointer-events-none opacity-0"
         )}
       />
@@ -138,30 +146,21 @@ export function AppSidebar() {
         aria-label="Thanh điều hướng module"
         inert={!open}
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex w-72 max-w-[85vw] flex-col border-r border-border/60 bg-background shadow-xl transition-transform duration-300 ease-out",
+          "fixed bottom-0 left-0 top-[var(--header-h,4.25rem)] z-50 flex w-72 max-w-[85vw] flex-col rounded-tr-xl border-r border-t border-border/60 bg-background shadow-xl transition-transform duration-300 ease-out",
           open ? "translate-x-0" : "-translate-x-full"
         )}
       >
-        {/* Đầu sidebar: logo + tên + nút đóng */}
-        <div className="flex items-center gap-3 border-b border-border/60 px-4 py-4">
-          <div
-            className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground"
-            aria-hidden="true"
-          >
-            <TrendingUp className="size-5" />
-          </div>
-          <div className="min-w-0 flex-1 leading-tight">
-            <p className="text-base font-semibold tracking-tight">The Trader</p>
-            <p className="truncate text-xs text-muted-foreground">
-              Multi-Agent Trading · VNDIRECT
-            </p>
-          </div>
+        {/* Đầu sidebar — nhãn + đóng nhanh (logo thật nằm trên header, luôn thấy) */}
+        <div className="flex items-center justify-between gap-2 border-b border-border/60 px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Module
+          </p>
           <Button
             variant="ghost"
             size="icon"
             aria-label="Đóng thanh điều hướng"
             onClick={() => setOpen(false)}
-            className="size-9 shrink-0"
+            className="size-8 shrink-0"
           >
             <X className="size-4" />
           </Button>
@@ -242,7 +241,7 @@ export function AppSidebar() {
               <span className="size-2 rounded-sm bg-flat" aria-hidden="true" /> đứng giá
             </span>
           </p>
-          <p>7 module · nhấp logo “The Trader” để mở/đóng</p>
+          <p>7 module · nhấp logo “The Trader” trên cùng để mở/đóng</p>
         </div>
       </aside>
     </>

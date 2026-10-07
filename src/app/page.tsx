@@ -23,6 +23,8 @@ import { useUiStore, type Workspace } from "@/lib/store";
  *
  * Phiên #45 — điều hướng module chuyển từ thanh tab ngang sang SIDEBAR TRÁI
  * overlay (AppSidebar), mở/đóng bằng nút logo "The Trader" trên Header.
+ * Phiên #46 — sidebar neo BÊN DƯỚI thanh header (không che bar trên cùng),
+ * logo tự thân là nút bật/tắt duy nhất.
  *
  * WebSocket realtime (market-engine) gắn MỘT lần ở cấp trang — đặt ngoài
  * workspace component nên đổi module KHÔNG đứt kết nối realtime.
