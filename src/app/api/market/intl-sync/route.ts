@@ -29,8 +29,20 @@ export const maxDuration = 300;
 const COOLDOWN_MS = 30_000;
 let lastSyncAt = 0;
 
+/** F-441-01 (#44) — mutex in-process: 1 sync chạy tại 1 thời điểm.
+ * Trước đây cooldown tính từ lúc BẮT ĐẦU request nên caller cách 60s vẫn lọt
+ * qua trong khi lần cũ chưa xong (route ~2-3 phút) → nhiều sync chồng lấn
+ * cùng đấm Yahoo 429. Kể từ #44: request mới khi sync đang chạy → 429 ngay. */
+let inFlight = false;
+
 export async function POST(req: NextRequest) {
   const now = Date.now();
+  if (inFlight) {
+    return NextResponse.json(
+      { error: "Đồng bộ EOD quốc tế đang chạy (mutex F-441-01) — vui lòng đợi hoàn tất." },
+      { status: 429, headers: { "Retry-After": "60" } }
+    );
+  }
   const sinceLast = now - lastSyncAt;
   if (sinceLast < COOLDOWN_MS) {
     const retryAfterSeconds = Math.ceil((COOLDOWN_MS - sinceLast) / 1000);
@@ -73,8 +85,11 @@ export async function POST(req: NextRequest) {
   }
 
   lastSyncAt = now;
+  inFlight = true;
   try {
     const outcome = await syncIntlEod({ range });
+    // Cooldown tính từ lúc HOÀN THÀNH (F-441-01) — không phải lúc bắt đầu
+    lastSyncAt = Date.now();
     // Universe US/HK chưa seed (0 mã ok + 0 mã lỗi) → kèm note hướng dẫn
     // (outcome vẫn ok=true — hợp lệ, không phải lỗi hệ thống)
     const note =
@@ -85,12 +100,14 @@ export async function POST(req: NextRequest) {
       status: outcome.ok ? 200 : 502,
     });
   } catch (err) {
-    // Cho phép retry ngay khi lỗi (không giữ cooldown vô ích)
+    // Lỗi hệ thống (throw) — cho phép retry ngay, không giữ cooldown vô ích
     lastSyncAt = 0;
     console.error("[api/market/intl-sync] POST failed:", err);
     return NextResponse.json(
       { error: "Đồng bộ EOD quốc tế thất bại — xem log server để biết chi tiết." },
       { status: 500 }
     );
+  } finally {
+    inFlight = false;
   }
 }

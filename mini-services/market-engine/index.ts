@@ -160,12 +160,16 @@ function log(scope: string, msg: string) {
   console.log(`[${new Date().toISOString()}] [${scope}] ${msg}`);
 }
 
-async function postJson(path: string, body?: unknown): Promise<Record<string, unknown>> {
+async function postJson(
+  path: string,
+  body?: unknown,
+  opts?: { timeoutMs?: number }
+): Promise<Record<string, unknown>> {
   const res = await fetch(`${APP_URL}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(opts?.timeoutMs ?? 120_000),
   });
   const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
@@ -231,16 +235,33 @@ async function syncEodAndBroadcast(): Promise<void> {
   }
 }
 
-/** B12 — sync EOD quốc tế Yahoo (06:15 ICT hằng ngày): broadcast "intl". */
+/** B12 — sync EOD quốc tế Yahoo (06:15 ICT hằng ngày): broadcast "intl".
+ *
+ * F-441-01 (#44): lần đầu lỗi → KHÔNG retry mỗi phút suốt ngày (tự đấm Yahoo
+ * 429, giữ nguồn chết vĩnh viễn). Backoff nhân đôi 30p → 1h → 2h → 4h (cap)
+ * kể từ lần thử lỗi gần nhất; thành công → reset streak + đánh dấu ngày.
+ * Timeout POST riêng 280s < maxDuration route 300s (sync 14 mã + backoff
+ * retry 429 có thể vượt 120s mặc định — cắt sớm đồng nghĩa coi là fail).
+ */
+const INTL_SYNC_POST_TIMEOUT_MS = 280_000;
+const INTL_FAIL_BACKOFF_BASE_MS = 30 * 60_000;
+const INTL_FAIL_BACKOFF_CAP_MS = 4 * 60 * 60_000;
+let intlFailStreak = 0;
+let lastIntlFailAt: number | null = null;
+
 async function syncIntlAndBroadcast(): Promise<void> {
   try {
     // range auto: lần đầu (chưa có bar) → 1y backfill; sau đó 5d hằng ngày
-    const data = await postJson("/api/market/intl-sync", { range: "auto" });
+    const data = await postJson("/api/market/intl-sync", { range: "auto" }, {
+      timeoutMs: INTL_SYNC_POST_TIMEOUT_MS,
+    });
     stats.lastIntlSyncAt = new Date().toISOString();
     stats.intlSyncRuns++;
     stats.lastIntlSyncError = null;
     const ict = ictNow();
     stats.lastIntlSyncDate = ict.date;
+    intlFailStreak = 0; // thành công — reset backoff
+    lastIntlFailAt = null;
     io.emit("intl", data);
     const okCount = Array.isArray(data.symbolsOk) ? (data.symbolsOk as unknown[]).length : "?";
     log(
@@ -249,8 +270,17 @@ async function syncIntlAndBroadcast(): Promise<void> {
     );
   } catch (err) {
     stats.lastIntlSyncError = err instanceof Error ? err.message : String(err);
-    // Yahoo 429 tạm thời là bình thường — job 06:15 ICT ngày mai tự phục hồi
-    log("intl", `bỏ qua: ${stats.lastIntlSyncError}`);
+    intlFailStreak++;
+    lastIntlFailAt = Date.now();
+    // Yahoo 429 tạm thời là bình thường — backoff (F-441-01), không đấm mỗi phút
+    const nextRetryMs = Math.min(
+      INTL_FAIL_BACKOFF_CAP_MS,
+      INTL_FAIL_BACKOFF_BASE_MS * 2 ** (intlFailStreak - 1)
+    );
+    log(
+      "intl",
+      `bỏ qua (lần sai liên tiếp thứ ${intlFailStreak}): ${stats.lastIntlSyncError} — thử lại sau ${Math.round(nextRetryMs / 60_000)} phút`
+    );
   }
 }
 
@@ -294,11 +324,23 @@ function eodSyncDue(): boolean {
   return ict.minutes >= EOD_SYNC_MINUTES && stats.lastEodSyncDate !== ict.date;
 }
 
-/** B12 — đã qua 06:15 ICT hôm nay và chưa sync quốc tế ngày này → sync. */
+/** B12 — đã qua 06:15 ICT hôm nay và chưa sync ngày này → sync.
+ * F-441-01: lần gần nhất LỖI thì phải đủ backoff nhân đôi (30p → cap 4h)
+ * mới được thử lại — chống retry mỗi phút suốt ngày (đấm Yahoo 429). */
 function intlSyncDue(): boolean {
   if (INTL_SYNC_DISABLED) return false;
   const ict = ictNow();
-  return ict.minutes >= INTL_SYNC_MINUTES && stats.lastIntlSyncDate !== ict.date;
+  if (ict.minutes < INTL_SYNC_MINUTES || stats.lastIntlSyncDate === ict.date) {
+    return false;
+  }
+  if (lastIntlFailAt != null) {
+    const backoffMs = Math.min(
+      INTL_FAIL_BACKOFF_CAP_MS,
+      INTL_FAIL_BACKOFF_BASE_MS * 2 ** Math.max(0, intlFailStreak - 1)
+    );
+    if (Date.now() - lastIntlFailAt < backoffMs) return false;
+  }
+  return true;
 }
 
 /** B14 — Chủ nhật, đã qua 04:00 ICT, chưa chạy tuần này → re-probe. */
