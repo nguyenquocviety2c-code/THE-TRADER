@@ -65,17 +65,30 @@ function parseHhMm(s: string): number | null {
 const EOD_SYNC_MINUTES = parseHhMm(EOD_SYNC_AT) ?? parseHhMm("15:45")!;
 const INTL_SYNC_MINUTES = parseHhMm(INTL_SYNC_AT) ?? parseHhMm("06:15")!;
 
-/** "SUN:HH:MM" → { dow: 0..6 (0=CN), minutes } — lịch hằng tuần của watcher. */
+/** "SUN:HH:MM" (tên ngày 3 chữ) hoặc "0:HH:MM" (0=CN..6=T7) → { dow, minutes } — lịch hằng tuần. */
+const DOW_NAMES: Record<string, number> = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
 function parseWeekly(s: string): { dow: number; minutes: number } | null {
-  const m = /^(\d):(\d{1,2}):(\d{2})$/.exec(s.trim());
-  if (!m) return null;
-  const dow = Number(m[1]);
-  const h = Number(m[2]);
-  const min = Number(m[3]);
+  const m = /^(SUN|MON|TUE|WED|THU|FRI|SAT):(\d{1,2}):(\d{2})$/i.exec(s.trim());
+  if (m) {
+    const h = Number(m[2]);
+    const min = Number(m[3]);
+    if (h > 23 || min > 59) return null;
+    return { dow: DOW_NAMES[m[1].toUpperCase()]!, minutes: h * 60 + min };
+  }
+  // Hỗ trợ cũ "D:HH:MM" (0=CN..6=T7) cho tương thích env đã set theo dạng số.
+  const d = /^(\d):(\d{1,2}):(\d{2})$/.exec(s.trim());
+  if (!d) return null;
+  const dow = Number(d[1]);
+  const h = Number(d[2]);
+  const min = Number(d[3]);
   if (dow > 6 || h > 23 || min > 59) return null;
   return { dow, minutes: h * 60 + min };
 }
-const REPROBE_SCHEDULE = parseWeekly(REPROBE_AT) ?? parseWeekly("SUN:04:00")!;
+// Fail-safe 3 lớp: env → mặc định "SUN:04:00" → hằng cứng — không bao giờ null
+// (bug #42: trước đây regex cũ không match "SUN:04:00" → null! → TypeError mỗi
+// phút trong reprobeDue → uncaught exception giết event loop của engine).
+const REPROBE_SCHEDULE: { dow: number; minutes: number } =
+  parseWeekly(REPROBE_AT) ?? parseWeekly("SUN:04:00") ?? { dow: 0, minutes: 4 * 60 };
 
 function ictNow(): { date: string; minutes: number; dow: number } {
   const now = new Date(Date.now() + 7 * 3_600_000); // ICT = UTC+7
@@ -290,7 +303,7 @@ function intlSyncDue(): boolean {
 
 /** B14 — Chủ nhật, đã qua 04:00 ICT, chưa chạy tuần này → re-probe. */
 function reprobeDue(): boolean {
-  if (REPROBE_DISABLED) return false;
+  if (REPROBE_DISABLED || !REPROBE_SCHEDULE) return false;
   const ict = ictNow();
   return (
     ict.dow === REPROBE_SCHEDULE.dow &&
@@ -317,10 +330,17 @@ http.listen(PORT, () => {
   if (intlSyncDue()) void syncIntlAndBroadcast();
   setInterval(enqueueTick, TICK_MS);
   setInterval(ingestNewsAndBroadcast, NEWS_MS);
+  // Try/catch quanh cả khối due-check: một due-check hỏng (bug cấu hình,
+  // null schedule…) không được phép giết event loop của cả engine — bug #42
+  // đã làm engine chết lặng ~2h vì TypeError không được bắt trong callback này.
   setInterval(() => {
-    if (eodSyncDue()) void syncEodAndBroadcast();
-    if (intlSyncDue()) void syncIntlAndBroadcast();
-    if (reprobeDue()) void reprobeAndBroadcast();
+    try {
+      if (eodSyncDue()) void syncEodAndBroadcast();
+      if (intlSyncDue()) void syncIntlAndBroadcast();
+      if (reprobeDue()) void reprobeAndBroadcast();
+    } catch (err) {
+      log("sched", `LỖI scheduler 60s: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }, 60_000);
   if (AGENT_CYCLE_MINUTES > 0) {
     setInterval(runAgentCycleAndBroadcast, AGENT_CYCLE_MINUTES * 60_000);

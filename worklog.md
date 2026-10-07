@@ -1184,3 +1184,23 @@ Stage Summary:
 - MARKET_EXPANSION_BLUEPRINT v1.1 triển khai 15/15 bước: universe 30 → 90 mã (215.327 bar thật VN), 7/15 ô vận hành thật + 6 ô hạ tầng 0-sản phẩm + 2 ô bond chờ nguồn + quốc tế (chờ Yahoo 429 tạm) + cơ bản pending-egress; Bayes multi-segment 6 dòng + composite trọng số; MLP ensemble cử tri thứ 6 (chống đếm kép); cổng đồng thuận 80% shadow-mode 3/10 (auto-enable sau 10 — user duyệt trước #38); scorecard + ma trận độ phủ tab Đội Agent; ngân sách chu kỳ 101,6s ≤ 180s
 - Bài học: (1) shorthand `toUnixSec,` khi biến tên khác → ReferenceError bị try/catch nuốt thành "probe trống" — luôn log lỗi probe; (2) xoá helper chung phải rg toàn bộ usage (stdOf còn runBacktest dùng); (3) shell DATABASE_URL=file: cũ vẫn độc — mọi tiến trình nền phải env -u DATABASE_URL; (4) Yahoo 429 theo IP kéo dài hàng giờ — thiết kế retry + job hằng ngày + hiển thị trung thực là đúng
 - Còn treo (tự sáng): US/HK bar chờ Yahoo hồi (job 06:15 ICT); INTERNATIONAL segment + ô US/HK ma trận tự sáng khi có bar; consensus.enforce tự bật sau đủ 10 chu kỳ shadow; finfo tự sáng khi deploy ngoài sandbox
+
+---
+Task ID: 42-ENGINE-FIX
+Agent: main-orchestrator (Z.ai Code)
+Task: User hỏi "kiểm tra phiên bản hiện tại có phải mới nhất hay đã bị sandbox reset" → xác minh toàn trạng thái + phát hiện và vá market-engine chết lặng ~2h (bug #42 parseWeekly).
+
+Work Log:
+- Xác minh phiên bản: KHÔNG reset — git log có đủ 664b36a (blueprint v1.1 vá 37-REVIEW) + 1a2a192 (#38 triển khai 15/15 bước); worklog đủ 37-PATCH → 38-IMPL → 39-UI → 40-FUND/40-INTL → 41-COV/41-DOCS; working tree clean, đồng bộ origin/main; blueprint 348 dòng header v1.1
+- Phát hiện 1: dev-engine.log dừng ở 09:49:43 dù tick 10s/news 15 phút phải chạy liên tục → engine chết lặng ~1h46m (giá realtime đóng băng)
+- Chẩn đoán gốc: parseWeekly regex /^(\d):(\d{1,2}):(\d{2})$/ KHÔNG match "SUN:04:00" (chữ SUN, regex expecting số) → fallback parseWeekly("SUN:04:00")! cũng trả null → REPROBE_SCHEDULE = null! → reprobeDue() ném TypeError mỗi phút trong callback setInterval 60s → uncaught exception làm engine ngừng mọi timer (tick/news/eod/intl/reprobe) từ ~09:50
+- Vá 3 chỗ trong mini-services/market-engine/index.ts: (1) parseWeekly viết lại — nhận cả "SUN:HH:MM" tên ngày (SUN/MON/.../SAT case-insensitive qua DOW_NAMES) lẫn dạng số cũ "0:HH:MM"; (2) REPROBE_SCHEDULE fail-safe 3 lớp env → "SUN:04:00" → hằng cứng {dow:0, minutes:240} — type bỏ nullable; reprobeDue() thêm guard !REPROBE_SCHEDULE; (3) bọc try/catch quanh cả khối due-check trong setInterval 60s + log("sched") — một due-check hỏng không được giết event loop của engine
+- Phát hiện 2 (tái hiện lúc restart): engine restart bằng "setsid nohup ... &" (không subshell) bị sandbox environment reaper giết ngầm ~2-4 phút sau tool call, không lỗi trong log — trùng khớp bài học worklog dòng 593 (Gen-1) → restart đúng pattern double-fork (env -u DATABASE_URL setsid nohup bun run dev ... &) → PID 15846 PPID=1 sống ổn qua nhiều tool call
+- Verify sau vá: boot 11:43:18 · news +0/+6 tin live · [eod] đồng bộ EOD thật xong 11:44:00 (75 mã · 600 bar · phiên cuối 2026-10-07) · scheduler 60s tick sạch (intl bỏ qua timeout Yahoo — thiết kế im lặng, job 06:15 ICT tự phục hồi) · 0 TypeError từ 11:43 · /api/system/status eod-history real ageMinutes=1 · /api/coverage HOSE-STOCK 30 mã/90.815 bar lastBarDate hôm nay · bun run lint sạch
+- Ghi chú môi trường trong phiên: Next dev server từng down 08:45–09:04 UTC (sandbox maintenance) → engine log "[eod] Unable to connect" mỗi phút, tự lành khi app lên lại 09:06 — hành vi retry đúng thiết kế; Yahoo vẫn chặn IP sandbox (429/502/timeout luân phiên) — hiển thị trung thực theo đúng nguyên tắc "không bịa dữ liệu"
+
+Stage Summary:
+- Trả lời câu hỏi user: phiên bản HIỆN TẠI LÀ MỚI NHẤT (toàn bộ #37–#41 nguyên vẹn, đã push origin/main) — sandbox KHÔNG bị reset
+- Vá bug #42 (P0 vận hành): regex parseWeekly sai format mặc định "SUN:04:00" → REPROBE_SCHEDULE null → TypeError giết event loop engine ~2h. 3 lớp vá: regex đúng + fail-safe hằng + try/catch scheduler. Weekly re-probe Chủ nhật 04:00 ICT (B14) giờ thực sự chạy được
+- Bài học mới xác nhận lại: (1) assertion "!" trên hàm parse fallback cũng phải được test bằng input mặc định thật — fallback sai thì null! vẫn null; (2) uncaught exception trong timer callback của Bun làm chết event loop mà tiến trình vẫn "sống" (ps thấy nhưng không làm gì) — luôn try/catch callback scheduler; (3) restart mini-service PHẢI dùng double-fork subshell pattern (worklog 593) — "setsid nohup &" trần trụi bị reaper giết
+- Engine hiện hoạt động đầy đủ: tick 10s · news 15 phút · eod-sync 15:45 ICT · intl-sync 06:15 ICT (chờ Yahoo hồi) · reprobe CN 04:00 ICT · hot-reload bun --hot
