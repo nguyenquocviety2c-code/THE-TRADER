@@ -19,6 +19,13 @@
  *        lần lúc boot để môi trường mới tự có dữ liệu thật sớm).
  *      - INTL_SYNC_AT (mặc định 06:15 ICT hằng ngày — B12, sau đóng cửa Mỹ):
  *        POST /api/market/intl-sync (range auto: lần đầu 1y, sau đó 5d).
+ *        F-441-01 (#44): backoff nhân đôi 30p→4h sau mỗi lần sync LỖI thật.
+ *        F-481-01 (#48): guard in-flight engine-side — POST intl kéo dài 2-3p
+ *        nên due-check 60s từng bắn POST chồng mỗi phút; 429 mutex của chính
+ *        mình bị đếm là "lần sai" → 1 sự cố Yahoo thật thổi backoff 30→120p.
+ *        Kể từ #48: đang chạy → KHÔNG bắn thêm; 429 (mutex/cooldown) → KHÔNG
+ *        đếm streak, chỉ đợi route rảnh (~90s) rồi thử lại. Guard tương tự áp
+ *        cho eod-sync (route không có mutex) và reprobe.
  *      - REPROBE_AT (mặc định Chủ nhật 04:00 ICT hằng tuần — B14/T1):
  *        POST /api/market/reprobe — probe dchart ứng viên các ô ⚪/🟡; mã
  *        đầu tiên CÓ dữ liệu → tự tạo Instrument + backfill → ô tự sáng.
@@ -160,6 +167,18 @@ function log(scope: string, msg: string) {
   console.log(`[${new Date().toISOString()}] [${scope}] ${msg}`);
 }
 
+/** F-481-01 — lỗi HTTP giữ status để caller phân biệt 429 (route bận:
+ * mutex/cooldown — không phải lỗi nguồn dữ liệu) với 502/500 thật. */
+class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "HttpError";
+  }
+}
+
 async function postJson(
   path: string,
   body?: unknown,
@@ -174,7 +193,7 @@ async function postJson(
   const parsed = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (!res.ok) {
     const error = typeof parsed.error === "string" ? parsed.error : `HTTP ${res.status}`;
-    throw new Error(error);
+    throw new HttpError(error, res.status);
   }
   return parsed;
 }
@@ -215,8 +234,13 @@ async function ingestNewsAndBroadcast(): Promise<void> {
   }
 }
 
-/** Đồng bộ EOD thật: kéo bar dchart → neo Quote → broadcast "eod". */
+/** Đồng bộ EOD thật: kéo bar dchart → neo Quote → broadcast "eod".
+ * F-481-01: guard in-flight — eod-sync route KHÔNG có mutex, từng có 2 sync
+ * chồng lấn (dev.log 1960/1961); guard engine-side chặn bắn thêm khi cũ
+ * chưa xong (eodSyncDue() đọc cờ này). */
+let eodSyncInFlight = false;
 async function syncEodAndBroadcast(): Promise<void> {
+  eodSyncInFlight = true;
   try {
     const data = await postJson("/api/market/eod-sync", { days: 10 });
     stats.lastEodSyncAt = new Date().toISOString();
@@ -232,6 +256,8 @@ async function syncEodAndBroadcast(): Promise<void> {
   } catch (err) {
     stats.lastEodSyncError = err instanceof Error ? err.message : String(err);
     log("eod", `LỖI: ${stats.lastEodSyncError}`);
+  } finally {
+    eodSyncInFlight = false;
   }
 }
 
@@ -248,8 +274,13 @@ const INTL_FAIL_BACKOFF_BASE_MS = 30 * 60_000;
 const INTL_FAIL_BACKOFF_CAP_MS = 4 * 60 * 60_000;
 let intlFailStreak = 0;
 let lastIntlFailAt: number | null = null;
+/** F-481-01 (#48): POST intl đang chạy (2-3 phút) → due-check không bắn
+ * thêm; 429 từ route (mutex/cooldown) → mở cửa sổ đợi ~90s, KHÔNG đếm streak. */
+let intlSyncInFlight = false;
+let intlBusyUntil = 0;
 
 async function syncIntlAndBroadcast(): Promise<void> {
+  intlSyncInFlight = true;
   try {
     // range auto: lần đầu (chưa có bar) → 1y backfill; sau đó 5d hằng ngày
     const data = await postJson("/api/market/intl-sync", { range: "auto" }, {
@@ -269,6 +300,16 @@ async function syncIntlAndBroadcast(): Promise<void> {
       `sync EOD quốc tế (Yahoo) xong: ${okCount} mã · ${data.barsUpserted ?? 0} bar${data.nullSkipped != null ? ` · ${data.nullSkipped} null-skip` : ""}`
     );
   } catch (err) {
+    // F-481-01: 429 = route từ chối vì sync TRƯỚC vẫn chạy (mutex F-441-01)
+    // hoặc vừa xong cách đây <30s (cooldown) — không phải lỗi Yahoo. Trước đây
+    // từng bị đếm là "lần sai liên tiếp" (mỗi tick 60s trong lúc sync 2-3p lại
+    // bắn POST chồng → mutex 429 ×2-3 + 502 thật → streak 3-4 → backoff nhảy
+    // 120-240p chỉ sau MỘT sự cố). Giờ: chỉ đợi route rảnh rồi thử lại sạch.
+    if (err instanceof HttpError && err.status === 429) {
+      intlBusyUntil = Date.now() + 90_000;
+      log("intl", `bỏ qua (route đang bận — sync trước vẫn chạy): ${err.message}`);
+      return;
+    }
     stats.lastIntlSyncError = err instanceof Error ? err.message : String(err);
     intlFailStreak++;
     lastIntlFailAt = Date.now();
@@ -281,11 +322,16 @@ async function syncIntlAndBroadcast(): Promise<void> {
       "intl",
       `bỏ qua (lần sai liên tiếp thứ ${intlFailStreak}): ${stats.lastIntlSyncError} — thử lại sau ${Math.round(nextRetryMs / 60_000)} phút`
     );
+  } finally {
+    intlSyncInFlight = false;
   }
 }
 
-/** B14 — watcher re-probe ô ⚪/🟡 (Chủ nhật 04:00 ICT): broadcast "reprobe". */
+/** B14 — watcher re-probe ô ⚪/🟡 (Chủ nhật 04:00 ICT): broadcast "reprobe".
+ * F-481-01: guard in-flight (route có cooldown 60s nhưng không mutex). */
+let reprobeInFlight = false;
 async function reprobeAndBroadcast(): Promise<void> {
+  reprobeInFlight = true;
   try {
     const data = await postJson("/api/market/reprobe", {});
     stats.lastReprobeAt = new Date().toISOString();
@@ -302,6 +348,8 @@ async function reprobeAndBroadcast(): Promise<void> {
   } catch (err) {
     stats.lastReprobeError = err instanceof Error ? err.message : String(err);
     log("reprobe", `bỏ qua: ${stats.lastReprobeError}`);
+  } finally {
+    reprobeInFlight = false;
   }
 }
 
@@ -317,9 +365,11 @@ async function runAgentCycleAndBroadcast(): Promise<void> {
   }
 }
 
-/** Kiểm tra hằng phút: đã qua 15:45 ICT hôm nay và chưa sync ngày này → sync. */
+/** Kiểm tra hằng phút: đã qua 15:45 ICT hôm nay và chưa sync ngày này → sync.
+ * F-481-01: sync cũ chưa xong (~40s) → không bắn thêm. */
 function eodSyncDue(): boolean {
   if (EOD_SYNC_DISABLED) return false;
+  if (eodSyncInFlight) return false;
   const ict = ictNow();
   return ict.minutes >= EOD_SYNC_MINUTES && stats.lastEodSyncDate !== ict.date;
 }
@@ -329,6 +379,10 @@ function eodSyncDue(): boolean {
  * mới được thử lại — chống retry mỗi phút suốt ngày (đấm Yahoo 429). */
 function intlSyncDue(): boolean {
   if (INTL_SYNC_DISABLED) return false;
+  // F-481-01: POST cũ 2-3 phút chưa về → KHÔNG bắn thêm (từng khiến mỗi tick
+  // 60s lại bắn POST chồng, mutex 429 bị đếm là "lần sai" → backoff thổi lên).
+  if (intlSyncInFlight) return false;
+  if (Date.now() < intlBusyUntil) return false;
   const ict = ictNow();
   if (ict.minutes < INTL_SYNC_MINUTES || stats.lastIntlSyncDate === ict.date) {
     return false;
@@ -343,9 +397,11 @@ function intlSyncDue(): boolean {
   return true;
 }
 
-/** B14 — Chủ nhật, đã qua 04:00 ICT, chưa chạy tuần này → re-probe. */
+/** B14 — Chủ nhật, đã qua 04:00 ICT, chưa chạy tuần này → re-probe.
+ * F-481-01: probe cũ chưa xong → không bắn thêm. */
 function reprobeDue(): boolean {
   if (REPROBE_DISABLED || !REPROBE_SCHEDULE) return false;
+  if (reprobeInFlight) return false;
   const ict = ictNow();
   return (
     ict.dow === REPROBE_SCHEDULE.dow &&
