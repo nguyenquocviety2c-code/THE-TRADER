@@ -1,9 +1,10 @@
 # TECHNICAL BLUEPRINT — MỞ RỘNG ĐỘ PHỦ THỊ TRƯỜNG 15/15 + QUỐC TẾ + DỮ LIỆU CƠ BẢN
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/MARKET_EXPANSION_BLUEPRINT.md` · **Version:** 1.0 · **Updated:** 2026-10-07
+> **Document:** `docs/MARKET_EXPANSION_BLUEPRINT.md` · **Version:** 1.1 (đã vá sau review 37-REVIEW: 3 lỗi P0 + 6 P1) · **Updated:** 2026-10-07
 > **Status:** **ĐÃ CHỐT TRIỂN KHAI** — dựa trên 5 câu trả lời của user (phiên #37, xem §0)
 > **Cross-refs:** [RESEARCH_COUNCIL_PLAN.md](./RESEARCH_COUNCIL_PLAN.md) (§9 — 5 câu hỏi mở, **đã chốt**) · [DATA_SOURCES.md](./DATA_SOURCES.md) · [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) · [DB_SCHEMA.md](./DB_SCHEMA.md)
+> **Changelog v1.1 (phiên #37 — review 37-REVIEW):** B7 — **REPLACE** bằng chứng quant `mlp-forecast` cũ bằng phiếu cử tri (chống đếm kép, test T7.5) · ensemble có deadband FLAT 0,05 + định nghĩa chuẩn hoá linreg · cổng đồng thuận dùng khoảng đóng + epsilon + **shadow-mode 10 chu kỳ** trước enforcement + gate bind theo assessment sinh ra tín hiệu · B12 — Yahoo null/splits/adjclose · B14 — watcher re-probe tuần (hoá lời hứa T1) · §3.4 — trọng số composite segment INDEX + tái chuẩn hoá · vá số học B4 + backup DB B1 + xoá phương án `unitScale` + typos encoding.
 
 ---
 
@@ -28,7 +29,7 @@
 
 Một ô (sàn × loại tài sản) đạt trạng thái vận hành khi và chỉ khi đủ cả 3:
 
-1. **T1 — Dữ liệu thật tự động:** Instrument của ô được sync bar EOD + quote tự động theo lịch (dchart cho VN, Yahoo cho quốc tế); không có sản phẩm → ô ghi "0 sản phẩm niêm yết" và watcher tự nạp khi mã đầu tiên xuất hiện.
+1. **T1 — Dữ liệu thật tự động:** Instrument của ô được sync bar EOD + quote tự động theo lịch (dchart cho VN, Yahoo cho quốc tế); không có sản phẩm → ô ghi "0 sản phẩm niêm yết" và **watcher re-probe tuần** (job market-engine, Bước 14 — Chủ nhật 04:00 ICT re-probe danh sách ứng viên các ô ⚪/🟡, probe-trước-khi-tạo như B3) tự nạp khi mã đầu tiên xuất hiện dữ liệu.
 2. **T2 — Tham gia chu kỳ 23 agents:** mã trong ô vào rổ/bằng chứng của Bộ tổng hợp Bayes (theo phân đoạn §3.4) và hiển thị trong context prompt của các agent nghiên cứu.
 3. **T3 — Hiển thị & đo lường:** ô hiện trong **Ma trận độ phủ** (tab Đội Agent) kèm số instrument · số bar · phiên cuối · chế độ nguồn (real / 0-sản phẩm / chờ-nguồn).
 
@@ -61,7 +62,7 @@ Một ô (sàn × loại tài sản) đạt trạng thái vận hành khi và ch
 
 ### 1.3. Câu trả lời câu hỏi "bao nhiêu loại thị trường" (cập nhật sau triển khai)
 
-Sau khi blueprint hoàn tất, hệ thống bao hàm: **3 sàn VN niêm yết (HOSE/HNX/UPCOM) × 5 loại tài sản + 2 sàn quốc tế (US/HK) + trái phiếu (chờ nguồn) + dữ liệu cơ bản** — mở từ "chuyên gia 1 tổ hợp" (phiên #36) lên **8 tổ hợp nội địa vận hành thật + quốc tế + cơ bản**, với 15/15 ô hạ tầng đầy đủ.
+Sau khi blueprint hoàn tất, hệ thống bao hàm: **3 sàn VN niêm yết (HOSE/HNX/UPCOM) × 5 loại tài sản + 2 sàn quốc tế (US/HK) + trái phiếu (chờ nguồn) + dữ liệu cơ bản** — mở từ "chuyên gia 1 tổ hợp" (phiên #36) lên **7 tổ hợp nội địa vận hành thật (§1.2: 1 đang chạy + 6 nạp mới) + quốc tế + cơ bản**, với 15/15 ô hạ tầng đầy đủ.
 
 ---
 
@@ -113,8 +114,8 @@ Kèm theo: **cận giá hợp lệ theo loại** (INDEX: 100..10.000.000 điểm
 |---|---|---|
 | `enum Market` | **+ `US`, `HK`** | sàn quốc tế (Postgres enum thêm giá trị = an toàn) |
 | `Instrument` | **+ `currency String? @default("VND")`** | USD/HKD cho quốc tế; display format theo này |
-| `Instrument` | + `unitScale Int @default(1000)` (tuỳ chọn) | alternative: hard-code theo (market,type) trong `UnitSpec` — chọn cách bảng tra §3.2, **không thêm cột** nếu bảng tra đủ |
-| **model `FinancialFundamental`** (mới) | `instrumentId · period (Q1–Q4/FY) · year · quarter? · revenue BigInt? · netProfit BigInt? · eps Float? · bvps Float? · roe Float? · roa Float? · pe Float? · pb Float? · source · mode (real/pending) · @@unique([instrumentId, period, year])` | dữ liệu cơ bản — Bước 11 |
+| `Instrument` | **KHÔNG thêm cột đơn vị** — đã chốt bảng tra §3.2 (`UnitSpec` theo (market,type)) là single source of truth | tránh 2 nguồn sự thật lệch nhau khi thêm loại/sàn mới |
+| **model `FinancialFundamental`** (mới) | `instrumentId · period (Q1–Q4/FY) · year · revenue BigInt? (VND nguyên) · netProfit BigInt? (VND nguyên) · eps Float? (VND) · bvps Float? (VND) · roe Float? · roa Float? · pe Float? · pb Float? · source · mode (real/pending) · @@unique([instrumentId, period, year])` — bỏ cột `quarter?` dư thừa (kỳ đã nằm trong `period`) | dữ liệu cơ bản — Bước 11 |
 | `BanditEvent` | **+ `confidence Float?`** | lưu độ tự tin phiếu khi cast để tính Brier (Bước 8) |
 | `MarketAssessment.detail` (JSON, không migration) | + `segments[]` · + `consensus {ratio, gate, tally[]}` | phân đoạn thị trường (Bước 5) + cổng đồng thuận (Bước 9) |
 
@@ -129,7 +130,7 @@ Hiện tại: một rổ duy nhất top-10 thanh khoản HOSE → một posterio
 | `VN-UPCOM-STOCK` | top-3 ADTV UPCOM | Holt · RSI | riêng |
 | `VN-ETF` | toàn bộ ETF active (≤10) | breadth ETF · Holt | riêng |
 | `VN-INDEX` | VNINDEX + VN30 (+ HNX, UPCOM) | động lượng index · RSI index | riêng |
-| `VN-COMPOSITE` | trọng số ADTV các segment trên | — | **posterior tổng = trung bình trọng số ADTV** (dùng cho bandit settle + narrative — giữ tương thích chuỗi lịch sử) |
+| `VN-COMPOSITE` | — (hợp các segment trên) | — | **posterior tổng = trung bình trọng số**: segment có ADTV VND đo được (HOSE/HNX/UPCOM-STOCK · ETF) theo ADTV thật; segment INDEX **không có ADTV VND** → trọng số cố định **0,05/index** (không đo được thì cố định khiêm tốn, không bịa); sau khi lấy trung bình **tái chuẩn hoá pUp+pDown+pFlat = 1** (dùng cho bandit settle + narrative — giữ tương thích chuỗi lịch sử) |
 | `INTERNATIONAL` | ^GSPC · ^IXIC · ^HSI + 8 mã US + 3 mã HK | động lượng index quốc tế (Bước 13) | riêng (tham khảo, không vào composite VN) |
 
 - Engine `synthesizeMarketAssessment()` **chạy lại theo từng segment** (input = bằng chứng segment đó) → `detail.segments[]`; chairman prompt (Đợt E) nhận khối "ĐA THỊ TRƯỜNG" gọn (1 dòng/segment).
@@ -143,14 +144,19 @@ Hiện tại: một rổ duy nhất top-10 thanh khoản HOSE → một posterio
 
 | consensusRatio | Cổng | Hệ quả thực thi |
 |---|---|---|
-| ≥ 0,80 | **ĐỒNG THUẬN** | Tín hiệu được EXECUTE nếu posterior đạt stance (margin ≥ 0,12 như hiện tại) |
-| 0,50 – 0,799 | **ĐA SỐ YẾU** | Tín hiệu **ép HOLD** + narrative giải thích "số đông X% nhưng dưới ngưỡng đồng thuận 80%" |
-| < 0,50 | **KHÔNG ĐỒNG THUẬN** | HOLD |
+| **[0,80 · 1,00]** | **ĐỒNG THUẬN** | Tín hiệu được EXECUTE nếu posterior đạt stance (margin ≥ 0,12 như hiện tại) |
+| **[0,50 · 0,80)** | **ĐA SỐ YẾU** | Tín hiệu **ép HOLD** + narrative giải thích "số đông X% nhưng dưới ngưỡng đồng thuận 80%" |
+| **[0,00 · 0,50)** | **KHÔNG ĐỒNG THUẬN** | HOLD |
+
+So ngưỡng dùng epsilon số thực: `ratio ≥ 0,80 − 1e⁻⁹` → ĐỒNG THUẬN (tránh dải chết 0,7999… không rơi vào dải nào).
 
 - **VETO Ủy ban Kiểm soát vẫn TUYỆT ĐỐI** — cổng đồng thuận không vượt veto (an toàn trước hết).
 - Pool < 4 cử tri có mặt (agent lỗi/thiếu) → coi như KHÔNG ĐỒNG THUẬN (fail-safe).
-- Áp dụng tại: Đợt D (tính + lưu `detail.consensus`) → Đợt E (chairman prompt nêu cổng, bào buộc tôn trọng) → Đợt F (`signal-execution.ts` chặn convert khi gate ≠ ĐỒNG THUẬN).
-- Ví dụ: 6 phiếu đồng вес 1 — 5 UP + 1 DOWN → 83,3% ≥ 80% → ĐỒNG THUẬN; 4 UP + 2 DOWN → 66,7% → ĐA SỐ YẾU → HOLD (xem Appendix B).
+- Áp dụng tại: Đợt D (tính + lưu `detail.consensus`) → Đợt E (chairman prompt nêu cổng, bắt buộc tôn trọng) → Đợt F (`signal-execution.ts` chặn convert khi gate ≠ ĐỒNG THUẬN).
+- **Gate bind theo assessment SINH RA tín hiệu:** snapshot gate lưu vào Signal ngay lúc Chủ tịch tạo tín hiệu (chu kỳ N) — việc convert ở chu kỳ N+k không bị đánh giá lại bằng consensus mới hơn (ổn định + kiểm chứng được theo tín hiệu, không theo thời điểm bấm nút).
+- **Shadow-mode trước enforcement (Bước 9 pha a):** ≥ 10 chu kỳ đầu cổng chỉ tính + lưu `detail.consensus` + log "shadow: đã-sẽ-chặn" (KHÔNG chặn tín hiệu thật); sau đó review tỉ lệ tín hiệu bị chặn (worklog) → user duyệt → bật enforcement qua AppSetting key `consensus.enforce` (bảng key-value có sẵn, mặc định `false`).
+- Lưu ý rời rạc: 6 cử tri đồng trọng số chỉ đạt {100% · 83,3% · 66,7% · 50%…} → cổng thực chất = **≥ 5/6 đồng ý**; trọng số khác nhau cho ratio liên tục (ví dụ 3 trong Appendix B). Diễn giải dải 50–79,9% = HOLD cứng là cách đọc nghiêm ngặt của "đồng thuận 80% trở lên" — cần user tái xác nhận khi bật `consensus.enforce` (xem Bước 9).
+- Ví dụ: 6 phiếu đồng trọng số 1 — 5 UP + 1 DOWN → 83,3% ≥ 80% → ĐỒNG THUẬN; 4 UP + 2 DOWN → 66,7% → ĐA SỐ YẾU → HOLD (xem Appendix B).
 
 ### 3.6. Scorecard Hội đồng Nghiên cứu (câu trả lời §0.1+§0.3)
 
@@ -179,7 +185,7 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 ### GIAI ĐOẠN 0 — Nền tảng (chuẩn bị không phá vỡ gì đang chạy)
 
 **Bước 1 — Mở rộng schema đa thị trường**
-- Việc code: `prisma/schema.prisma` — enum `Market` +`US` +`HK`; `Instrument.currency`; model `FinancialFundamental`; `BanditEvent.confidence Float?`. Chạy `bun run db:push`. Đồng bộ `docs/DB_SCHEMA.md`.
+- Việc code: `prisma/schema.prisma` — enum `Market` +`US` +`HK`; `Instrument.currency`; model `FinancialFundamental` (bỏ cột `quarter?` dư thừa — kỳ đã nằm trong `period`; ghi rõ đơn vị: revenue/netProfit **VND nguyên**, eps/bvps VND, roe/roa/pe/pb tỉ lệ thô); `BanditEvent.confidence Float?`. **Backup DB (pg_dump / snapshot Supabase) TRƯỚC khi chạy `bun run db:push`** — chi phí ~0, phòng edge case `ALTER TYPE` chọn path tạo lại type. Sau đó chạy `bun run db:push`. Đồng bộ `docs/DB_SCHEMA.md`.
 - Nghiệm thu: push OK không mất dữ liệu (24 → 25 model); các route hiện tại chạy như cũ.
 - Test: **T1.1** GET /api/agents · /api/assessment vẫn 200 sau push.
 
@@ -192,17 +198,17 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 
 **Bước 3 — Universe seed đa sàn (script probe-verify từng mã)**
 - Việc code: `prisma/expand-universe.ts` (mới, idempotent upsert) — danh sách ứng viên Appendix A: 21 HNX + ~10 UPCOM (probe thêm) + 5 ETF + 8 index; **mỗi mã probe dchart trước khi tạo** (mã trống → bỏ + log, không tạo instrument chết); gán `market/type/sector/currency` đúng bảng §1.2.
-- DB: +~44 Instrument mới (đ Activе).
+- DB: +~44 Instrument mới (đều `isActive=true`).
 - Test: **T3.1** đếm instrument theo (market×type) khớp bảng seed; **T3.2** chạy lại script = idempotent (không đuplicate); **T3.3** 0 instrument nào không có bar sau Bước 4.
 
 **Bước 4 — Deep backfill đa sàn + nới quota**
-- Việc code: `src/lib/eod-sync.ts` — `MAX_SYMBOLS_PER_SYNC` 40→150; `deepBackfillEod` chạy theo unit từng instrument (Bước 2); API `POST /api/market/eod-sync` nhận `force=deep` (giữ nguyên hành vi mặc định 10-day). EOD sync hằng ngày 15:45 ICT (market-engine) tự phủ toàn bộ instrument mới.
-- Nghiệm thu: **+~90.000 bar thật** (ước 21 HNX × ~3.000 + UPCOM × ~2.500 + 5 ETF × ~1.800 + 8 index × ~3.000) → DB ~180k bar; thời gian backfill ≤ 5 phút.
+- Việc code: `src/lib/eod-sync.ts` — `MAX_SYMBOLS_PER_SYNC` 40→150; `deepBackfillEod` chạy theo unit từng instrument (Bước 2); API `POST /api/market/eod-sync` nhận `force=deep` (giữ nguyên hành vi mặc định 10-day). EOD sync hằng ngày 15:45 ICT (market-engine) tự phủ toàn bộ instrument mới. **Index & instrument quốc tế KHÔNG vào tick-engine sinh quote mô phỏng** — quote neo EOD thật (`anchorQuoteToRealEod`), tôn trọng nguyên tắc không-bịa-dữ liệu.
+- Nghiệm thu: **+~100.000–121.000 bar thật** (21 HNX × ~3.000 ≈ 63k · UPCOM 3–10 mã × ~2.500 ≈ 7,5–25k · 5 ETF × ~1.800 ≈ 9k · 8 index × ~3.000 ≈ 24k) → DB tổng ~190–210k bar (hiện 90.785); thời gian backfill ≤ 5 phút. **Ràng buộc thứ tự: deep backfill phải HOÀN TẤT trước chu kỳ agent kế tiếp** (chu kỳ bốc giữa chừng sẽ thấy dữ liệu nửa vời).
 - Test: **T4.1** spot-check VNINDEX phiên 07-10 = 175.339 ± 1; **T4.2** PVS khớp giá HNX công bố ± 1 tick; **T4.3** 0 bar tương lai/T7-CN; **T4.4** tổng bar tăng đúng kỳ vọng (log script).
 
 **Bước 5 — Rổ & bằng chứng phân đoạn (multi-segment Bayes)**
-- Việc code: `src/lib/ml/features.ts` — `loadTopSeries` mở rộng thành `loadSegmentBaskets()` (§3.4); `src/lib/bayes/evidence.ts` — bằng chứng gắn segment (breadth/RSI/Holt per segment; lexicon tin & flows giữ market-wide VN); `src/lib/bayes/synthesis.ts` — chạy engine per segment + composite trọng số ADTV → `detail.segments[]`; `src/lib/agent-context.ts` — chairman prompt thêm khối "ĐA THỊ TRƯỜNG" (1 dòng/segment); `src/components/dashboard/synthesis-workspace.tsx` + `assessment-brief.tsx` — hiển thị khối segment.
-- Test: **T5.1** chu kỳ full 23 agents 0 lỗi, `detail.segments` đủ 7 segment; **T5.2** composite pUp/pDown thay đổi < 15pp so chu kỳ trước (tránh sốc); **T5.3** bandit settle vẫn dùng composite VN (tương thích chuỗi cũ).
+- Việc code: `src/lib/ml/features.ts` — `loadTopSeries` mở rộng thành `loadSegmentBaskets()` (§3.4); `src/lib/bayes/evidence.ts` — bằng chứng gắn segment (breadth/RSI/Holt per segment; lexicon tin & flows giữ market-wide VN); `src/lib/bayes/synthesis.ts` — chạy engine per segment + composite trọng số (§3.4 quy tắc INDEX 0,05/index + tái chuẩn hoá) → `detail.segments[]`; `src/lib/agent-context.ts` — chairman prompt thêm khối "ĐA THỊ TRƯỜNG" (1 dòng/segment); `src/components/dashboard/synthesis-workspace.tsx` + `assessment-brief.tsx` — hiển thị khối segment. **Pattern query: load toàn bộ series MỘT LẦN rồi phân đoạn in-memory — không chạy 7 vòng query full bar-history** (áp lực DB + ngân sách 180s).
+- Test: **T5.1** chu kỳ full 23 agents 0 lỗi, `detail.segments` đủ 7 segment; **T5.2** deterministic: chạy synthesis 2 LẦN trên cùng snapshot dữ liệu → composite pUp/pDown giống hệt (so sánh trực tiếp — không phụ thuộc "chu kỳ trước", vì thị trường thật có thể đảo chuyển mạnh giữa 2 chu kỳ gây fail oan); **T5.3** bandit settle vẫn dùng composite VN (tương thích chuỗi cũ).
 
 ### GIAI ĐOẠN 2 — Ba nâng cấp P0 Hội đồng Nghiên cứu ("chốt cả 3" — §0.1)
 
@@ -211,8 +217,8 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 - Test: **T6.1** đối chiếu 2–3 giá trị với TradingView lệch < 5%; **T6.2** mã < 26 phiên hiển thị "—"; **T6.3** Bayes Bậc 3 quy tắc MACD (LR 1,25 có sẵn) có input đồng bộ.
 
 **Bước 7 — ML Forecast ensemble MLP + linreg → CỬ TRI độc lập** *(§7.2 + §0.2)*
-- Việc code: `src/lib/agent-service-runs.ts` `runMlForecast()` — load `MlModel` serving (dl-mlp) → `predictProba` top-5 qua `latestFeatures()` (đã có); ensemble hướng = `sign(0,7×(pUp−pDown) + 0,3×linreg chuẩn hoá)`; output thêm `modelVersion` + fallback linreg khi chưa có model. `src/lib/bayes/evidence.ts` — phiếu ml-forecast vào `agentVotes` (cử tri thứ 6) với LR `1 + 0,8×|pUp−pDown|` cap 2,0. `src/lib/ml/bandit.ts` — **arm thứ 6** `ml-forecast` (BanditArm seed).
-- Test: **T7.1** Σ xác suất MLP = 1,000 ± 0,001 từng mã; **T7.2** xoá MlModel → fallback linreg, chu kỳ vẫn 23 agents; **T7.3** agentVotes có 6 phiếu; **T7.4** ml/status hiện arm mới.
+- Việc code: `src/lib/agent-service-runs.ts` `runMlForecast()` — load `MlModel` serving (dl-mlp) → `predictProba` qua `latestFeatures()` **top-10 — GIỮ NGUYÊN rổ bằng chứng quant #35** (không đổi 10→5, tránh phân phối phiếu nhảy khi REPLACE); ensemble hướng = `score = 0,7×(pUp−pDown) + 0,3×tanh(z)`, `z` = z-score của đại lượng linreg `proj₅ = slope×5/last×100` trên cửa sổ 60 phiên (cùng công thức `runMlForecast` hiện tại — định nghĩa "chuẩn hoá" tường minh), **deadband `|score| < 0,05 → FLAT`** (thống nhất ngưỡng với code #35 — hàm sign() thuần gần như không bao giờ FLAT, thiên lệch tally về 2 cực); output thêm `modelVersion` + fallback linreg khi chưa có model. `src/lib/bayes/evidence.ts` — phiếu ml-forecast vào `agentVotes` (cử tri thứ 6) với LR `1 + 0,8×|pUp−pDown|` cap 2,0; **REPLACE (chống đếm kép): XOÁ block bằng chứng quant `mlp-forecast (MLP 10→16→8→3)` mục 6g-a (evidence.ts ≈L474–506) — giữ nguyên `rl-policy` 6g-b; nếu không xoá, cùng tín hiệu MLP vào Bayes 2 LẦN (quant + vote) và nặng tally lần thứ 3**; `BanditEvent.confidence` của phiếu MLP = `max(pUp, pDown, pFlat)` (đầu vào Brier — Bước 8). `src/lib/ml/bandit.ts` — **arm thứ 6** `ml-forecast` (BanditArm seed Beta(1,1) → weight khiêm tốn ~0,5 khi chưa có track record).
+- Test: **T7.1** Σ xác suất MLP = 1,000 ± 0,001 từng mã; **T7.2** xoá MlModel → fallback linreg, chu kỳ vẫn 23 agents; **T7.3** agentVotes có 6 phiếu; **T7.4** ml/status hiện arm mới; **T7.5 (chống đếm kép)** trong `marketEvidence` KHÔNG đồng thời tồn tại nguồn `mlp-forecast (MLP…)` và phiếu `llm-vote:ml-forecast` — tín hiệu MLP vào Bayes đúng 1 lần; **T7.6** khi |pUp−pDown| nhỏ, phiếu ensemble nhận FLAT (deadband hoạt động).
 
 **Bước 8 — Research Council Scorecard** *(§7.6 + §0.3)*
 - Việc code: `src/lib/research/scorecard.ts` (mới) — tổng hợp hit-rate/Brier/posterior-contribution/streak từ `BanditEvent` (settled) + `MarketAssessment.detail.drivers`; `src/app/api/research/scorecard/route.ts` (mới); `src/components/dashboard/agents-workspace.tsx` — khối "Bảng điểm Hội đồng Nghiên cứu" ngay dưới section nhóm research (**tab Đội Agent** — user chốt §0.3).
@@ -221,8 +227,9 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 ### GIAI ĐOẠN 3 — Đồng thuận 80% + nới (§0.2 + §0.4)
 
 **Bước 9 — Cổng đồng thuận 80% end-to-end**
-- Việc code: `src/lib/bayes/synthesis.ts` — tính tally + `consensusRatio` + gate (§3.5) trên `agentVotes` 6 cử tri; `src/lib/bayes/types.ts` + `persist.ts` — lưu `detail.consensus`; `src/lib/signal-execution.ts` — chặn convert khi gate ≠ ĐỒNG THUẬN (kèm lý do); `agent-context.ts` — chairman prompt nêu cổng bắt buộc tôn trọng; UI `synthesis-workspace.tsx` + `agents-workspace.tsx` + `assessment-brief.tsx` hiển thị cổng (thanh tally 6 phiếu + ngưỡng 80%).
-- Test: **T9.1** mô phỏng 5/6 UP → gate ĐỒNG THUẬN, tín hiệu đi qua; **T9.2** mô phỏng 4/6 UP → ĐA SỐ YẾU → signal bị HOLD + rejectNote ghi rõ; **T9.3** VETO + đồng thuận 100% → vẫn bị chặn (veto tối thượng); **T9.4** pool 3 cử tri → KHÔNG ĐỒNG THUẬN (fail-safe); **T9.5** narrative có câu giải thích cổng.
+- Việc code: `src/lib/bayes/synthesis.ts` — tính tally + `consensusRatio` + gate (§3.5 — khoảng đóng + epsilon 1e⁻⁹) trên `agentVotes` 6 cử tri; `src/lib/bayes/types.ts` + `persist.ts` — lưu `detail.consensus`; **gate snapshot lưu vào Signal ngay lúc Chủ tịch tạo tín hiệu** (convert ở chu kỳ sau KHÔNG bị đánh giá lại bằng consensus mới); `src/lib/signal-execution.ts` — chặn convert khi gate ≠ ĐỒNG THUẬN (kèm lý do) **chỉ khi AppSetting `consensus.enforce = true`**; `agent-context.ts` — chairman prompt nêu cổng bắt buộc tôn trọng; UI `synthesis-workspace.tsx` + `agents-workspace.tsx` + `assessment-brief.tsx` hiển thị cổng (thanh tally 6 phiếu + ngưỡng 80%).
+- **Hai pha bắt buộc:** (a) **shadow-mode ≥ 10 chu kỳ** — cổng tính + lưu + log "shadow: đã-sẽ-chặn" nhưng KHÔNG chặn tín hiệu thật; (b) review tỉ lệ tín hiệu bị chặn (worklog) → user duyệt (tái xác nhận cách đọc dải 50–79,9% = HOLD cứng) → bật `consensus.enforce = true`.
+- Test: **T9.1** mô phỏng 5/6 UP → gate ĐỒNG THUẬN, tín hiệu đi qua (cả 2 pha); **T9.2** 4/6 UP → ĐA SỐ YẾU: pha shadow tín hiệu đi qua + log "đã-sẽ-chặn", pha enforce bị HOLD + rejectNote ghi rõ; **T9.3** VETO + đồng thuận 100% → vẫn bị chặn (veto tối thượng); **T9.4** pool 3 cử tri → KHÔNG ĐỒNG THUẬN (fail-safe); **T9.5** narrative có câu giải thích cổng; **T9.6** đổi consensus ở chu kỳ N+1 KHÔNG đổi số phận tín hiệu đã sinh ở chu kỳ N (gate bind theo snapshot); **T9.7** ratio = 0,7999… rơi đúng dải ĐA SỐ YẾU, không rơi ngoài dải nào (epsilon).
 
 **Bước 10 — Nới ngân sách & quota (tiêu chí nghiệm thu mới)**
 - Việc code: cập nhật hằng số `eod-sync.ts` (đã ở B4); cập nhật tiêu chí test trong `docs/TECHNICAL_BLUEPRINT.md` + `RESEARCH_COUNCIL_PLAN.md` §8 (≤90s → ≤180s); `agent-context.ts` rổ top-10 HOSE giữ + segment gọn; đo và ghi durationMs chu kỳ vào worklog mỗi phiên.
@@ -238,8 +245,8 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 ### GIAI ĐOẠN 5 — Sàn quốc tế (Yahoo — đã xác minh HTTP 200)
 
 **Bước 12 — Adapter quốc tế + universe US/HK**
-- Việc code: `src/lib/intl-eod.ts` (mới) — `fetchYahooChart(symbol, range, interval)`: **UA header bắt buộc** (đã đo 429 khi thiếu), throttle 1.200ms, retry 429/5xx ×3 backoff 5/15/45s, parse `timestamp[] + indicators.quote[].close[]` → `RealBarInput` cents ×100 (index ×100 điểm); universe mặc định Appendix A (8 US + ^GSPC ^IXIC + 3 HK + ^HSI = 14); `prisma/expand-universe.ts` mở rộng tạo Instrument `market=US/HK`, `currency=USD/HKD`; scheduler market-engine thêm job **06:15 ICT** (sau đóng cửa Mỹ); API `POST /api/market/intl-sync` (manual). EOD 1 lần/ngày là đủ (range=1y backfill lần đầu).
-- Test: **T12.1** AAPL phiên cuối khớp giá thật ± 0,5%; **T12.2** 429 → retry đúng backoff (log); **T12.3** ^HSI điểm nguyên không ×1000; **T12.4** sync 14 mã ≤ 30s (đã throttle).
+- Việc code: `src/lib/intl-eod.ts` (mới) — `fetchYahooChart(symbol, range, interval)`: **UA header bắt buộc** (đã đo 429 khi thiếu), throttle 1.200ms, retry 429/5xx ×3 backoff 5/15/45s; request kèm `&events=div,split`; parse `timestamp[]` + **`indicators.adjclose[0].adjclose[]` (fallback `indicators.quote[].close[]`)** — adjclose đã điều chỉnh split/cổ tức nên chuỗi đặc trưng không bị gãy khi tách cổ phiếu (bar cuối adjclose = close → spot-check T12.1 vẫn khớp giá thật); **index có giá trị `null` bị skip + đếm skipped minh bạch** (Yahoo trả null cho phiên thiếu dữ liệu — parse thẳng sẽ sinh bar giá 0/NaN) → `RealBarInput` cents ×100 (index ×100 điểm); universe mặc định Appendix A (8 US + ^GSPC ^IXIC + 3 HK + ^HSI = 14); **quy ước symbol cross-market: giữ nguyên ký hiệu Yahoo (`AAPL` · `0700.HK` · `^GSPC`) — `Instrument.symbol` unique TOÀN CỤC, không thêm suffix**; `prisma/expand-universe.ts` mở rộng tạo Instrument `market=US/HK`, `currency=USD/HKD`; scheduler market-engine thêm job **06:15 ICT** (sau đóng cửa Mỹ); API `POST /api/market/intl-sync` (manual). EOD 1 lần/ngày là đủ (range=1y backfill lần đầu).
+- Test: **T12.1** AAPL phiên cuối khớp giá thật ± 0,5%; **T12.2** 429 → retry đúng backoff (log); **T12.3** ^HSI điểm nguyên không ×1000; **T12.4** sync 14 mã ≤ 30s (đã throttle); **T12.5** response chứa close null → bar bị skip + đếm skipped, KHÔNG sinh bar giá 0/NaN; **T12.6** mã có split trong 1 năm qua → chuỗi adjclose không có bước nhảy gãy (so sánh return quanh ngày split).
 
 **Bước 13 — Bằng chứng quốc tế vào tổng hợp (segment INTERNATIONAL)**
 - Việc code: `src/lib/bayes/evidence.ts` — segment `INTERNATIONAL`: động lượng ^GSPC/^HSI 5 phiên (LR 1,15 khi |mom| > 1%) + RSI14 (LR 1,2 khi < 30 / > 70) — weight 0,4 (tham khảo, không vào composite VN); chairman prompt thêm 1 dòng "Quốc tế: S&P +x% · HSI −y% · ảnh hưởng tâm lý VN"; UI `synthesis-workspace.tsx` + `quotes-table.tsx` (group theo sàn).
@@ -248,8 +255,8 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 ### GIAI ĐOẠN 6 — Đóng gói & nghiệm thu tổng
 
 **Bước 14 — Ma trận độ phủ API + UI (tab Đội Agent)**
-- Việc code: `src/app/api/coverage/route.ts` (mới) — query DB group theo (market×type) + DataSourceStatus + tuổi quote → 15 ô + quốc tế + cơ bản (§3.7); `src/components/dashboard/coverage-matrix.tsx` (mới) — lưới 5×3 + legend + tooltip; nhúng `agents-workspace.tsx` (**tab Đội Agent** — đồng nhất với scorecard theo §0.3).
-- Test: **T14.1** 15 ô luôn render (kể cả ô 0 sản phẩm — trung thực); **T14.2** ô 🟢 có instrument/bar/lastBarDate đúng DB; **T14.3** mobile 390 không tràn lưới; **T14.4** click ô → tooltip chi tiết.
+- Việc code: `src/app/api/coverage/route.ts` (mới) — query DB group theo (market×type) + DataSourceStatus + tuổi quote → 15 ô + quốc tế + cơ bản (§3.7); `src/components/dashboard/coverage-matrix.tsx` (mới) — lưới 5×3 + legend + tooltip; nhúng `agents-workspace.tsx` (**tab Đội Agent** — đồng nhất với scorecard theo §0.3); **watcher re-probe tuần trong market-engine (Chủ nhật 04:00 ICT): re-probe danh sách ứng viên các ô ⚪/🟡** (FUND VF1/VFMVF1/VFF/PRBF/BF1 · ETF HNX · UPCOM ứng viên chưa nạp · BOND ứng viên khi có nguồn) — mã đầu tiên CÓ dữ liệu → tự tạo Instrument + backfill → ô tự sáng (hoá tiêu chí T1 "watcher tự nạp"; probe-trước-khi-tạo như B3, không tạo instrument chết).
+- Test: **T14.1** 15 ô luôn render (kể cả ô 0 sản phẩm — trung thực); **T14.2** ô 🟢 có instrument/bar/lastBarDate đúng DB; **T14.3** mobile 390 không tràn lưới; **T14.4** click ô → tooltip chi tiết; **T14.5** watcher: ứng viên probe trống → ô vẫn ⚪; ứng viên probe có dữ liệu (mock) → Instrument + bar được tạo, ô chuyển 🟢.
 
 **Bước 15 — E2E tổng + go/no-go**
 - Việc code: không code mới — chạy kịch bản nghiệm thu toàn chương trình, fix lỗi phát hiện, cập nhật README/USER_PROMPTS/worklog, commit+push.
@@ -266,8 +273,10 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 | dchart rate-limit khi 150 mã | 🟡 vừa | giữ 300ms/request (tổng ~45s) + retry 5xx có sẵn (2 lần backoff) + sync theo nhóm sàn |
 | Chu kỳ vượt ngân sách mới | 🟡 vừa | segment prompt gọn (1 dòng/segment) + đo durationMs mỗi phiên + cảnh báo 300s |
 | Prompt phình → chi phí/tokens tăng | 🟡 vừa | chỉ market block mở top-10 + 4 cột; phần segment là dòng tổng hợp; 17 agent dịch vụ vẫn 0 token |
-| "15/15" bị hiểu sai là 15 ô dữ liệu thật | 🟢 thấp | ma trận độ phí hiển thị 3 màu + chú thích "0 sản phẩm niêm yết" / "chờ nguồn" — không tô xanh giả |
-| Postgres enum thêm giá trị | 🟢 thấp | additive — không destructive; db:push an toàn với dữ liệu现存 |
+| "15/15" bị hiểu sai là 15 ô dữ liệu thật | 🟢 thấp | ma trận độ phủ hiển thị 3 màu + chú thích "0 sản phẩm niêm yết" / "chờ nguồn" — không tô xanh giả |
+| Đếm kép tín hiệu MLP khi nâng lên cử tri | 🔴 cao | B7 chỉ định REPLACE (xoá block quant 6g-a) + test T7.5 chặn hồi quy |
+| Cổng 80% chặn tín hiệu quá mức (6 cử tri đồng trọng số ≈ cần ≥5/6) | 🟡 vừa | shadow-mode 10 chu kỳ đo tỉ lệ chặn trước khi bật `consensus.enforce`; veto vẫn tối thượng |
+| Postgres enum thêm giá trị | 🟢 thấp | additive — không destructive; backup pg_dump/snapshot trước db:push (B1) |
 | Chuỗi bandit/assessment lịch sử đứt gãy khi đổi pool 6 cử tri | 🟡 vừa | composite VN giữ nguyên công thức; đồng thuận là trường mới (detail.consensus) không đè số cũ; pulls/arm cũ bảo toàn |
 
 ---
@@ -276,8 +285,8 @@ Per agent: **hit-rate 5 phiên** (từ `BanditEvent` đã settle) · **Brier sco
 
 | Phiên | Giai đoạn | Bước | Task ID gợi ý | Kết quả user thấy |
 |---|---|---|---|---|
-| #38 | 0 + 1 | B1–B5 | 38-a (schema+unit), 38-b (seed+backfill), 38-c (segments) | ~90k bar thật thêm; HNX/UPCOM/ETF/index sống trong UI; assessment đa thị trường |
-| #39 | 2 + 3 | B6–B10 | 39-a (P0 ba nâng cấp), 39-b (cổng 80% + nới) | Bảng chỉ báo mới; MLP cử tri; scorecard tab Đội Agent; cổng đồng thuận 80% |
+| #38 | 0 + 1 | B1–B5 | 38-a (schema+unit), 38-b (seed+backfill), 38-c (segments) | +~100–121k bar thật; HNX/UPCOM/ETF/index sống trong UI; assessment đa thị trường |
+| #39 | 2 + 3 | B6–B10 | 39-a (P0 ba nâng cấp), 39-b (cổng 80% shadow→enforce + nới) | Bảng chỉ báo mới; MLP cử tri (đã REPLACE chống đếm kép); scorecard tab Đội Agent; cổng đồng thuận 80% — shadow-mode 10 chu kỳ trước khi bật enforce |
 | #40 | 4 + 5 | B11–B13 | 40-a (fundamentals), 40-b (intl Yahoo) | Sàn US/HK sống; segment quốc tế; pipeline cơ bản pending-egress |
 | #41 | 6 | B14–B15 | 41-a (coverage matrix), 41-b (E2E go/no-go) | Ma trận 15/15 trên tab Đội Agent + báo cáo nghiệm thu tổng |
 
@@ -305,8 +314,9 @@ Mỗi phiên kết thúc bằng commit + push + cập nhật worklog (quy trình
 wᵢ   = clamp(healthScoreᵢ/100 × posteriorMeanᵢ(bandit), 0.3, 1)     // 6 cử tri
 S(d) = Σ wᵢ · [voteᵢ = d]          cho d ∈ {UP, DOWN, FLAT}
 consensusRatio = max_d S(d) / Σ wᵢ
-gate: ratio ≥ 0.80 → ĐỒNG THUẬN · 0.50–0.799 → ĐA SỐ YẾU (HOLD) · < 0.50 → KHÔNG ĐỒNG THUẬN (HOLD)
-ràng buộc: pool < 4 cử tri → KHÔNG ĐỒNG THUẬN · VETO Ủy ban → chặn tuyệt đối mọi cấp
+gate: ratio ∈ [0.80, 1] → ĐỒNG THUẬN · ratio ∈ [0.50, 0.80) → ĐA SỐ YẾU (HOLD) · ratio ∈ [0, 0.50) → KHÔNG ĐỒNG THUẬN (HOLD)
+      (so ngưỡng 0.80 với epsilon 1e⁻⁹; 2 pha: shadow ≥ 10 chu kỳ → user duyệt → mới bật AppSetting consensus.enforce)
+ràng buộc: pool < 4 cử tri → KHÔNG ĐỒNG THUẬN · VETO Ủy ban → chặn tuyệt đối mọi cấp · gate bind theo assessment SINH RA tín hiệu
 ```
 
 Ví dụ 1 — 6 phiếu đồng trọng số: 5 UP + 1 DOWN → ratio 5/6 = **83,3% ≥ 80%** → ĐỒNG THUẬN → tín hiệu EXECUTE (nếu posterior đạt stance).
@@ -335,4 +345,4 @@ Ví dụ 3 — trọng số khác nhau: 3 UP (w=1 mỗi phiếu) + 3 DOWN (w=0.3
 
 ---
 
-*Blueprint này trả lời trực tiếp 4 câu của user: **cần triển khai những gì** (§1–§3: 7 ô dữ liệu thật + 6 ô hạ tầng + 2 ô chờ nguồn + quốc tế + cơ bản + cổng đồng thuận + scorecard + nới) · **bao nhiêu bước** (15 bước) · **là những bước nào** (§4, 7 giai đoạn có phụ thuộc rõ) · **triển khai như thế nào** (từng bước: file thật · thuật toán · DB/API/UI · test mã T · nghiệm thu). Mọi con số nguồn đều probe thực đo 2026-10-07.*
+*Blueprint này trả lời trực tiếp 4 câu của user: **cần triển khai những gì** (§1–§3: 7 ô dữ liệu thật + 6 ô hạ tầng + 2 ô chờ nguồn + quốc tế + cơ bản + cổng đồng thuận + scorecard + nới) · **bao nhiêu bước** (15 bước) · **là những bước nào** (§4, 7 giai đoạn có phụ thuộc rõ) · **triển khai như thế nào** (từng bước: file thật · thuật toán · DB/API/UI · test mã T · nghiệm thu). Mọi con số nguồn đều probe thực đo 2026-10-07 · **v1.1 vá sau review 37-REVIEW (3 lỗi P0 + 6 P1) trước khi mở phiên #38**.*

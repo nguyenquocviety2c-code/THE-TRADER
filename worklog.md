@@ -1033,3 +1033,19 @@ Stage Summary:
 - Verdict: 8.5/10 — kỷ luật probe-first + thiết kế test xuất sắc, mọi tuyên bố kiểm được đều khớp code; nhưng KHÔNG bàn giao subagent cho #38 cho đến khi vá 3 P0 vào doc: B7 ghi rõ REPLACE bằng chứng quant cũ bằng phiếu cử tri + test T7.5 chống đếm kép · ensemble deadband 0.05 + định nghĩa chuẩn hoá linreg · khoảng cổng [0.5,0.8) epsilon + Bước 9.5 shadow-mode 10 chu kỳ trước bật enforcement
 - Điểm mạnh xác nhận: bug đơn vị index có THẬT (Bước 2 tiên quyết đúng) · công thức weight phiếu tái dùng khớp từng ký tự · 3 ví dụ Appendix B tính lại đúng · cold-start arm 6 Beta(1,1)→weight~0.5 là thiết kế khiêm tốn đúng · vòng phản hồi bandit-settle theo realized direction là lành tính
 - Không sửa bất kỳ file code/blueprint nào — chờ user chọn: (a) vá 7 chỉnh sửa vào MARKET_EXPANSION_BLUEPRINT.md hay (b) giải thích sâu phát hiện trước
+
+---
+Task ID: 37-PATCH
+Agent: main-orchestrator (Z.ai Code)
+Task: Vá toàn bộ 7 chỉnh sửa từ review 37-REVIEW vào docs/MARKET_EXPANSION_BLUEPRINT.md (v1.0 → v1.1) theo chỉ thị user "vá luôn không cần hỏi" — áp dụng từ nay làm mặc định khi review phát hiện vấn đề.
+
+Work Log:
+- Vá 3 lỗi P0: (1) B7 — ghi rõ **REPLACE** bằng chứng quant `mlp-forecast (MLP 10→16→8→3)` mục 6g-a (evidence.ts ≈L474–506) bằng phiếu cử tri thứ 6, giữ nguyên `rl-policy` 6g-b + test T7.5 chống đếm kép + T7.6 deadband; (2) B7 — công thức ensemble đầy đủ: `score = 0,7×(pUp−pDown) + 0,3×tanh(z)`, z = z-score của `proj₅ = slope×5/last×100` trên 60 phiên (định nghĩa "chuẩn hoá" tường minh), deadband |score| < 0,05 → FLAT, chốt rổ **top-10** latestFeatures() giữ nguyên (không đổi 10→5), BanditEvent.confidence của phiếu MLP = max(pUp,pDown,pFlat); (3) §3.5 + B9 + Appendix B — cổng dùng khoảng đóng [0,80·1] / [0,50·0,80) / [0·0,50) + epsilon 1e⁻⁹ + **shadow-mode ≥10 chu kỳ** (log "đã-sẽ-chặn", KHÔNG chặn thật) trước khi bật AppSetting `consensus.enforce` + gate bind theo assessment SINH RA tín hiệu (snapshot vào Signal lúc Chủ tịch tạo) + test T9.6/T9.7
+- Vá 6 lỗi P1: B12 — Yahoo `&events=div,split` + parse adjclose (fallback close) + skip index null + đếm skipped + test T12.5/T12.6 + quy ước symbol cross-market giữ nguyên ký hiệu Yahoo; B14 — watcher re-probe tuần Chủ nhật 04:00 ICT cho ứng viên ô ⚪/🟡 (hoá tiêu chí T1, kèm test T14.5); §3.4 — composite segment INDEX trọng số cố định 0,05/index + tái chuẩn hoá pUp+pDown+pFlat=1; số học B4 sửa "+~90k/DB 180k" → "+~100–121k/DB 190–210k" + ràng buộc backfill hoàn tất trước chu kỳ kế tiếp; T5.2 đổi thành deterministic (chạy 2 lần cùng snapshot); B1 thêm backup pg_dump/snapshot trước db:push
+- Vá P2: §3.3 xoá phương án unitScale (chốt bảng tra UnitSpec làm single source of truth) · FinancialFundamental bỏ cột quarter? dư thừa + ghi rõ đơn vị VND nguyên · B4 index/intl không vào tick-engine sinh quote giả · B5 pattern query load 1 lần phân đoạn in-memory · §1.3 "8 tổ hợp" → "7 tổ hợp" (khớp §1.2) · roadmap #38/#39 đồng bộ số mới · 5 typos encoding Cyrillic/CJK ("đồng вес" · "đ Activе" · "hiện现存" · "bào buộc" · "độ phí")
+- Header v1.0 → v1.1 + dòng Changelog v1.1 sau cross-refs + dòng kết nêu "v1.1 vá sau review 37-REVIEW trước khi mở phiên #38" · file 339 → 348 dòng · quét rg xác nhận 0 ký tự Cyrillic/CJK còn sót · §5 rủi ro thêm 2 hàng: "Đếm kép tín hiệu MLP" (🔴 cao) + "Cổng 80% chặn quá mức" (🟡 vừa)
+
+Stage Summary:
+- docs/MARKET_EXPANSION_BLUEPRINT.md v1.1 sẵn sàng làm "hợp đồng triển khai" cho phiên #38–#41: mọi chỗ subagent có thể cắm cờ sai đã được chỉ định tường minh (REPLACE vs ADD, khoảng cổng + epsilon, 2 pha shadow→enforce, adjclose + null-skip, top-10 giữ nguyên)
+- 1 điểm còn chờ user (không chặn triển khai): tái xác nhận cách đọc dải 50–79,9% = HOLD cứng khi bật `consensus.enforce` sau 10 chu kỳ shadow — đã ghi rõ ở §3.5 + B9 pha b
+- Quy tắc mới theo chỉ thị user: từ phiên này, khi review phát hiện vấn đề thì VÁ NGAY không hỏi lại
