@@ -1,0 +1,418 @@
+/**
+ * src/lib/ml/features.ts — ĐẶC TRƯNG HỌC MÁY cho MLP dự báo 5 phiên (phiên #35).
+ *
+ * buildTrainingSet(topN): quét top-N mã thanh khoản cao nhất (theo volume
+ * quote mới nhất) rồi trượt cửa sổ trên chuỗi EOD thật — mỗi phiên t đủ 60
+ * phiên lịch sử và t+5 tồn tại → 10 đặc trưng + nhãn hướng 5 phiên tới.
+ * latestFeatures(): vector đặc trưng phiên CUỐI của từng mã top-10 (serving).
+ *
+ * Chuỗi chỉ báo tính TĂNG DẦN O(N) (rolling Wilder RSI · EMA MACD · SMA
+ * window-sum) vì src/lib/indicators.ts chỉ trả "giá trị cuối" — gọi per-sample
+ * sẽ O(N²) trên ~50k mẫu. Nhãn: close(t+5)/close(t)−1 > +0,5% → 2 (UP),
+ * < −0,5% → 0 (DOWN), còn lại 1 (FLAT).
+ */
+
+import { db } from "@/lib/db";
+
+/** Số đặc trưng đầu vào của MLP (thay đổi phải đổi cả kiến trúc mạng). */
+export const ML_FEATURE_COUNT = 10;
+/** Số phiên lịch sử tối thiểu trước điểm lấy mẫu (warmup RSI/MACD/SMA50/max60). */
+export const ML_WARMUP_BARS = 60;
+/** Horizon dự báo (phiên). */
+export const ML_HORIZON_DAYS = 5;
+/** Ngưỡng nhãn: |ret 5 phiên| > 0,5% mới tính UP/DOWN. */
+export const ML_LABEL_THRESHOLD = 0.005;
+/** Số mẫu huấn luyện tối đa (lấy gần nhất) — chống train quá 60s. */
+export const ML_MAX_SAMPLES = 60_000;
+
+/** Bộ dữ liệu huấn luyện: X (raw features) + y (0=DOWN 1=FLAT 2=UP). */
+export interface TrainingSet {
+  X: number[][];
+  y: number[];
+  /** Mã chứng khoán của từng mẫu (gán công topSymbols). */
+  symbols: string[];
+  /** Ngày phiên t của từng mẫu (ISO date — dùng cut 80/20 theo thời gian). */
+  dates: string[];
+}
+
+/** Tham số chuẩn hoá z-score học từ tập train. */
+export interface FeatureNorm {
+  mean: number[];
+  std: number[];
+}
+
+/** Chuỗi chỉ báo đã tính sẵn cho một mã (mảng cùng chiều closes, null khi warmup). */
+interface RollingSeries {
+  closes: number[];
+  volumes: number[];
+  ret1: (number | null)[];
+  logret5: (number | null)[];
+  logret10: (number | null)[];
+  sma20: (number | null)[];
+  sma50: (number | null)[];
+  rsi14: (number | null)[];
+  macdHist: (number | null)[];
+  volz20: (number | null)[];
+  std20ret: (number | null)[];
+  max60: (number | null)[];
+}
+
+/** Dòng EOD tối thiểu để tính đặc trưng. */
+interface BarRow {
+  date: Date;
+  close: number;
+  volume: number;
+}
+
+/** Top-N mã thanh khoản (quote volume mới nhất) + chuỗi bar đầy đủ. */
+export interface SymbolSeries {
+  symbol: string;
+  instrumentId: string;
+  bars: BarRow[];
+  closes: number[];
+  volumes: number[];
+}
+
+/**
+ * Nạp top-N mã isActive thanh khoản cao nhất kèm toàn bộ bar EOD (date asc).
+ * Dùng chung cho buildTrainingSet (topN=20) và rổ Q-learning (topN=10).
+ */
+export async function loadTopSeries(topN: number): Promise<SymbolSeries[]> {
+  const instruments = await db.instrument.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      symbol: true,
+      quotes: {
+        orderBy: { tradedAt: "desc" },
+        take: 1,
+        select: { volume: true },
+      },
+    },
+  });
+  const ranked = instruments
+    .map((i) => {
+      const q = i.quotes[0];
+      return q ? { id: i.id, symbol: i.symbol, volume: q.volume } : null;
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, topN);
+  if (ranked.length === 0) return [];
+
+  const bars = await db.bar.findMany({
+    where: { instrumentId: { in: ranked.map((r) => r.id) } },
+    orderBy: { date: "asc" },
+    select: { instrumentId: true, date: true, close: true, volume: true },
+  });
+  const byId = new Map<string, BarRow[]>();
+  for (const b of bars) {
+    // Bỏ bar dữ liệu hỏng (close ≤ 0) — không làm lệch log-return
+    if (!(b.close > 0)) continue;
+    const list = byId.get(b.instrumentId) ?? [];
+    list.push({ date: b.date, close: b.close, volume: b.volume });
+    byId.set(b.instrumentId, list);
+  }
+  return ranked.map((r) => {
+    const rows = byId.get(r.id) ?? [];
+    return {
+      symbol: r.symbol,
+      instrumentId: r.id,
+      bars: rows,
+      closes: rows.map((b) => b.close),
+      volumes: rows.map((b) => b.volume),
+    };
+  });
+}
+
+/* ─────────────────── Rolling indicators O(N) ─────────────────── */
+
+/**
+ * Tính chuỗi chỉ báo tăng dần cho một mã — cùng thuật toán chuẩn như
+ * src/lib/indicators.ts (Wilder RSI, EMA MACD 12/26/9, SMA) nhưng trả
+ * TOÀN chuỗi để lấy mẫu O(1).
+ */
+function buildRolling(closes: number[], volumes: number[]): RollingSeries {
+  const n = closes.length;
+  const ret1: (number | null)[] = new Array(n).fill(null);
+  const logret5: (number | null)[] = new Array(n).fill(null);
+  const logret10: (number | null)[] = new Array(n).fill(null);
+  const sma20: (number | null)[] = new Array(n).fill(null);
+  const sma50: (number | null)[] = new Array(n).fill(null);
+  const rsi14: (number | null)[] = new Array(n).fill(null);
+  const macdHist: (number | null)[] = new Array(n).fill(null);
+  const volz20: (number | null)[] = new Array(n).fill(null);
+  const std20ret: (number | null)[] = new Array(n).fill(null);
+  const max60: (number | null)[] = new Array(n).fill(null);
+
+  // log-return 1/5/10 phiên
+  for (let i = 1; i < n; i++) ret1[i] = Math.log(closes[i] / closes[i - 1]);
+  for (let i = 5; i < n; i++) logret5[i] = Math.log(closes[i] / closes[i - 5]);
+  for (let i = 10; i < n; i++) logret10[i] = Math.log(closes[i] / closes[i - 10]);
+
+  // SMA 20/50 — window sum trượt
+  let s20 = 0;
+  for (let i = 0; i < n; i++) {
+    s20 += closes[i];
+    if (i >= 20) s20 -= closes[i - 20];
+    if (i >= 19) sma20[i] = s20 / 20;
+  }
+  let s50 = 0;
+  for (let i = 0; i < n; i++) {
+    s50 += closes[i];
+    if (i >= 50) s50 -= closes[i - 50];
+    if (i >= 49) sma50[i] = s50 / 50;
+  }
+
+  // RSI14 Wilder — seed trung bình 14 phiên đầu rồi làm mượt đệ quy
+  if (n >= 15) {
+    let gains = 0;
+    let losses = 0;
+    for (let i = 1; i <= 14; i++) {
+      const d = closes[i] - closes[i - 1];
+      if (d > 0) gains += d;
+      else losses -= d;
+    }
+    let avgGain = gains / 14;
+    let avgLoss = losses / 14;
+    for (let i = 14; i < n; i++) {
+      if (i > 14) {
+        const d = closes[i] - closes[i - 1];
+        avgGain = (avgGain * 13 + Math.max(d, 0)) / 14;
+        avgLoss = (avgLoss * 13 + Math.max(-d, 0)) / 14;
+      }
+      if (avgGain === 0 && avgLoss === 0) rsi14[i] = null; // chuỗi phẳng
+      else if (avgLoss === 0) rsi14[i] = 100;
+      else rsi14[i] = 100 - 100 / (1 + avgGain / avgLoss);
+    }
+  }
+
+  // MACD histogram — EMA12/EMA26 trượt rồi signal = EMA9 của macd line
+  if (n >= 26) {
+    const k12 = 2 / 13;
+    const k26 = 2 / 27;
+    const k9 = 2 / 10;
+    let e12 = 0;
+    for (let i = 0; i < 12; i++) e12 += closes[i];
+    e12 /= 12;
+    let e26 = 0;
+    for (let i = 0; i < 26; i++) e26 += closes[i];
+    e26 /= 26;
+    let signal = 0;
+    let signalCount = 0;
+    for (let i = 26; i < n; i++) {
+      e12 = k12 * closes[i] + (1 - k12) * e12;
+      e26 = k26 * closes[i] + (1 - k26) * e26;
+      const line = e12 - e26;
+      // seed signal = chính macd line đầu, sau đó EMA9
+      if (signalCount === 0) {
+        signal = line;
+      } else {
+        signal = k9 * line + (1 - k9) * signal;
+      }
+      signalCount++;
+      if (signalCount >= 9) macdHist[i] = line - signal;
+    }
+  }
+
+  // volz20 — z-score volume so TB/độ lệch 20 phiên
+  if (n >= 20) {
+    let vs = 0;
+    let vs2 = 0;
+    for (let i = 0; i < n; i++) {
+      vs += volumes[i];
+      vs2 += volumes[i] * volumes[i];
+      if (i >= 20) {
+        vs -= volumes[i - 20];
+        vs2 -= volumes[i - 20] * volumes[i - 20];
+      }
+      if (i >= 19) {
+        const mean = vs / 20;
+        const varr = Math.max(0, vs2 / 20 - mean * mean);
+        const sd = Math.sqrt(varr);
+        volz20[i] = sd > 0 ? (volumes[i] - mean) / sd : 0;
+      }
+    }
+  }
+
+  // std20ret — độ lệch chuẩn log-ret1 trên 20 phiên (cần ret1[t-19..t])
+  if (n >= 21) {
+    for (let i = 20; i < n; i++) {
+      let m = 0;
+      for (let j = i - 19; j <= i; j++) m += ret1[j] ?? 0;
+      m /= 20;
+      let v = 0;
+      for (let j = i - 19; j <= i; j++) {
+        const r = ret1[j] ?? 0;
+        v += (r - m) * (r - m);
+      }
+      std20ret[i] = Math.sqrt(v / 20);
+    }
+  }
+
+  // max60 — đỉnh 60 phiên (quét cửa sổ — đủ nhanh với N ≈ 3k/mã)
+  for (let i = 59; i < n; i++) {
+    let hi = closes[i - 59];
+    for (let j = i - 58; j <= i; j++) if (closes[j] > hi) hi = closes[j];
+    max60[i] = hi;
+  }
+
+  return {
+    closes, volumes, ret1, logret5, logret10, sma20, sma50,
+    rsi14, macdHist, volz20, std20ret, max60,
+  };
+}
+
+/**
+ * Vector 10 đặc trưng tại chỉ số t (đã qua warmup ≥ 60 phiên); null nếu
+ * dữ liệu không đủ. Thứ tự cố định — mô hình serving phụ thuộc thứ tự này:
+ * [rsi14/100, macdHist/close, logret5, logret10, sma20/sma50−1,
+ *  close/sma20−1, volz20, std20(logret1), close/max60−1, logret1]
+ */
+function featureAt(r: RollingSeries, t: number): number[] | null {
+  if (t < ML_WARMUP_BARS - 1 || t >= r.closes.length) return null;
+  const close = r.closes[t];
+  const sma20 = r.sma20[t];
+  const sma50 = r.sma50[t];
+  if (sma20 == null || sma50 == null || sma20 <= 0 || sma50 <= 0) return null;
+  const max60 = r.max60[t];
+  if (max60 == null || max60 <= 0) return null;
+  const rsi = r.rsi14[t];
+  const hist = r.macdHist[t];
+  return [
+    (rsi ?? 50) / 100, // RSI phẳng → trung tính 0,5
+    hist != null ? hist / close : 0,
+    r.logret5[t] ?? 0,
+    r.logret10[t] ?? 0,
+    sma20 / sma50 - 1,
+    close / sma20 - 1,
+    Math.max(-8, Math.min(8, r.volz20[t] ?? 0)), // clip đuôi dài z-score KL
+    r.std20ret[t] ?? 0,
+    close / max60 - 1,
+    r.ret1[t] ?? 0,
+  ];
+}
+
+/** Nhãn hướng 5 phiên tới: 0=DOWN · 1=FLAT · 2=UP. */
+function labelAt(r: RollingSeries, t: number): number | null {
+  const future = t + ML_HORIZON_DAYS;
+  if (future >= r.closes.length) return null;
+  const ret = r.closes[future] / r.closes[t] - 1;
+  if (ret > ML_LABEL_THRESHOLD) return 2;
+  if (ret < -ML_LABEL_THRESHOLD) return 0;
+  return 1;
+}
+
+/**
+ * Xây tập huấn luyện trên top-N mã thanh khoản: mọi phiên t đủ 60 phiên
+ * lịch sử + t+5 tồn tại → (x, y). Sắp xếp THEO NGÀY tăng dần (stable) để
+ * cut 80/20 theo thời gian đúng nghĩa — val là block ngày MỚI NHẤT. Cap
+ * ML_MAX_SAMPLES mẫu gần nhất nếu vượt.
+ */
+export async function buildTrainingSet(topN = 20): Promise<TrainingSet> {
+  const series = await loadTopSeries(topN);
+  const xs: number[][] = [];
+  const ys: number[] = [];
+  const syms: string[] = [];
+  const dts: string[] = [];
+
+  for (const s of series) {
+    if (s.closes.length < ML_WARMUP_BARS + ML_HORIZON_DAYS) continue;
+    const roll = buildRolling(s.closes, s.volumes);
+    for (let t = ML_WARMUP_BARS - 1; t < s.closes.length; t++) {
+      const x = featureAt(roll, t);
+      const y = labelAt(roll, t);
+      if (x == null || y == null) continue;
+      xs.push(x);
+      ys.push(y);
+      syms.push(s.symbol);
+      dts.push(s.bars[t].date.toISOString().slice(0, 10));
+    }
+  }
+
+  // Sort theo ngày (stable) — đảm bảo split 80/20 theo THỜI GIAN đúng
+  const order = xs.map((_, i) => i).sort((a, b) => (dts[a] < dts[b] ? -1 : dts[a] > dts[b] ? 1 : 0));
+  const take = Math.min(order.length, ML_MAX_SAMPLES);
+  const keep = order.slice(order.length - take);
+  return {
+    X: keep.map((i) => xs[i]),
+    y: keep.map((i) => ys[i]),
+    symbols: keep.map((i) => syms[i]),
+    dates: keep.map((i) => dts[i]),
+  };
+}
+
+/**
+ * Đặc trưng phiên CUỐI của từng mã top-10 (chỉ nạp 60 bar/mã — nhẹ,
+ * dùng cho serving predict). Trả [{symbol, x}] theo thứ tự thanh khoản.
+ */
+export async function latestFeatures(): Promise<{ symbol: string; x: number[] }[]> {
+  const instruments = await db.instrument.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      symbol: true,
+      quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { volume: true } },
+    },
+  });
+  const ranked = instruments
+    .map((i) => {
+      const q = i.quotes[0];
+      return q ? { id: i.id, symbol: i.symbol } : null;
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+  const topIds = ranked.slice(0, 10);
+
+  const barLists = await Promise.all(
+    topIds.map((t) =>
+      db.bar
+        .findMany({
+          where: { instrumentId: t.id },
+          orderBy: { date: "desc" },
+          take: ML_WARMUP_BARS,
+          select: { close: true, volume: true },
+        })
+        .then((rows) => rows.filter((b) => b.close > 0).reverse())
+    )
+  );
+
+  const out: { symbol: string; x: number[] }[] = [];
+  topIds.forEach((t, i) => {
+    const rows = barLists[i];
+    if (rows.length < ML_WARMUP_BARS) return;
+    const roll = buildRolling(
+      rows.map((b) => b.close),
+      rows.map((b) => b.volume)
+    );
+    const x = featureAt(roll, rows.length - 1);
+    if (x != null) out.push({ symbol: t.symbol, x });
+  });
+  return out;
+}
+
+/**
+ * Chuẩn hoá z-score theo cột (fit trên tập train): mean/std từng đặc trưng,
+ * std = 0 → 1 (cột hằng). Trả mean/std (lưu featureNorm) + ma trận chuẩn hoá.
+ */
+export function standardize(X: number[][]): { mean: number[]; std: number[]; Xstd: number[][] } {
+  const n = X.length;
+  const d = n > 0 ? X[0].length : 0;
+  const mean = new Array<number>(d).fill(0);
+  const std = new Array<number>(d).fill(1);
+  if (n === 0) return { mean, std, Xstd: [] };
+  for (const row of X) for (let j = 0; j < d; j++) mean[j] += row[j];
+  for (let j = 0; j < d; j++) mean[j] /= n;
+  for (let j = 0; j < d; j++) {
+    let v = 0;
+    for (const row of X) v += (row[j] - mean[j]) * (row[j] - mean[j]);
+    v /= n;
+    std[j] = v > 0 ? Math.sqrt(v) : 1;
+  }
+  const Xstd = X.map((row) => row.map((v, j) => (v - mean[j]) / std[j]));
+  return { mean, std, Xstd };
+}
+
+/** Áp norm z-score đã học cho 1 vector đặc trưng (serving). */
+export function applyNorm(x: number[], mean: number[], std: number[]): number[] {
+  return x.map((v, j) => (v - (mean[j] ?? 0)) / ((std[j] ?? 1) || 1));
+}

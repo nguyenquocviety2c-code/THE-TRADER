@@ -1,8 +1,8 @@
 # The Trader
 
-> **Dashboard multi-agent paper-trading cho VNDIRECT** — đội **23 agent AI chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy) chạy **chu kỳ 6 đợt A→F** (Đợt D = **Bộ tổng hợp Bayes nhân quả** — log-odds 4 bậc trên dữ liệu thật, 0 LLM) phân tích realtime trên **dữ liệu giá EOD THẬT VNDIRECT** (90K bar 2013→nay qua dchart public API), bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ.
+> **Dashboard multi-agent paper-trading cho VNDIRECT** — đội **23 agent AI chia 5 nhóm** (Nghiên cứu · Kiểm soát VETO · Điều hành · Nền tảng dữ liệu · Học máy) chạy **chu kỳ 6 đợt A→F** (Đợt D = **Bộ tổng hợp Bayes nhân quả** — log-odds 4 bậc trên dữ liệu thật, 0 LLM) phân tích realtime trên **dữ liệu giá EOD THẬT VNDIRECT** (90K bar 2013→nay qua dchart public API), bảng giá VN30, tin tức RSS thật, tín hiệu giao dịch + lệnh giấy, kèm audit trail đầy đủ. **Phòng Học máy chạy 3 thuật toán RL/DL THẬT** (phiên #35): MLP backprop+Adam · Q-learning tabular · Thompson sampling.
 
-**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **Space Bunny Free** (Opencode Zen, free-tier $0, chạy được cả ngoài sandbox — mặc định cho toàn đội) / fallback **GLM-4.6** (trong sandbox Z.ai) · **socket.io** · **giá EOD thật VNDIRECT dchart** (90.785 bar 2013→nay) · **7 workspace** (Tổng quan · Thị trường · Danh mục · Tín hiệu · Đội Agent · Tổng hợp · Cài đặt) · **Bộ tổng hợp Bayes nhân quả** (Đợt D của chu kỳ — `src/lib/quant` + `src/lib/bayes`: OLS · Holt · lexicon NLP tiếng Việt · regime, 0 LLM)
+**Next.js 16** · **TypeScript** · **Prisma + Supabase Postgres** · **shadcn/ui** · **Space Bunny Free** (Opencode Zen, free-tier $0, chạy được cả ngoài sandbox — mặc định cho toàn đội) / fallback **GLM-4.6** (trong sandbox Z.ai) · **socket.io** · **giá EOD thật VNDIRECT dchart** (90.785 bar 2013→nay) · **7 workspace** (Tổng quan · Thị trường · Danh mục · Tín hiệu · Đội Agent · Tổng hợp · Cài đặt) · **Bộ tổng hợp Bayes nhân quả** (Đợt D của chu kỳ — `src/lib/quant` + `src/lib/bayes`: OLS · Holt · lexicon NLP tiếng Việt · regime, 0 LLM) · **học máy RL/DL thật** (`src/lib/ml`: MLP dự báo 5 phiên · Q-learning 48 trạng thái · Thompson sampling Beta-Bernoulli — thuần TypeScript, 0 deps mới)
 
 > **Miễn trừ trách nhiệm:** đây là dự án minh họa (demo). **Lịch sử giá EOD 2013→nay là dữ liệu THẬT** từ VNDIRECT dchart (đã adjust — 90.785 bar, 30 mã VN30); giá intraday trong phiên vẫn **mô phỏng** quanh mức tham chiếu thật (random-walk + mean-reversion, gắn nhãn `simulated`) — trừ khi bật chế độ `realtime-vndirect` qua module Cài đặt (phiên #34, cần máy chủ có egress tới VNDIRECT): khi đó tick trong phiên lấy giá cuối thật finfo, lỗi mạng thì tự fallback quanh ref EOD thật + gắn nhãn `fallback`; dòng khối ngoại mô phỏng deterministic (khai báo rõ); toàn bộ lệnh là **paper trading** — lệnh giấy nội bộ, không gửi ra môi giới; tin tức RSS là dữ liệu thật nhưng chỉ làm ngữ cảnh phân tích. Dự án **không** dùng để giao dịch tiền thật.
 
@@ -15,6 +15,7 @@
 - **Biểu đồ nến Nhật + RSI14 trên dữ liệu EOD thật** — nến custom (xanh=đóng≥mở) + volume histogram màu phiên + panel RSI Wilder (guideline 30/70, vùng quá mua/bán); toggle Nến/Đường, khung 30/60/90 phiên; chuỗi OHLCV 2013→nay là **bar thật VNDIRECT dchart**.
 - **23 AI agent (5 nhóm) — làm việc trực tiếp** — Nghiên cứu (5) · Kiểm soát VETO (3) · Điều hành (4) · Nền tảng dữ liệu (4) · Học máy (7): **6 agent gọi LLM mỗi chu kỳ** (market-analyst · fair-value · news-sentiment · liquidity · risk-manager · portfolio-strategist), **17 agent còn lại chạy deterministic từ DB** (0 chi phí LLM, ~0.2–1.5s); chu kỳ **6 đợt A→F** (Đợt D = Bộ tổng hợp Bayes — xem dưới); 4 LLM nghiên cứu + risk-manager giờ kèm **assessment JSON** `{direction, confidence, evidence[]}` làm phiếu bầu cho Bộ tổng hợp Bayes; roster UI chia 5 nhóm + badge VETO; **chạy riêng từng agent**, **chat 1-1** (AgentMessage.direction USER/AGENT), hồ sơ chi phí token/$ từng agent + sparkline 7 ngày, rate-limit 60s/agent có đếm ngược.
 - **Bộ tổng hợp Bayes nhân quả (phiên #34 — workspace Tổng hợp)** — **Đợt D** của chu kỳ, chạy giữa Ủy ban Kiểm soát và Chủ tịch: engine **log-odds naive Bayes 4 bậc nhân quả** (Bậc 0 tiên nghiệm base-rate **250 phiên thật · 7.500 quan sát** → Bậc 1 thị trường: breadth · lexicon NLP tiếng Việt (~75 thuật ngữ + phủ định) · dòng khối ngoại · Holt double exponential · regime → Bậc 2 ngành → Bậc 3 cổ phiếu kế thừa posterior thị trường), clamp LR [0.5, 3] · weight [0.3, 1] · |L|≤4; **sensitivity Δlog-odds → drivers**, disagreement, narrative tiếng Việt tự sinh; phiếu bầu LLM có trọng số healthScore/successRate; forecast 5 phiên Holt kèm CI80; VETO Ủy ban Kiểm soát vẫn là ràng buộc cứng, banner phủ quyết ngay trên nhận định; **0 LLM — $0** (`GET /api/assessment` · `POST /api/assessment/synthesize` cooldown 10s).
+- **Học máy RL/DL THẬT (phiên #35 — `src/lib/ml`, 0 deps mới)** — 3 thuật toán thuần TypeScript chạy trong code (7/7 agent Phòng Học máy vận hành thật, hết stub): **MLP deep learning** dự báo hướng giá 5 phiên (10→16→8→3, He init, cross-entropy class-weight, backprop tay + Adam, batch 32, early-stop, split 80/20 theo thời gian, seed 42 deterministic — đo thật trên **58.726 mẫu EOD thật**: **valAcc 40,2%** vs random 33,3% · trainAcc 42,9% · 16 epochs · ~6s train) · **Q-learning tabular 48 trạng thái × 3 hành động** (α 0,1 · γ 0,95 · ε 1→0,05 · **300 episodes** · avgReward 50 ep cuối +0,064) tham mưu phơi nhiễm danh mục · **Thompson sampling Beta-Bernoulli 5 arms** tự học trọng số phiếu LLM (reward = phiếu đúng hướng giá thực tế sau 5 phiên, FLAT khớp 0,7); card "Học máy & Học tăng cường" trong workspace Tổng hợp + nút **Huấn luyện** (`GET /api/ml/status` · `POST /api/ml/train` cooldown 10s → 429 Retry-After); bằng chứng `mlp-forecast` + `rl-policy` chảy vào Bộ tổng hợp Bayes (46→50 bằng chứng).
 - **Module Cài đặt (phiên #34)** — nhập cấu hình **VNDIRECT** (consumer key/secret/access token/số tài khoản; secret mask 4 ký tự đầu + ····; bỏ trống = giữ, `""` = xoá) + **Kiểm tra kết nối thật** (OAuth2 `auth.vndirect.com.vn` + finfo) + chọn **mode dữ liệu runtime** `real-eod` | `realtime-vndirect` | `simulated` (bảng `AppSetting` ghi đè env, không cần restart) — mode realtime chưa cấu hình/lỗi fetch → tự fallback `real-eod` an toàn, UI badge "Đang fallback: EOD thật".
 - **Human-in-the-loop phê duyệt** — chu kỳ sinh tín hiệu **ACTIVE chờ duyệt**; trader **✅ Phê duyệt** (lệnh paper LIMIT 5% NAV) hoặc **⛔ Từ chối** ngay trong feed tin nhắn / tab Tín hiệu; đầy đủ audit `SIGNAL_CREATED`/`SIGNAL_APPROVED`/`SIGNAL_REJECTED`.
 - **Tin tức RSS thật** — crawler 5 nguồn Việt Nam (VnEconomy, CafeF, VNExpress, Tuổi Trẻ, VietnamNet), dedupe theo URL, nạp tay hoặc tự động mỗi 15 phút.
@@ -46,12 +47,13 @@ flowchart TB
     Browser["Trình duyệt\nReact 19 · TanStack Query · socket.io-client"]
 
     subgraph App["Next.js — cổng 3000"]
-        API["Route Handlers /api/*\nquotes · news · flows · tick · eod-sync\nagents/run (chu kỳ 23 agents — 6 đợt A→F)\nassessment · settings · signals · portfolio · system/status…"]
+        API["Route Handlers /api/*\nquotes · news · flows · tick · eod-sync\nagents/run (chu kỳ 23 agents — 6 đợt A→F)\nassessment · settings · ml/status · ml/train\nsignals · portfolio · system/status…"]
         LLM["src/lib/llm.ts — provider abstraction:\nSpace Bunny Free — Opencode Zen (free-tier $0,\ncó key, chạy được ngoài sandbox, reasoning_effort low)\nhoặc z-ai-web-dev-sdk GLM-4.6 (sandbox) —\n6 agent LLM · 17 agent deterministic (0 LLM)"]
         BAYES["src/lib/bayes + src/lib/quant —\nBộ tổng hợp Bayes (Đợt D của chu kỳ):\nlog-odds 4 bậc nhân quả · 0 LLM"]
+        ML["src/lib/ml — Phòng Học máy thật (phiên #35):\nMLP backprop+Adam · Q-learning tabular\n· Thompson sampling Beta-Bernoulli\n(thuần TypeScript — 0 deps mới)"]
     end
 
-    DB[("Supabase Postgres — schema trader\nPrisma · 21 models\n(mới: AppSetting · MarketAssessment)")]
+    DB[("Supabase Postgres — schema trader\nPrisma · 24 models\n(#34: AppSetting · MarketAssessment;\n#35: MlModel · BanditArm · BanditEvent)")]
 
     subgraph Engine["mini-service market-engine — cổng 3003"]
         IO["socket.io server\nbroadcast: quotes · news · eod · cycle"]
@@ -68,6 +70,9 @@ flowchart TB
     Browser -- "WebSocket (qua gateway, XTransformPort=3003)" --> IO
     API --> DB
     API --> BAYES
+    API --> ML
+    ML -- "bằng chứng mlp-forecast · rl-policy\n+ trọng số bandit cho phiếu LLM" --> BAYES
+    ML -- "persist MlModel · BanditArm · BanditEvent" --> DB
     BAYES -- "persist MarketAssessment" --> DB
     SCHED -- "server-to-server (APP_URL)" --> API
     SCHED -- "POST /api/market/eod-sync (15:45 ICT hằng ngày + boot)" --> API
@@ -197,11 +202,14 @@ Biến cho mini-service `market-engine` (đặt trong môi trường shell hoặ
 ## Cấu trúc thư mục
 
 ```
-src/app/                      # App Router: page.tsx (dashboard) + api/ (route handlers)
+src/app/                      # App Router: page.tsx (dashboard) + api/ (route handlers
+                              # — 30 endpoint: agents · market · news · signals ·
+                              # portfolio · assessment · settings · ml/…)
 src/components/dashboard/     # Header, 7 workspace (overview · market · portfolio ·
                               # signals · agents · synthesis · settings),
                               # bảng giá, chart, portfolio, agents panel,
-                              # signals, risk alerts, news card, footer…
+                              # signals, risk alerts, news card, ml-panel (Học máy
+                              # & Học tăng cường), footer…
 src/lib/                      # db, llm (provider LLM), agent-roster (23 agents —
                               # nguồn duy nhất), agent-service-runs (16 hàm
                               # deterministic), agent-context (role prompts),
@@ -215,11 +223,15 @@ src/lib/                      # db, llm (provider LLM), agent-roster (23 agents 
                               # realtime), quant/ (statistics OLS · Holt
                               # forecast + CI80 · sentiment lexicon NLP tiếng
                               # Việt · regime), bayes/ (bộ tổng hợp log-odds
-                              # 4 bậc nhân quả — Đợt D)…
+                              # 4 bậc nhân quả — Đợt D), ml/ (phiên #35 — thuật
+                              # toán học thật: features · nn MLP backprop+Adam ·
+                              # rl Q-learning · bandit Thompson sampling)…
 src/hooks/                    # use-realtime (WebSocket), use-run-agents,
                               # use-assessment (Bộ tổng hợp Bayes),
-                              # use-settings (module Cài đặt)
-prisma/                       # schema.prisma (21 models — mới: AppSetting ·
+                              # use-settings (module Cài đặt),
+                              # use-ml (Học máy RL/DL — status/train)
+prisma/                       # schema.prisma (24 models — mới #35: MlModel ·
+                              # BanditArm · BanditEvent; #34: AppSetting ·
                               # MarketAssessment) + seed.ts
                               # + expand-agents.ts (migrate 5 → 23 agents, idempotent)
                               # + import-real-eod.ts (nạp EOD thật + rebase danh mục)
@@ -231,7 +243,7 @@ docs/                         # Tài liệu chi tiết (xem dưới)
 
 ## Tài liệu chi tiết
 
-- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (**28 endpoint** — có agents/[id] + run/chat + decision + market/eod-sync + assessment + settings), thiết kế 23 agents · 5 nhóm · **chu kỳ 6 đợt** (Đợt D = Bộ tổng hợp Bayes nhân quả; 6 LLM + 17 deterministic), realtime & mini-service market-engine
+- [docs/TECHNICAL_BLUEPRINT.md](docs/TECHNICAL_BLUEPRINT.md) — kiến trúc, API surface (**30 endpoint** — có agents/[id] + run/chat + decision + market/eod-sync + assessment + settings + ml/status + ml/train), thiết kế 23 agents · 5 nhóm · **chu kỳ 6 đợt** (Đợt D = Bộ tổng hợp Bayes nhân quả; 6 LLM + 17 deterministic), **Phòng Học máy 3 thuật toán thật** (§5.4: MLP · Q-learning · Thompson sampling) + **quyết định KHÔNG dùng LlamaIndex/LangChain** (§9.1), realtime & mini-service market-engine
 - [docs/DB_SCHEMA.md](docs/DB_SCHEMA.md) — data dictionary 19 model, chính sách kiểu dữ liệu / PII / audit
 - [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) — kho kiểm kê nguồn dữ liệu S1–S8 (S7 = EOD thật VNDIRECT dchart · S8 = finfo realtime chờ egress), field mapping, chiến lược fallback
 
@@ -241,7 +253,8 @@ docs/                         # Tài liệu chi tiết (xem dưới)
 
 - **LLM backend-only qua lớp provider duy nhất `src/lib/llm.ts`** — mọi cuộc gọi của 23 agent (6 agent chạy LLM) đi qua một cổng: `.env` đã cấu hình `OPENCODE_ZEN_API_KEY` (lấy tại **opencode.ai/zen**, dạng `oc_sk_…`) nên toàn đội chạy **Space Bunny Free** free-tier $0 và **chạy được trên máy local ngoài sandbox**; không có key thì tự dùng GLM-4.6 của sandbox Z.ai để phát triển. Khóa không nằm trong repo hay client bundle; model đang chạy hiển thị trực tiếp trên UI (chip Đội Agent + tooltip footer) qua `GET /api/agents` → `llm`.
 - **Kiến trúc 23 agents — nguồn duy nhất `src/lib/agent-roster.ts`** (thuần dữ liệu, dùng chung bởi seed · `prisma/expand-agents.ts` · API · UI): 5 nhóm — Nghiên cứu (5) · Kiểm soát VETO (3) · Điều hành (4) · Nền tảng dữ liệu (4) · Học máy (7); chu kỳ chạy **6 đợt A→F** (Đợt D — Bộ tổng hợp Bayes nhân quả; xem [docs/TECHNICAL_BLUEPRINT.md §5.2–5.3](docs/TECHNICAL_BLUEPRINT.md)); 17 agent dịch vụ chạy deterministic từ DB nên chu kỳ đầy đủ tốn đúng 6 lượt LLM.
-- **Scheduler chu kỳ agent mặc định TẮT** (`AGENT_CYCLE_MINUTES=0`) để tiết kiệm chi phí LLM — chạy chu kỳ thủ công bằng nút "Chạy chu kỳ đầy đủ (23 agents)" trên dashboard (đo thực tế: 1 chu kỳ ~42s, 0 lỗi, $0 với Space Bunny Free; trên dữ liệu EOD thật — phiên #33: 50,4s, 0 lỗi; phiên #34 với 6 đợt + Đợt D Bayes: 38,8s, 23 agents, 0 lỗi).
+- **Scheduler chu kỳ agent mặc định TẮT** (`AGENT_CYCLE_MINUTES=0`) để tiết kiệm chi phí LLM — chạy chu kỳ thủ công bằng nút "Chạy chu kỳ đầy đủ (23 agents)" trên dashboard (đo thực tế: 1 chu kỳ ~42s, 0 lỗi, $0 với Space Bunny Free; trên dữ liệu EOD thật — phiên #33: 50,4s, 0 lỗi; phiên #34 với 6 đợt + Đợt D Bayes: 38,8s, 23 agents, 0 lỗi; phiên #35 với Phòng Học máy thuật toán thật: 74,9s, 23 agents, 0 lỗi).
 - **Dữ liệu giá EOD THẬT (phiên #33 — 2026-10-06)** — 90.785 bar 2013→nay của 30 mã VN30 nạp từ dchart VNDIRECT (import 30/30 mã OK, 37,8s, 0 bar bỏ); mọi chỉ báo (SMA/RSI/valuation band/backtest) và prompt của 23 agent chạy trên **giá thật**; danh mục demo rebase theo giá thật (equity 1.373.869.150 ₫); đồng bộ tự động 15:45 ICT hằng ngày + lúc boot market-engine (event WebSocket `eod` → client invalidate quotes/bars/watchlist/portfolio). Cùng phiên đã fix **30 findings audit AUD-CODE** (1 P1 + 9 P2 + 20 P3): sweep Signal EXPIRED, transaction claim atomic khi APPROVE, VETO hard-enforce (exposure chặn MUA / compliance chặn mọi tín hiệu mới), watchdog AgentRun kẹt RUNNING, mutex tick chống lost-update…
 - **Phiên #34 (2026-10-06) — 7 workspace · Bộ tổng hợp Bayes nhân quả · module Cài đặt VNDIRECT:** (1) Tổng quan quá tải tách thành **7 workspace** (nav 7 tab cuộn ngang mobile, deep-link `?ws=`), overview gọn còn MarketSummary + AssessmentBrief + Signals compact + AgentSystemBrief; Prisma thêm `AppSetting` + `MarketAssessment` (đã push Supabase). (2) Chu kỳ lên **6 đợt** — **Đợt D Bộ tổng hợp Bayes** giữa Ủy ban Kiểm soát và Chủ tịch: log-odds naive Bayes **4 bậc nhân quả** (Bậc 0 tiên nghiệm 250 phiên thật · 7.500 quan sát → Bậc 1 thị trường → Bậc 2 ngành → Bậc 3 cổ phiếu), 0 LLM, sensitivity Δlog-odds → drivers, disagreement, narrative tiếng Việt; bộ thuật toán lượng hoá thật mới `src/lib/quant/` (OLS, Holt double exponential + CI80, lexicon NLP tiếng Việt ~75 thuật ngữ, regime) + indicators thêm MACD/Bollinger/ATR/OBV/Stochastic; đo thật: chu kỳ **38,8s · 23 agents · 0 lỗi**, assessment chu kỳ **46 bằng chứng · 8 agents · pUp 0.194/pDown 0.710 → BEARISH**; Chủ tịch trích nguyên "xác suất 72,1%" trong tín hiệu (khớp pDown 0.7209). (3) Module Cài đặt: `GET/PUT /api/settings` (secret mask 4 đầu + ····) + `POST /api/settings/test` probe thật; mode runtime ghi đè env; sandbox chặn egress tới VNDIRECT (DNS private 10.210.100.8) nên realtime tự an toàn fallback `real-eod` — cần máy chủ egress thật khi deploy. E2E browser: 7/7 workspace không tràn (desktop 1280 + mobile 390), 0 console error, tự fix 4 bug format % + 1 tràn cột AgentsPanel.
+- **Phiên #35 (2026-10-07) — Học máy & học tăng cường THẬT (7/7 agent Phòng Học máy hết stub):** audit phiên phát hiện nhóm "Phòng Học máy" 7 agents có **5 STUB** (rl-gym · rl-policy · dl-trainer · rl-trainer · model-registry chỉ đếm AgentRun), ml-forecast chỉ linear regression nông; xác minh **KHÔNG có LlamaIndex/LangChain** trong deps (package.json + node_modules) → quyết định kiến trúc **KHÔNG thêm cả hai** (lý do kỹ thuật + tiêu chí cân nhắc lại — [TECHNICAL_BLUEPRINT.md §9.1](docs/TECHNICAL_BLUEPRINT.md)). Code **3 thuật toán thật thuần TypeScript (0 deps mới)**: (1) **MLP** 10→16→8→3 (He init, cross-entropy class-weight, backprop tay, Adam, batch 32, early-stop patience 12, split 80/20 theo thời gian, deterministic seed 42) — MLP v5 đo thật trên **58.726 mẫu EOD thật** (top-20 thanh khoản): **valAcc 40,18% · trainAcc 42,9% · 16 epochs · ~6s train** (LR 0,01 — đã thử 0,004→34,15% và 0,02→diverge 28,71%); (2) **Q-learning tabular** 48 state × 3 action (α 0,1 · γ 0,95 · ε 1→0,05 · 300 episodes · reward exposure×ret − 0,001×|Δexposure|) — stance TĂNG · ε cuối 0,05 · avgReward +0,064; (3) **Thompson sampling Beta-Bernoulli** 5 arms (reward = phiếu LLM đúng hướng giá thực tế sau 5 phiên, FLAT khớp 0,7 — 7-8 phiếu chờ kết toán, KHÔNG bịa reward). Prisma **+3 model** (MlModel versioning serving|archived · BanditArm · BanditEvent → **24 models**) + API **+2 endpoint (30 tổng)**: `GET /api/ml/status` · `POST /api/ml/train` (cooldown 10s → 429 Retry-After; settle bandit trước train); 5 service runner rewrite thành thuật toán thật (dl-trainer predict hiện tại · rl-gym báo episodes thật · rl-policy policyStance · rl-trainer settlePendingRewards mỗi chu kỳ · model-registry động từ bảng MlModel). Bayes thêm bằng chứng **"mlp-forecast"** (LR 1+1,2×|pUp−pDown| cap 2,0 · w 0,6) + **"rl-policy"** (LR 1,4 · w 0,5) + agentVotes weight nhân posteriorMean bandit → chu kỳ **46→50 bằng chứng**; fix bug rổ RL lệch giữa train (top-10 quote volume) và evidence (top-10 ADTV) → stance mâu thuẫn → thống nhất `loadTopSeries(10)`. UI: card **"Học máy & Học tăng cường"** trong workspace Tổng hợp (3 khối + nút Huấn luyện + toast valAcc thật + 429 Retry-After — verified browser desktop + mobile; nút train v4→v5 deterministic khớp). E2E: chu kỳ 23 agents **0 lỗi 74,9s** · BEARISH **pUp 24,4%/pDown 64,6%** · Chủ tịch trích "xác suất 64,6%" (khớp pDown).
 - Giá intraday trong phiên và dòng tiền khối ngoại là **mô phỏng có khai báo** (mode `simulated` hiển thị trên footer) quanh mức tham chiếu THẬT; ngoài phiên bảng giá neo ở close thật (mode `real`); lịch sử giá EOD và tin tức RSS là dữ liệu thật.

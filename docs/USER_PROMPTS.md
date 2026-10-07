@@ -300,4 +300,25 @@
 
 ---
 
-*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-06 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free + phiên #33: rà soát toàn diện 30 findings audit + dữ liệu EOD thật VNDIRECT + phiên #34: 7 workspace · Bộ tổng hợp Bayes nhân quả · module Cài đặt VNDIRECT) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*
+## Prompt — Phiên #35 (2026-10-07)
+
+> **Người dùng:** "đánh giá kiến trúc học tăng cường, học sâu của hệ thống đội agents đã hoàn thành triệt để chưa và có vận hành thật không, có LlamaIndex chưa, cần thiết xây dựng thêm hệ thống LangChain không. Cuối cùng là báo cáo và push code"
+
+**Diễn giải — 4 câu hỏi gộp trong 1 phiên (#35):**
+1. **Đánh giá RL/DL của đội agents** — kiến trúc học tăng cường + học sâu đã hoàn thành triệt để chưa, có "vận hành thật" không (thuật toán chạy trong code, không chỉ prompt instructions).
+2. **LlamaIndex** — đã có trong hệ thống chưa?
+3. **LangChain** — có cần thiết xây thêm không (quyết định kiến trúc)?
+4. **Báo cáo + push code** khi hoàn thành.
+
+**Thực thi (phiên #35 — 2 subagent song song 35-FE ∥ 35-ML → 35-VERIFY tích hợp + E2E):**
+- **Audit RL/DL (câu trả lời câu 1 — CHƯA triệt để, giờ THẬT):** trước #35 nhóm "Phòng Học máy" 7 agents có **5 STUB** chỉ đếm AgentRun (rl-gym · rl-policy · dl-trainer · rl-trainer · model-registry), ml-forecast chỉ **linear regression nông**; xác minh `package.json` + `node_modules` **KHÔNG có LlamaIndex/LangChain** (câu 2 — chưa có). Sau #35: **7/7 chạy thuật toán thật** — code **3 thuật toán thuần TypeScript (0 deps mới)** trong `src/lib/ml/`: (1) **MLP** 10→16→8→3 (He init · cross-entropy class-weight · backprop tay · Adam · batch 32 · early-stop patience 12 · split 80/20 theo thời gian · deterministic seed 42) — đo thật trên **58.726 mẫu EOD thật top-20 thanh khoản**: **valAcc 40,18% · trainAcc 42,9% · 16 epochs · ~6s train** (LR 0,01 — đã thử 0,004→34,15% · 0,02→diverge 28,71%); (2) **Q-learning tabular** 48 state × 3 action (α 0,1 · γ 0,95 · ε 1→0,05 · **300 episodes** · reward exposure×ret − 0,001×|Δexposure|) — stance **TĂNG** · ε cuối 0,05 · avgReward +0,064; (3) **Thompson sampling Beta-Bernoulli** 5 arms (reward = phiếu LLM đúng hướng giá thực tế sau 5 phiên · FLAT khớp 0,7 — 7-8 phiếu chờ kết toán, KHÔNG bịa reward). Prisma +3 model (MlModel · BanditArm · BanditEvent → **24 models**); API +2 endpoint (**30 tổng**): `GET /api/ml/status` · `POST /api/ml/train` (cooldown 10s → 429 Retry-After; settle bandit trước train); 5 service runner rewrite thuật toán thật; Bayes thêm bằng chứng **mlp-forecast** (LR 1+1,2×|pUp−pDown| cap 2,0 · w 0,6) + **rl-policy** (LR 1,4 · w 0,5) + agentVotes weight nhân posteriorMean bandit → chu kỳ **46→50 bằng chứng**.
+- **LlamaIndex/LangChain (câu 3 — KHÔNG cần xây thêm, ghi rõ lý do trong [TECHNICAL_BLUEPRINT.md §9.1](./TECHNICAL_BLUEPRINT.md)):** KHÔNG thêm LlamaIndex vì domain dữ liệu chủ yếu numeric (RAG văn bản đã có learning-rag window memory + lexicon sentiment — llamaindex-js chỉ có lợi khi cần RAG văn bản lớn); KHÔNG thêm LangChain vì orchestration 6 đợt deterministic tự code chặt hơn, đã có provider abstraction `src/lib/llm.ts` — LangChain là lớp trùng lặp không tương xứng. Tiêu chí cân nhắc lại: RAG văn bản lớn / multi-LLM routing.
+- **Fix bug rổ RL:** train dùng top-10 theo quote volume còn evidence dùng top-10 ADTV → 2 rổ lệch → stance "tăng"/"giảm" mâu thuẫn → **thống nhất `loadTopSeries(10)`** → stance khớp chính xác stored (tăng · exposure 1 · qMax 0,0139).
+- **UI:** card **"Học máy & Học tăng cường"** trong workspace Tổng hợp (3 khối MLP/Q-learning/Bandit + nút **Huấn luyện** + toast valAcc thật + 429 Retry-After) — verified browser desktop 1280 + mobile 390, nút train v4→v5 deterministic khớp 40,18%.
+- **E2E (câu 4 — báo cáo):** chu kỳ 23 agents **0 lỗi 74,9s** · assessment **50 bằng chứng · BEARISH pUp 24,4%/pDown 64,6%** · Chủ tịch trích "xác suất 64,6%" (khớp pDown); tsc 0 lỗi src/ · lint EXIT 0; hướng nâng cấp MLP ghi roadmap (ensemble rolling-window · đặc trưng ngành).
+
+**Trạng thái:** ✅ Hoàn thành — audit trung thực (5/7 stub → 7/7 thuật toán thật) + 3 mô hình học thật vận hành end-to-end (bằng chứng chảy vào Bộ tổng hợp Bayes Đợt D) + quyết định kiến trúc LlamaIndex/LangChain được ghi rõ kèm lý do.
+
+---
+
+*File được tạo lúc: 2026-10-05 · Cập nhật: 2026-10-07 (bổ sung Giai đoạn 4–6 + audit loop + Giai đoạn 3 triển khai + phiên #32: 23 agents/Space Bunny Free + phiên #33: rà soát toàn diện 30 findings audit + dữ liệu EOD thật VNDIRECT + phiên #34: 7 workspace · Bộ tổng hợp Bayes nhân quả · module Cài đặt VNDIRECT + phiên #35: học máy RL/DL thật — MLP · Q-learning · Thompson sampling · quyết định KHÔNG dùng LlamaIndex/LangChain) · Dự án: The Trader — Hệ thống giao dịch đa tác tử (VNDIRECT)*

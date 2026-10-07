@@ -23,6 +23,9 @@ import { classifyRegime } from "@/lib/quant/regime";
 import { holtForecastPct } from "@/lib/quant/forecast";
 import { aggregateSentiment } from "@/lib/quant/sentiment";
 import { historicalBaseRates, mean, zscore } from "@/lib/quant/statistics";
+import { latestFeatures, loadTopSeries } from "@/lib/ml/features";
+import { MLP } from "@/lib/ml/nn";
+import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
 import type {
   AgentVote,
   BayesEvidence,
@@ -245,6 +248,15 @@ export async function buildEvidenceBundle(
   /* ── 5. Phiếu LLM (chu kỳ ưu tiên, fallback DB 24h) → evidence + votes ── */
   const votes = await resolveLlmVotes(options.llmVotes);
   const voteStats = await loadVoteAgentStats(votes.map((v) => v.code));
+  // (phiên #35) Posterior Thompson sampling BanditArm — nhân vào weight phiếu:
+  // agent bầu đúng hướng giá thực tế nhiều → posteriorMean cao → tin hơn.
+  const banditArms =
+    votes.length > 0
+      ? await db.banditArm.findMany().catch(() => [])
+      : [];
+  const posteriorByCode = new Map(
+    banditArms.map((a) => [a.agentCode, (a.alpha + 1) / (a.alpha + a.beta + 2)])
+  );
   const agentVotes: AgentVote[] = [];
   for (const v of votes) {
     const roster = ROSTER_BY_CODE.get(v.code);
@@ -267,7 +279,10 @@ export async function buildEvidenceBundle(
       level: "market",
       direction: v.direction,
       likelihoodRatio: lr,
-      weight: Math.min(1, Math.max(0.3, healthScore / 100)),
+      weight: Math.min(
+        1,
+        Math.max(0.3, (healthScore / 100) * (posteriorByCode.get(v.code) ?? 1))
+      ),
       note: `${agentName} đánh giá ${v.direction === "UP" ? "TĂNG" : v.direction === "DOWN" ? "GIẢM" : "ĐI NGANG"} (tin cậy ${confidence.toFixed(2)})${firstNote ? ` — ${firstNote}` : ""}`,
     });
   }
@@ -454,6 +469,63 @@ export async function buildEvidenceBundle(
           }
         : null,
     });
+  }
+
+  /* ── 6g. (phiên #35) Bằng chứng học máy — MLP + Q-learning nếu có model ── */
+  // 1 query findMany kind in [dl-mlp, rl-q] status serving; chưa có model
+  // nào → bỏ qua im lặng (KHÔNG throw, KHÔNG log — module đọc là an toàn).
+  try {
+    const mlModels = await db.mlModel.findMany({
+      where: { kind: { in: ["dl-mlp", "rl-q"] }, status: "serving" },
+    });
+    const dlModel = mlModels.find((m) => m.kind === "dl-mlp");
+    const rlModel = mlModels.find((m) => m.kind === "rl-q");
+
+    // (a) mlp-forecast: predictProba phiên cuối top-10 (featureNorm tự áp)
+    if (dlModel) {
+      const mlp = MLP.fromJSON(dlModel.weights);
+      const feats = await latestFeatures();
+      if (feats.length > 0) {
+        const probs = feats.map((f) => mlp.predictProba(f.x));
+        const avgUp = mean(probs.map((p) => p[0]));
+        const avgDown = mean(probs.map((p) => p[2]));
+        const diff = avgUp - avgDown;
+        const direction: "UP" | "DOWN" | "FLAT" =
+          Math.abs(diff) < 0.05 ? "FLAT" : diff > 0 ? "UP" : "DOWN";
+        marketEvidence.push({
+          source: "mlp-forecast (MLP 10→16→8→3)",
+          agentName: "DL Trainer",
+          gen1: "A17",
+          level: "market",
+          direction,
+          likelihoodRatio: Math.min(2.0, 1 + 1.2 * Math.abs(diff)),
+          weight: 0.6,
+          note: `MLP v${dlModel.version} trên ${feats.length} mã: pUp ${(avgUp * 100).toFixed(1)}% / pDown ${(avgDown * 100).toFixed(1)}%`,
+        });
+      }
+    }
+
+    // (b) rl-policy: policyStance từ Q-table + rổ top-10 THEO QUOTE VOLUME
+    // (loadTopSeries(10) — CÙNG rổ với lúc train trong /api/ml/train, để
+    // stance hiển thị ở status và stance trong bằng chứng Bayes KHÔNG lệch nhau)
+    if (rlModel) {
+      const qTable = parseQTable(rlModel.weights);
+      const rlSeries = await loadTopSeries(10);
+      const basket = buildBasket(rlSeries.map((s) => s.closes));
+      const stance = policyStance(qTable, basket, 0.5);
+      marketEvidence.push({
+        source: "rl-policy (Q-learning 48×3)",
+        agentName: "RL Policy",
+        gen1: "A16",
+        level: "market",
+        direction: stance.stance === "tăng" ? "UP" : stance.stance === "giảm" ? "DOWN" : "FLAT",
+        likelihoodRatio: stance.stance === "giữ" ? 1.0 : 1.4,
+        weight: 0.5,
+        note: `Q-learning v${rlModel.version} khuyến nghị ${stance.stance} phơi nhiễm (exposure ${(stance.exposure * 100).toFixed(0)}%, Q-max ${stance.qMax.toFixed(2)})`,
+      });
+    }
+  } catch {
+    // mô hình hỏng/thiếu dữ liệu → im lặng bỏ qua, 4 bậc gốc không bị ảnh hưởng
   }
 
   /* ── 7. Bậc 2 · số liệu nền nhóm ngành (toàn rổ có quote) ───────────── */

@@ -570,3 +570,57 @@ model MarketAssessment {
 
   @@index([createdAt(sort: Desc)])
 }
+
+// ─────────────────────────────────────────────────────────────────
+// 10. PHÒNG HỌC MÁY (phiên #35 — Task 35-ML)
+//    Thuật toán THẬT thuần TypeScript: MLP deep learning (nn.ts),
+//    Q-learning tabular (rl.ts), Thompson sampling Beta-Bernoulli (bandit.ts).
+// ─────────────────────────────────────────────────────────────────
+
+// Mô hình học máy đã huấn luyện — mỗi lần train tạo 1 version mới,
+// bản cũ cùng kind bị chuyển status "archived". weights/featureNorm/metrics
+// lưu JSON string (MLP layers + z-score norm / Q-table 48×3).
+model MlModel {
+  id          String   @id @default(cuid())
+  kind        String // "dl-mlp" | "rl-q"
+  version     Int
+  status      String   @default("serving") // serving | archived
+  weights     String // JSON (MLP layers hoặc Q-table)
+  featureNorm String? // JSON z-score mean/std (MLP)
+  metrics     String // JSON: epochs/samples/trainAcc/valAcc/... hoặc episodes/epsilonEnd/avgReward/stance
+  trainedAt   DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@index([kind, status])
+}
+
+// Cánh tay Thompson sampling — 5 arms = 5 LLM research agents
+// (market-analyst, fair-value, news-sentiment, liquidity, risk-manager).
+// Posterior Beta(α+1, β+1); reward 1 = vote đúng hướng realized 5 phiên, 0 = sai.
+model BanditArm {
+  id           String    @id @default(cuid())
+  agentCode    String    @unique
+  alpha        Float     @default(1) // Beta prior B(1,1)
+  beta         Float     @default(1)
+  pulls        Int       @default(0)
+  wins         Float     @default(0)
+  lastRewardAt DateTime?
+  updatedAt    DateTime  @updatedAt
+}
+
+// Phiếu bầu chờ settle + kết quả: mỗi phiếu LLM trong MarketAssessment
+// (detail.drivers source "llm-vote:<code>") được đối chiếu realized direction
+// của rổ top-10 sau 5 NGÀY GIAO DỊCH → reward. Dòng tồn tại = đã settle.
+model BanditEvent {
+  id           String    @id @default(cuid())
+  assessmentId String
+  agentCode    String
+  direction    String // UP | DOWN | FLAT
+  castAt       DateTime
+  settledAt    DateTime?
+  reward       Float?
+  createdAt    DateTime @default(now())
+
+  @@unique([assessmentId, agentCode])
+  @@index([settledAt, castAt])
+}

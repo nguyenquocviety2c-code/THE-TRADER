@@ -46,6 +46,7 @@ import {
 import { Tooltip as UiTooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAssessment, useSynthesizeNow } from "@/hooks/use-assessment";
 import { useRunAgents } from "@/hooks/use-run-agents";
+import { MlPanel } from "@/components/dashboard/ml-panel";
 import { changeColor, formatDateTime, formatVnd } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type {
@@ -272,6 +273,10 @@ export function SynthesisWorkspace() {
           )}
         </>
       )}
+
+      {/* 7. Phiên #35 — Học máy & Học tăng cường (3 mô hình học thật,
+          query ml-status riêng — độc lập trạng thái assessment ở trên) */}
+      <MlPanel />
     </div>
   );
 }
