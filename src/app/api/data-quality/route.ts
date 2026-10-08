@@ -27,13 +27,21 @@ export async function GET(req: NextRequest) {
     const fromRaw = url.searchParams.get("from");
     const toRaw = url.searchParams.get("to");
 
+    // F-611-03/#61 — regex đúng dạng NHƯNG ngày không tồn tại (2026-13-99)
+    // cho Invalid Date → Prisma throw → 500 "db" (đã verify live). Lỗi nhập
+    // của client phải là 400, không được ngụy trang thành lỗi DB.
+    const parseDate = (raw: string | null, endOfDay: boolean): Date | null => {
+      if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+      const d = new Date(`${raw}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`);
+      if (Number.isNaN(d.getTime())) {
+        throw new DateParamError(raw);
+      }
+      return d;
+    };
+
     const asOf: { gte?: Date; lte?: Date } = {};
-    if (fromRaw && /^\d{4}-\d{2}-\d{2}$/.test(fromRaw)) {
-      asOf.gte = new Date(`${fromRaw}T00:00:00.000Z`);
-    }
-    if (toRaw && /^\d{4}-\d{2}-\d{2}$/.test(toRaw)) {
-      asOf.lte = new Date(`${toRaw}T23:59:59.999Z`);
-    }
+    asOf.gte = parseDate(fromRaw, false) ?? undefined;
+    asOf.lte = parseDate(toRaw, true) ?? undefined;
     const where = Object.keys(asOf).length > 0 ? { asOf } : {};
 
     const [rows, counts] = await Promise.all([
@@ -49,9 +57,14 @@ export async function GET(req: NextRequest) {
       }),
     ]);
 
+    // F-611-09/#61 — total = TỔNG MỌI level gặp (trước đây chỉ cộng 3 level
+    // đã biết — level lạ bị loại khỏi total âm thầm; ngày nay writer là union
+    // DqLevel nên không reachable, nhưng route không được giả định).
     const trend: Record<string, number> = { PASS: 0, DEGRADED: 0, SEVERE: 0 };
+    let trendTotal = 0;
     for (const c of counts) {
       trend[c.level] = c._count.level;
+      trendTotal += c._count.level;
     }
 
     const parse = (raw: string | null) => {
@@ -77,12 +90,25 @@ export async function GET(req: NextRequest) {
         ok: true,
         latest: history[0] ?? null,
         history,
-        trend: { ...trend, total: trend.PASS + trend.DEGRADED + trend.SEVERE },
+        trend: { ...trend, total: trendTotal },
         queryMs: Date.now() - startedAt,
       })
     );
   } catch (err) {
+    // F-611-03/#61 — lỗi tham số ngày → 400 (không phải 500 "db")
+    if (err instanceof DateParamError) {
+      return NextResponse.json(
+        { ok: false, error: `Tham số ngày "${err.raw}" không hợp lệ (dùng YYYY-MM-DD, ví dụ 2026-10-08).` },
+        { status: 400 }
+      );
+    }
     console.error("[api/data-quality] GET lỗi:", err);
     return NextResponse.json({ ok: false, error: "db" }, { status: 500 });
+  }
+}
+
+class DateParamError extends Error {
+  constructor(public raw: string) {
+    super(`invalid date param: ${raw}`);
   }
 }

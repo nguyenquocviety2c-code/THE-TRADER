@@ -374,7 +374,15 @@ function labelAt(r: RollingSeries, t: number): number | null {
  * cut 80/20 theo thời gian đúng nghĩa — val là block ngày MỚI NHẤT. Cap
  * ML_MAX_SAMPLES mẫu gần nhất nếu vượt.
  */
-export async function buildTrainingSet(topN = 20): Promise<TrainingSet> {
+/** Kết quả buildTrainingSet — kèm CHÍNH chuỗi dữ liệu vừa dùng (F-611-01/#61). */
+export interface TrainingSetWithSeries extends TrainingSet {
+  /** Chuỗi dữ liệu đã build tập train — digest PIT (P1-2) PHẢI hash trên
+   * chuỗi NÀY (trước đây route load LẦN THỨ HAI độc lập → bar đổi giữa 2 lượt
+   * nạp làm window-hash sai sự thật của cửa sổ đã train). */
+  series: SymbolSeries[];
+}
+
+export async function buildTrainingSet(topN = 20): Promise<TrainingSetWithSeries> {
   const series = await loadTopSeries(topN);
   const xs: number[][] = [];
   const ys: number[] = [];
@@ -404,6 +412,7 @@ export async function buildTrainingSet(topN = 20): Promise<TrainingSet> {
     y: keep.map((i) => ys[i]),
     symbols: keep.map((i) => syms[i]),
     dates: keep.map((i) => dts[i]),
+    series, // F-611-01/#61 — digest phải hash CHÍNH chuỗi này
   };
 }
 

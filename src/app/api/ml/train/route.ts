@@ -26,10 +26,19 @@ export const runtime = "nodejs";
  *
  * Versioning: updateMany bản serving cùng kind → archived, create version
  * max+1 (weights = JSON mạng/Q-table, featureNorm = z-score, metrics JSON).
- * Cooldown in-memory 10s → 429 kèm Retry-After (pattern synthesize #34).
+ * Cooldown in-memory → 429 kèm Retry-After (pattern synthesize #34).
+ *
+ * F-612R-06/#61 (Vòng 2): cooldown 10s cũ NGẮN HƠN thời lượng train thật
+ * (~12s đo #60) + không mutex → POST thứ 2 lọt vào giữa chừng: nextVersion
+ * (max+1) + archive + create là 3 await rời → 2 hàng (kind,version) trùng +
+ * 2 hàng serving cùng lúc; archive xong rồi create fail → kind KHÔNG còn
+ * serving (ensemble âm thầm fallback linreg). Giờ: cooldown 60s + mutex
+ * in-flight + saveModel trong MỘT $transaction.
  */
-const COOLDOWN_MS = 10_000;
+const COOLDOWN_MS = 60_000;
 let lastTrainAt = 0;
+/** F-612R-06 — 1 train chạy tại 1 thời điểm (pattern F-441-01). */
+let inFlight = false;
 
 type MlTrainTarget = "all" | "dl-mlp" | "rl-q";
 
@@ -64,7 +73,9 @@ async function nextVersion(kind: string): Promise<number> {
   return (agg._max.version ?? 0) + 1;
 }
 
-/** Lưu model mới: archive bản serving cũ + create version mới.
+/** Lưu model mới: archive bản serving cũ + create version mới — MỘT
+ *  $transaction (F-612R-06: archive xong create fail trước đây để kind
+ *  KHÔNG còn bản serving nào — ensemble âm thầm xuống linreg).
  *  P1-2 (#60): meta = JSON TrainingWindowMeta (window-hash SHA-256 + biên
  *  ngày train) — null giữ cho model không có window (gọi trực tiếp). */
 async function saveModel(
@@ -75,22 +86,26 @@ async function saveModel(
   meta: TrainingWindowMeta | null = null
 ): Promise<number> {
   const version = await nextVersion(kind);
-  await db.mlModel.updateMany({
-    where: { kind, status: "serving" },
-    data: { status: "archived" },
-  });
-  await db.mlModel.create({
-    data: {
-      kind,
-      version,
-      status: "serving",
-      weights,
-      featureNorm,
-      metrics: JSON.stringify(metrics),
-      ...(meta ? { meta: JSON.stringify(meta) } : {}),
-    },
-  });
-  return version;
+  // F-612R-06 — array-form $transaction: [updateMany(BatchPayload), create(MlModel)]
+  // — lấy phần tử THỨ HAI (model mới), phần tử đầu là số dòng archive.
+  const [, created] = await db.$transaction([
+    db.mlModel.updateMany({
+      where: { kind, status: "serving" },
+      data: { status: "archived" },
+    }),
+    db.mlModel.create({
+      data: {
+        kind,
+        version,
+        status: "serving",
+        weights,
+        featureNorm,
+        metrics: JSON.stringify(metrics),
+        ...(meta ? { meta: JSON.stringify(meta) } : {}),
+      },
+    }),
+  ]);
+  return created.version;
 }
 
 /**
@@ -103,9 +118,12 @@ async function trainDlMlp(): Promise<TrainedDlMlpMetrics> {
   if (set.X.length < 600) {
     throw new Error(`chỉ có ${set.X.length} mẫu huấn luyện (cần ≥ 600) — kiểm tra dữ liệu EOD`);
   }
-  // P1-2 — digest cửa sổ train TRÊN CHÍNH chuỗi dữ liệu vừa dùng (tái lập PIT)
-  const series = await loadTopSeries(20);
-  const windowMeta = trainingWindowDigest(series, { samples: set.X.length });
+  // P1-2 — digest cửa sổ train TRÊN CHÍNH chuỗi dữ liệu vừa dùng (tái lập PIT).
+  // F-611-01/#61: buildTrainingSet giờ TRẢ KÈM series nó đã nạp — digest hash
+  // trên chuỗi ĐÓ (trước đây loadTopSeries LẦN THỨ HAI độc lập: bar đổi giữa 2
+  // lượt nạp (eod-sync/corporate adjust chạy nền) → window-hash mô tả sai cửa
+  // sổ đã train — phá đúng cái PIT P1-2 xây ra; đồng thời đỡ 1 lượt nạp DB đầy).
+  const windowMeta = trainingWindowDigest(set.series, { samples: set.X.length });
   const { mean, std, Xstd } = standardize(set.X);
   const mlp = new MLP();
   const fit = mlp.fit(Xstd, set.y);
@@ -171,6 +189,7 @@ async function trainRlQ(): Promise<TrainedRlQMetrics> {
 }
 
 export async function POST(req: Request) {
+  // F-612R-06/#61 (Vòng 2) — cooldown check TRƯỚC mutex (429/400 sớm không cắm cờ)
   const now = Date.now();
   const sinceLast = now - lastTrainAt;
   if (sinceLast < COOLDOWN_MS) {
@@ -183,6 +202,14 @@ export async function POST(req: Request) {
       { status: 429, headers: { "Retry-After": String(retryAfterSeconds) } }
     );
   }
+  if (inFlight) {
+    return NextResponse.json(
+      { error: "Huấn luyện đang chạy (mutex F-612R-06) — vui lòng đợi hoàn tất." },
+      { status: 429, headers: { "Retry-After": "30" } }
+    );
+  }
+  inFlight = true;
+  try {
 
   // Body {target} — default "all" (tolerant: body rỗng/JSON hỏng đều dùng "all")
   let target: MlTrainTarget = "all";
@@ -259,5 +286,9 @@ export async function POST(req: Request) {
       { ok: false, error: "Huấn luyện thất bại (lỗi dữ liệu đầu vào). Vui lòng thử lại." },
       { status: 500 }
     );
+  }
+  } finally {
+    // F-612R-06 — mutex nhả ở MỌI đường thoát (400 sớm · 500 · thành công)
+    inFlight = false;
   }
 }

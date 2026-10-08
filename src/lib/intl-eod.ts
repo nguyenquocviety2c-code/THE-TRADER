@@ -480,7 +480,30 @@ export async function syncIntlEod(opts?: {
       // (nguồn XÁC ĐỊNH CHÍNH XÁC — không heuristic gap-infer như VN).
       // Chuỗi giá đang dùng adjclose → ĐÃ adjust sẵn; fallback raw close
       // → detail cảnh báo "chuỗi chưa adjust" để người đọc biết.
+      //
+      // F-611B-08/#61 — (a) status trung thực theo adjclose: chuỗi raw-close
+      // chưa adjust → SUSPECTED (đúng ngữ nghĩa "ghi nhận, chưa xử lý"), chỉ
+      // adjclose mới AUTO_ADJUSTED (trước đây DIVIDEND + raw-fallback đều ghi
+      // AUTO_ADJUSTED — nhãn sai); (b) row REVERSED (quyết định NGƯỜI) không
+      // bị update đè detail đảo ngược mỗi lần sync lại (trước đây update
+      // branch chạy hằng ngày, clobber reversedAt/barsRestored).
       for (const ev of res.events) {
+        // F-611R-06/#61 (Vòng 2) — KHÔNG `.catch(() => null)` ở guard REVERSED:
+        // DB lỗi → null → nhảy qua check → upsert đè detail row REVERSED (mất
+        // reversedAt/barsRestored). Để lỗi NÉM — per-instrument catch của sync
+        // bắt vào symbolsFailed (trung thực).
+        const existingEvent = await db.corporateEvent.findUnique({
+          where: {
+            instrumentId_date_kind: {
+              instrumentId: inst.id,
+              date: ev.date,
+              kind: ev.kind,
+            },
+          },
+        });
+        if (existingEvent?.status === "REVERSED") {
+          continue; // người đã đảo ngược — giữ nguyên row, không đè chi tiết
+        }
         await db.corporateEvent
           .upsert({
             where: {
@@ -495,7 +518,7 @@ export async function syncIntlEod(opts?: {
               date: ev.date,
               kind: ev.kind,
               ratio: ev.ratio,
-              status: "AUTO_ADJUSTED",
+              status: res.bars.adjcloseUsed ? "AUTO_ADJUSTED" : "SUSPECTED",
               source: "yahoo-events",
               detail: JSON.stringify({
                 ...ev.detail,
@@ -507,6 +530,9 @@ export async function syncIntlEod(opts?: {
             },
             update: {
               ratio: ev.ratio,
+              ...(existingEvent?.status === "SUSPECTED" && res.bars.adjcloseUsed
+                ? { status: "AUTO_ADJUSTED" as const } // raw → adjclose: chuỗi giờ ĐÃ adjust — khôi phục nhãn đúng
+                : {}),
               source: "yahoo-events",
               detail: JSON.stringify({
                 ...ev.detail,

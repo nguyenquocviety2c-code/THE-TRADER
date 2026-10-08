@@ -200,13 +200,15 @@ export async function topByAdtv(
   if (instruments.length === 0) return [];
 
   const cutoff = new Date(Date.now() - ADTV_CALENDAR_DAYS * 86_400_000);
-  const bars = await db.bar
-    .findMany({
-      where: { instrumentId: { in: instruments.map((i) => i.id) }, date: { gte: cutoff } },
-      orderBy: [{ instrumentId: "asc" }, { date: "asc" }],
-      select: { instrumentId: true, close: true, volume: true, value: true },
-    })
-    .catch(() => []);
+  // F-612R-02/#61 (Vòng 2): KHÔNG nuốt lỗi DB ở đây — để lỗi NÉM lên cho
+  // caller xử lý trung thực (A9 giờ guard() → SEVERE; trước đây `.catch(() => [])`
+  // cho rỗ [] → phép readiness A9 "0/0 mã" = PASS GIẢ khi đúng query rổ bị lỗi
+  // — chồng hụng của F-591-02 mà #59 chưa phủ tới đường topByAdtv).
+  const bars = await db.bar.findMany({
+    where: { instrumentId: { in: instruments.map((i) => i.id) }, date: { gte: cutoff } },
+    orderBy: [{ instrumentId: "asc" }, { date: "asc" }],
+    select: { instrumentId: true, close: true, volume: true, value: true },
+  });
   // Fixbug #59 F-591-01: đúng hợp đồng "ADTV 45 PHIẦN" — mean của 45 bar
   // CUỐI mỗi mã (trước đây mean toàn cửa sổ 77 ngày ≈ 53 phiên — đo thực
   // 08-10 làm rổ lệch vị trí 10: PNJ thay VCB, và mâu thuẫn tail-45 của
@@ -255,16 +257,16 @@ export async function loadTopDatedSeries(
     options.sinceDays != null && options.sinceDays > 0
       ? new Date(Date.now() - options.sinceDays * 86_400_000)
       : null;
-  const bars = await db.bar
-    .findMany({
-      where: {
-        instrumentId: { in: ranked.map((r) => r.id) },
-        ...(since ? { date: { gte: since } } : {}),
-      },
-      orderBy: { date: "asc" },
-      select: { instrumentId: true, date: true, open: true, high: true, low: true, close: true, volume: true, value: true },
-    })
-    .catch(() => []);
+  // F-612R-02/#61 (Vòng 2) — tương tự topByAdtv: lỗi DB ném lên (caller tự
+  // guard) — không nuốt thành chuỗi rỗng giả "không có dữ liệu".
+  const bars = await db.bar.findMany({
+    where: {
+      instrumentId: { in: ranked.map((r) => r.id) },
+      ...(since ? { date: { gte: since } } : {}),
+    },
+    orderBy: { date: "asc" },
+    select: { instrumentId: true, date: true, open: true, high: true, low: true, close: true, volume: true, value: true },
+  });
   const byId = new Map<string, DatedBar[]>();
   const seenDate = new Map<string, Set<string>>();
   for (const b of bars) {

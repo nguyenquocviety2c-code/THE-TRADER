@@ -118,6 +118,8 @@ export interface CorporateEventScanResult {
   scanned: number;
   candidates: CeCandidate[];
   adjusted: CeAdjustment[];
+  /** Mã quét LỖI (F-611A-06/#61 — DB lỗi từng mã không bị nuốt im lặng). */
+  failures: { symbol: string; error: string }[];
   /** 6 phép A9 chạy lại sau adjust (nghiệm thu P1-1) — null khi không adjust. */
   verdictAfter: { level: string; outlierSymbols: number; splitSuspects: string[] } | null;
   durationMs: number;
@@ -130,12 +132,15 @@ export async function isAutoAdjustEnabled(): Promise<boolean> {
   const row = await db.appSetting
     .findUnique({ where: { key: CE_SETTING_KEY } })
     .catch(() => null);
-  if (!row) return true; // mặc định BẬT (chốt 8-3b)
+  // Không có row → mặc định BẬT (chốt 8-3b). Mọi trường hợp KHÔNG đọc được
+  // (DB lỗi · JSON hỏng) → TẮT (fail-safe — tính năng SỬA GIÁ THẬT phải
+  // fail-closed; F-611A-05/#61: trước đây JSON hỏng trả true ngược comment).
+  if (!row) return true;
   try {
     const parsed = JSON.parse(row.value) as { enabled?: unknown };
     return parsed.enabled !== false; // {enabled: false} mới tắt
   } catch {
-    return true; // JSON hỏng → an toàn mặc định bật? KHÔNG — tắt (fail-safe)
+    return false; // JSON hỏng → TẮT (fail-safe — đúng như comment khai báo)
   }
 }
 
@@ -199,92 +204,126 @@ export async function scanCorporateEvents(opts?: {
   const autoAdjustEnabled = await isAutoAdjustEnabled();
 
   const cutoff = new Date(Date.now() - CE_SCAN_WINDOW_DAYS * 86_400_000);
-  const instruments = await db.instrument
-    .findMany({
-      where: {
-        isActive: true,
-        market: { in: ["HOSE", "HNX", "UPCOM"] },
-        ...(opts?.instrumentIds ? { id: { in: opts.instrumentIds } } : {}),
-      },
-      select: { id: true, symbol: true, market: true, type: true },
-      orderBy: { symbol: "asc" },
-    })
-    .catch(() => [] as { id: string; symbol: string; market: string; type: string }[]);
+  // F-611A-06/#61: KHÔNG nuốt lỗi DB ở truy vấn chính (mẫu F-591-02) — lỗi
+  // ném lên cho route/pipeline bắt và ghi nhận trung thực.
+  const instruments = await db.instrument.findMany({
+    where: {
+      isActive: true,
+      market: { in: ["HOSE", "HNX", "UPCOM"] },
+      ...(opts?.instrumentIds ? { id: { in: opts.instrumentIds } } : {}),
+    },
+    select: { id: true, symbol: true, market: true, type: true },
+    orderBy: { symbol: "asc" },
+  });
 
   // Chỉ mã CÓ dải giá (STOCK/ETF — INDEX/FUND không band, không thể gap-infer)
   const eligible = instruments.filter((i) => priceBand(i.market, i.type) != null);
 
   const candidates: CeCandidate[] = [];
   const adjusted: CeAdjustment[] = [];
+  const failures: { symbol: string; error: string }[] = [];
 
   for (const inst of eligible) {
     const band = priceBand(inst.market, inst.type)!;
-    const bars = await db.bar
-      .findMany({
+    try {
+      const bars = await db.bar.findMany({
         where: { instrumentId: inst.id, date: { gte: cutoff } },
         orderBy: { date: "asc" },
         select: {
           date: true, open: true, high: true, low: true, close: true,
           volume: true, value: true, firstSeenAt: true, lastSyncedAt: true,
         },
-      })
-      .catch(() => [] as ScanBar[]);
-    if (bars.length < 3) continue;
-
-    for (let t = 1; t < bars.length; t++) {
-      const prev = bars[t - 1];
-      const cur = bars[t];
-      if (!(prev.close > 0) || !(cur.open > 0) || !(cur.close > 0)) continue;
-      // (1) ĐIỀU KIỆN TIÊN QUYẾT: gap open/prevClose VƯỢT dải (trừ biên tick)
-      if (!beyondBand(cur.open, prev.close, band)) continue;
-
-      const adtv = adtvOf(bars, t);
-      const eventValue = cur.value != null ? Number(cur.value) : cur.close * cur.volume;
-      // (2) volume corroborate ≥ 3× ADTV — thiếu thì KHÔNG phải event
-      // (bad-tick để A9 outlier lo), không tạo row
-      if (!(adtv > 0) || eventValue < CE_VOLUME_CORROBORATE * adtv) continue;
-
-      const f = cur.open / prev.close;
-      const fClose = cur.close / prev.close;
-      const agreementPct = Math.abs(fClose / f - 1) * 100;
-      // (3) tỷ số khớp ±1% cả 2 phép
-      const highConfidence = agreementPct <= CE_RATIO_AGREEMENT_PCT;
-
-      candidates.push({
-        symbol: inst.symbol,
-        instrumentId: inst.id,
-        eventDate: cur.date.toISOString().slice(0, 10),
-        f: Number(f.toFixed(6)),
-        fClose: Number(fClose.toFixed(6)),
-        agreementPct: Number(agreementPct.toFixed(3)),
-        gapPct: Number(((f - 1) * 100).toFixed(2)),
-        eventValue,
-        adtv: Math.round(adtv),
-        highConfidence,
       });
+      if (bars.length < 3) continue;
 
-      if (highConfidence && autoAdjustEnabled) {
-        const res = await applyAutoAdjust(inst, bars, t, f).catch((err) => {
-          console.error(`[corporate-events] adjust ${inst.symbol} lỗi:`, err);
-          return null;
-        });
-        if (res) adjusted.push(res);
-      } else {
-        // SUSPECTED — ghi nhận trung thực, KHÔNG sửa giá
-        await upsertEventRow(inst, cur.date, f < 1 ? "BONUS" : "SPLIT", f, "SUSPECTED", {
-          gapPct: ((f - 1) * 100).toFixed(2),
-          agreementPct: agreementPct.toFixed(3),
+      for (let t = 1; t < bars.length; t++) {
+        const prev = bars[t - 1];
+        const cur = bars[t];
+        if (!(prev.close > 0) || !(cur.open > 0) || !(cur.close > 0)) continue;
+        // (1) ĐIỀU KIỆN TIÊN QUYẾT: gap open/prevClose VƯỢT dải (trừ biên tick)
+        if (!beyondBand(cur.open, prev.close, band)) continue;
+
+        const adtv = adtvOf(bars, t);
+        const eventValue = cur.value != null ? Number(cur.value) : cur.close * cur.volume;
+        // (2) volume corroborate ≥ 3× ADTV — thiếu thì KHÔNG phải event
+        // (bad-tick để A9 outlier lo), không tạo row
+        if (!(adtv > 0) || eventValue < CE_VOLUME_CORROBORATE * adtv) continue;
+
+        const f = cur.open / prev.close;
+        const fClose = cur.close / prev.close;
+        const agreementPct = Math.abs(fClose / f - 1) * 100;
+        // (3) tỷ số khớp ±1% cả 2 phép
+        const highConfidence = agreementPct <= CE_RATIO_AGREEMENT_PCT;
+
+        candidates.push({
+          symbol: inst.symbol,
+          instrumentId: inst.id,
+          eventDate: cur.date.toISOString().slice(0, 10),
+          f: Number(f.toFixed(6)),
+          fClose: Number(fClose.toFixed(6)),
+          agreementPct: Number(agreementPct.toFixed(3)),
+          gapPct: Number(((f - 1) * 100).toFixed(2)),
           eventValue,
           adtv: Math.round(adtv),
-          reason: highConfidence
-            ? "kill-switch đang TẮT — chỉ ghi nhận, không sửa giá"
-            : "tỷ số 2 phép lệch > ±1% — không đủ tin cậy để tự sửa",
-        }).catch(() => undefined);
-      }
+          highConfidence,
+        });
 
-      // 1 mã chỉ xử lý event ĐẦU TIÊN tìm được trong cửa sổ (event cũ nhất
-      // trong 92 ngày — adjust cả chuỗi trước nó; scan sau sẽ thấy vùng sạch)
-      break;
+        // Row event hiện có theo (instrumentId, date) — BẤT KỂ kind
+        // (F-611A-08/#61: f đổi phía 1 → kind SPLIT↔BONUS lật, tìm theo
+        // unique (…,date,kind) cũ sẽ TRƯỢT row và mở hết lớp phòng thủ)
+        const existing = await findEventRow(inst.id, cur.date);
+
+        if (highConfidence && autoAdjustEnabled) {
+          const res = await applyAutoAdjust(inst, bars, t, f, existing).catch((err) => {
+            console.error(`[corporate-events] adjust ${inst.symbol} lỗi:`, err);
+            failures.push({
+              symbol: inst.symbol,
+              error: err instanceof Error ? err.message : String(err),
+            });
+            return null;
+          });
+          if (res) adjusted.push(res);
+        } else {
+          // SUSPECTED — ghi nhận trung thực, KHÔNG sửa giá.
+          // F-611A-01/02/#61: KHÔNG BAO GIỜ ghi đè row AUTO_ADJUSTED/REVERSED
+          // (demotion phá mốc PIT → double-apply ×f²; xoá quyền quyết định
+          // người đã REVERSED). Chỉ tạo row MỚI khi chưa có row nào cho ngày đó.
+          if (!existing || existing.status === "SUSPECTED") {
+            const kind: "SPLIT" | "BONUS" =
+              existing?.kind === "SPLIT" || existing?.kind === "BONUS"
+                ? existing.kind
+                : f < 1
+                  ? "BONUS"
+                  : "SPLIT";
+            await upsertEventRow(inst, cur.date, kind, f, "SUSPECTED", {
+              gapPct: ((f - 1) * 100).toFixed(2),
+              agreementPct: agreementPct.toFixed(3),
+              eventValue,
+              adtv: Math.round(adtv),
+              reason: highConfidence
+                ? "kill-switch đang TẮT — chỉ ghi nhận, không sửa giá"
+                : "tỷ số 2 phép lệch > ±1% — không đủ tin cậy để tự sửa",
+            }).catch((err) => {
+              failures.push({
+                symbol: inst.symbol,
+                error: `ghi SUSPECTED: ${err instanceof Error ? err.message : String(err)}`,
+              });
+            });
+          }
+        }
+
+        // F-611A-04/#61: chỉ DỪNG quét mã này khi VỪA adjust thật (gap biến mất
+        // → scan sau tự sang event kế tiếp). SUSPECTED/REVERSED không sửa giá
+        // → gap còn nguyên → TIẾP TỤC quét tìm event khác trong cửa sổ (trước
+        // đây break vô điều kiện làm event thật phía sau không bao giờ được thấy).
+        if (adjusted.some((a) => a.symbol === inst.symbol)) break;
+      }
+    } catch (err) {
+      // F-611A-06/#61 — lỗi DB từng mã ghi vào failures (không nuốt im lặng)
+      failures.push({
+        symbol: inst.symbol,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -310,60 +349,98 @@ export async function scanCorporateEvents(opts?: {
     scanned: eligible.length,
     candidates,
     adjusted,
+    failures,
     verdictAfter,
     durationMs: Date.now() - startedAt,
   };
 }
 
 /**
+ * F-611A-08/#61 — tìm row event theo (instrumentId, date) BẤT KỂ kind, ưu
+ * tiên AUTO_ADJUSTED → REVERSED → còn lại (anti kind-flip + đúng lớp phòng
+ * thủ kể cả khi f đổi phía 1 làm SPLIT↔BONUS lật nhãn).
+ */
+async function findEventRow(
+  instrumentId: string,
+  date: Date
+): Promise<{ id: string; kind: string; ratio: number; status: string; updatedAt: Date; detail: string | null } | null> {
+  return (
+    (await db.corporateEvent.findFirst({
+      where: { instrumentId, date, status: "AUTO_ADJUSTED" },
+    })) ??
+    (await db.corporateEvent.findFirst({
+      where: { instrumentId, date, status: "REVERSED" },
+    })) ??
+    (await db.corporateEvent.findFirst({
+      where: { instrumentId, date },
+    }))
+  );
+}
+
+/**
  * ÁP AUTO-ADJUST cho event tại index t của chuỗi bars:
  * nhân f lên toàn bộ bar TRƯỚC event (date < event) — nhưng chỉ bar nào là
- * "GỐC NGUỒN" (lastSyncedAt > adjustedAt của lần adjust trước) hoặc chưa từng
+ * "GỐC NGUỒN" (lastSyncedAt > mốc adjustedAt của lần adjust trước) hoặc chưa từng
  * adjust (không có row trước đó) — chống double-apply khi eod-sync đè lại
  * lookback. Ghi AuditLog pre-values đủ đảo ngược + upsert CorporateEvent.
+ *
+ * F-611A-07/#61: TOÀN BỘ (bar updates + AuditLog + CorporateEvent upsert)
+ * trong MỘT $transaction — crash giữa chừng không còn để lại chuỗi đã nhân f
+ * mà không có row/audit (trước đây audit lỗi bị `.catch(() => null)` nuốt,
+ * row ghi auditLogId: null → đảo ngược vĩnh viễn bất khả thi).
  */
 async function applyAutoAdjust(
   inst: { id: string; symbol: string },
   bars: ScanBar[],
   eventIndex: number,
-  f: number
+  f: number,
+  existing?: { id: string; kind: string; ratio: number; status: string; updatedAt: Date; detail: string | null } | null
 ): Promise<CeAdjustment | null> {
   const eventBar = bars[eventIndex];
-  const kind: "SPLIT" | "BONUS" = f < 1 ? "BONUS" : "SPLIT";
+  // F-611A-08/#61 — giữ kind của row hiện có (nếu có): f đổi phía 1 không
+  // được phép tạo row THỨ HAI cho cùng ngày (unique theo kind sẽ lọt).
+  const kind: "SPLIT" | "BONUS" =
+    existing?.kind === "SPLIT" || existing?.kind === "BONUS"
+      ? existing.kind
+      : f < 1
+        ? "BONUS"
+        : "SPLIT";
 
-  // Row event hiện có (nếu từng adjust/suspect trước đó) — chống double-apply
-  const existing = await db.corporateEvent
-    .findUnique({
-      where: {
-        instrumentId_date_kind: {
-          instrumentId: inst.id,
-          date: eventBar.date,
-          kind,
-        },
-      },
-    })
-    .catch(() => null);
+  const row = existing ?? (await findEventRow(inst.id, eventBar.date));
 
-  if (existing?.status === "REVERSED") {
+  if (row?.status === "REVERSED") {
     // Kill-switch PER-EVENT: người đã đảo ngược — KHÔNG tự adjust lại
-    // (trả null — scan không đếm là adjustment, row giữ nguyên REVERSED)
+    // (trả null — scan không đếm là adjustment, row giữ nguyên REVERSED;
+    // F-611A-02/#61: nhánh SUSPECTED giờ cũng không bao giờ ghi đè REVERSED)
     return null;
   }
 
-  // Nếu lần trước đã adjust với ratio khác > ±1% → SUSPECTED (an toàn)
-  if (existing?.status === "AUTO_ADJUSTED" && existing.ratio > 0) {
-    if (Math.abs(f / existing.ratio - 1) > CE_RATIO_AGREEMENT_PCT / 100) {
-      await upsertEventRow(inst, eventBar.date, kind, f, "SUSPECTED", {
-        reason: `f mới ${f.toFixed(4)} lệch f đã adjust ${existing.ratio.toFixed(4)} > ±1% — nguồn đổi số liệu, cần người kiểm tra`,
-        previousRatio: existing.ratio,
-      }).catch(() => undefined);
+  // Nếu lần trước đã adjust với ratio khác > ±1% → nguồn đổi số liệu.
+  // F-611A-01/#61: KHÔNG demote row AUTO_ADJUSTED → SUSPECTED (demotion xoá
+  // mốc PIT → scan sau double-apply ×f²). Giữ nguyên row + ghi cờ drift vào
+  // detail + RiskAlert WARNING cho người xem — không sửa giá lần này.
+  if (row?.status === "AUTO_ADJUSTED" && row.ratio > 0) {
+    if (Math.abs(f / row.ratio - 1) > CE_RATIO_AGREEMENT_PCT / 100) {
+      await recordDrift(inst, eventBar.date, kind, f, row.ratio).catch((err) => {
+        console.error(`[corporate-events] ghi drift ${inst.symbol} lỗi:`, err);
+      });
       return null;
     }
   }
 
-  // Mốc adjustedAt lần trước (từ detail hoặc updatedAt của row)
-  const prevAdjustedAt: Date | null =
-    existing?.status === "AUTO_ADJUSTED" ? existing.updatedAt : null;
+  // Mốc adjustedAt lần trước — nguồn BỀN VỮNG từ detail.adjustedAt (F-611A-01:
+  // updatedAt bị bump bởi mọi update — không đáng tin làm mốc PIT; detail
+  // adjustedAt ghi đúng thời điểm nhân f lần cuối).
+  let prevAdjustedAt: Date | null = null;
+  if (row?.status === "AUTO_ADJUSTED") {
+    try {
+      const d = row.detail ? (JSON.parse(row.detail) as { adjustedAt?: string }) : {};
+      prevAdjustedAt = d.adjustedAt ? new Date(d.adjustedAt) : row.updatedAt;
+    } catch {
+      prevAdjustedAt = row.updatedAt;
+    }
+    if (Number.isNaN(prevAdjustedAt.getTime())) prevAdjustedAt = row.updatedAt;
+  }
 
   // Vùng cần nhân f: bar TRƯỚC event, nguyên trạng GỐC NGUỒN
   // (lastSyncedAt > prevAdjustedAt) hoặc chưa từng có row adjust
@@ -375,6 +452,11 @@ async function applyAutoAdjust(
     }
   }
 
+  // F-611A-07/#61 — MỘT transaction duy nhất: bar updates + AuditLog +
+  // CorporateEvent upsert. Cửa sổ quét 92 ngày ≈ ≤ ~63 phiên VN → tối đa
+  // ~62 bar trước event + 2 ghi khác — vừa sức một transaction (chunk 200
+  // cũ tách thành 3 transaction rời + audit lỗi bị nuốt → crash giữa chừng
+  // để lại chuỗi ×f không có row/audit = bất khả đảo ngược).
   const adjustedAt = new Date();
   const preValues = targets.map((b) => ({
     date: b.date.toISOString().slice(0, 10),
@@ -405,67 +487,101 @@ async function applyAutoAdjust(
     };
   });
 
-  // Cập nhật DB theo chunk transaction (update where unique instrumentId+date)
-  for (let i = 0; i < targets.length; i += 200) {
-    const chunk = targets.slice(i, i + 200).map((b, j) => ({ b, after: postValues[i + j] }));
-    await db.$transaction(
-      chunk.map(({ b, after }) =>
-        db.bar.update({
-          where: { instrumentId_date: { instrumentId: inst.id, date: b.date } },
-          data: {
-            open: after.open,
-            high: after.high,
-            low: after.low,
-            close: after.close,
-            volume: after.volume,
-            value: BigInt(after.value),
-            updatedAt: adjustedAt,
-          },
-        })
-      )
-    ).catch((err) => {
-      throw err instanceof Error ? err : new Error(String(err));
-    });
-  }
-
-  // AuditLog — đủ pre-values + ratio + range để đảo ngược bằng 1 script
-  const audit = await db.auditLog
-    .create({
-      data: {
-        action: "CORPORATE_EVENT_AUTO_ADJUSTED",
-        entity: "Bar",
-        entityId: inst.id,
-        before: JSON.stringify({
-          symbol: inst.symbol,
-          eventDate: eventBar.date.toISOString().slice(0, 10),
-          kind,
-          ratio: f,
-          range: {
-            from: targets.length > 0 ? preValues[0].date : null,
-            to: eventBar.date.toISOString().slice(0, 10),
-            bars: targets.length,
-          },
-          bars: preValues,
-        }),
-        after: JSON.stringify({
-          symbol: inst.symbol,
-          eventDate: eventBar.date.toISOString().slice(0, 10),
-          ratio: f,
-          bars: postValues,
-          note: "giá ×f · volume ×(1/f) · value = volume×close tính lại — đảo ngược bằng scripts/reverse-corporate-event.ts",
-        }),
-      },
-    })
-    .catch(() => null);
-
-  await upsertEventRow(inst, eventBar.date, kind, f, "AUTO_ADJUSTED", {
+  const detail = {
     gapPct: ((f - 1) * 100).toFixed(2),
     barsAdjusted: targets.length,
     adjustedAt: adjustedAt.toISOString(),
-    auditLogId: audit?.id ?? null,
+    auditLogId: null as string | null, // điền sau khi transaction trả về audit id
     reverseBy: "scripts/reverse-corporate-event.ts",
     method: "gap-infer-dchart (VN — vượt dải + 3×ADTV + ±1% 2 phép)",
-  });
+  };
+
+  // AuditLog — đủ pre-values + ratio + range để đảo ngược bằng 1 script
+  // (được build trong callback để dùng tx — F-611R-10 dùng INTERACTIVE
+  // transaction vì array-form của Prisma 6.19 không nhận timeout).
+  const auditJson = {
+    action: "CORPORATE_EVENT_AUTO_ADJUSTED",
+    entity: "Bar",
+    entityId: inst.id,
+    before: JSON.stringify({
+      symbol: inst.symbol,
+      eventDate: eventBar.date.toISOString().slice(0, 10),
+      kind,
+      ratio: f,
+      range: {
+        from: targets.length > 0 ? preValues[0].date : null,
+        to: eventBar.date.toISOString().slice(0, 10),
+        bars: targets.length,
+      },
+      bars: preValues,
+    }),
+    after: JSON.stringify({
+      symbol: inst.symbol,
+      eventDate: eventBar.date.toISOString().slice(0, 10),
+      ratio: f,
+      bars: postValues,
+      note: "giá ×f · volume ×(1/f) · value = volume×close tính lại — đảo ngược bằng scripts/reverse-corporate-event.ts",
+    }),
+  };
+
+  // F-611A-07/#61 — MỘT transaction: mọi operation thành công HAY không có gì
+  // thay đổi (AuditLog KHÔNG được nuốt lỗi — trước đây .catch(() => null) tạo
+  // row AUTO_ADJUSTED auditLogId: null → reverse bất khả thi, giá kẹt ×f).
+  // F-611R-10/#61 (Vòng 2): interactive form + timeout 30s — ~64 op tuần tự
+  // qua WAN vượt mặc định 5s của Prisma (array-form không hỗ trợ timeout).
+  const audit = await db.$transaction(
+    async (tx) => {
+      for (let i = 0; i < targets.length; i++) {
+        await tx.bar.update({
+          where: { instrumentId_date: { instrumentId: inst.id, date: targets[i].date } },
+          data: {
+            open: postValues[i].open,
+            high: postValues[i].high,
+            low: postValues[i].low,
+            close: postValues[i].close,
+            volume: postValues[i].volume,
+            value: BigInt(postValues[i].value),
+            updatedAt: adjustedAt,
+          },
+        });
+      }
+      const created = await tx.auditLog.create({ data: auditJson });
+      await tx.corporateEvent.upsert({
+        where: {
+          instrumentId_date_kind: { instrumentId: inst.id, date: eventBar.date, kind },
+        },
+        create: {
+          instrumentId: inst.id,
+          date: eventBar.date,
+          kind,
+          ratio: f,
+          status: "AUTO_ADJUSTED",
+          source: "gap-infer-dchart",
+          detail: JSON.stringify({ ...detail, auditLogId: null }),
+        },
+        update: {
+          ratio: f,
+          status: "AUTO_ADJUSTED",
+          source: "gap-infer-dchart",
+          detail: JSON.stringify({ ...detail, auditLogId: null }),
+        },
+      });
+      return created;
+    },
+    { timeout: 30_000 }
+  );
+
+  // Audit id chỉ biết SAU transaction → 1 update nhẹ gắn auditLogId đúng
+  // (không thuộc phạm vi atomic: id chỉ là chỉ mục tra cứu, thiếu nó reverse
+  // vẫn tìm được audit qua eventDate/kind — hàm reverse tự quét).
+  await db.corporateEvent
+    .update({
+      where: { instrumentId_date_kind: { instrumentId: inst.id, date: eventBar.date, kind } },
+      data: { detail: JSON.stringify({ ...detail, auditLogId: audit.id }) },
+    })
+    .catch((err) => {
+      console.error(`[corporate-events] gắn auditLogId ${inst.symbol} lỗi (không chặn):`, err);
+    });
 
   return {
     symbol: inst.symbol,
@@ -473,7 +589,7 @@ async function applyAutoAdjust(
     kind,
     f,
     barsAdjusted: targets.length,
-    auditLogId: audit?.id ?? null,
+    auditLogId: audit.id,
   };
 }
 
@@ -508,6 +624,126 @@ async function upsertEventRow(
   });
 }
 
+/**
+ * F-611A-01/#61 — ghi nhận DRIFT ratio (f mới lệch f đã adjust > ±1%)
+ * mà KHÔNG demote row AUTO_ADJUSTED: merge cờ drift vào detail (giữ nguyên
+ * mọi khoá cũ: adjustedAt/auditLogId/barsAdjusted — mốc PIT chống double-apply)
+ * + RiskAlert WARNING để người vận hành thấy nguồn đổi số liệu.
+ */
+async function recordDrift(
+  inst: { id: string; symbol: string },
+  eventDate: Date,
+  kind: "SPLIT" | "BONUS",
+  newF: number,
+  previousRatio: number
+): Promise<void> {
+  const existing = await db.corporateEvent.findUnique({
+    where: { instrumentId_date_kind: { instrumentId: inst.id, date: eventDate, kind } },
+  });
+  let detail: Record<string, unknown> = {};
+  try {
+    detail = existing?.detail ? (JSON.parse(existing.detail) as Record<string, unknown>) : {};
+  } catch {
+    detail = {};
+  }
+  if (!existing) return; // row đã bị xoá giữa chừng — không có gì để ghi drift
+  detail.drift = {
+    observedAt: new Date().toISOString(),
+    newF: Number(newF.toFixed(6)),
+    previousRatio,
+    note: "f mới lệch f đã adjust > ±1% — nguồn đổi số liệu, KHÔNG sửa giá thêm; cần người kiểm tra (reverse bằng script nếu f cũ đúng)",
+  };
+  await db.corporateEvent.update({
+    where: { id: existing.id },
+    data: { detail: JSON.stringify(detail) },
+  });
+  // F-611R-04/#61 (Vòng 2) — dedupe 24h như mọi sibling alert (crossCheck,
+  // flows, raiseSevereAlerts): drift kéo dài (nguồn không hồi) otherwise tạo
+  // 1-2 alert/ngày/event tích luỹ vô hạn trong bảng RiskAlert.
+  const since24h = new Date(Date.now() - 24 * 3_600_000);
+  const dup = await db.riskAlert
+    .findFirst({
+      where: { code: "CORPORATE_EVENT_RATIO_DRIFT", createdAt: { gte: since24h } },
+      select: { id: true },
+    })
+    .catch(() => null);
+  if (dup) return;
+  await db.riskAlert
+    .create({
+      data: {
+        severity: "WARNING",
+        code: "CORPORATE_EVENT_RATIO_DRIFT",
+        message: `[P1-1 drift] ${inst.symbol}: f mới ${newF.toFixed(4)} lệch f đã adjust ${previousRatio.toFixed(4)} > ±1% — nguồn (dchart) đổi số liệu sự kiện ${eventDate.toISOString().slice(0, 10)}. KHÔNG tự sửa thêm — kiểm tra và reverse bằng script nếu cần.`,
+        metricKey: "corporate-event.ratio-drift",
+        metricValue: Number((Math.abs(newF / previousRatio - 1) * 100).toFixed(2)),
+        threshold: CE_RATIO_AGREEMENT_PCT,
+      },
+    })
+    .catch(() => undefined); // fail-soft — alert không chặn scan
+}
+
+/**
+ * F-611R-01/#61 (Vòng 2) — TÁI ÁP adjustment sau deep backfill.
+ * deepBackfillEod xoá toàn bộ bar rồi tạo lại từ giá GỐC nguồn dchart → mọi
+ * điều chỉnh tự động trước đó BỐC HƠI. Event TRONG cửa sổ quét 92 ngày sẽ tự
+ * được scan lại (gap tái xuất); event CŨ HƠN không bao giờ được quét lại →
+ * chuỗi giữ giá gốc vĩnh viễn trong khi row vẫn nói AUTO_ADJUSTED (nói dối).
+ * Hàm này tái áp mọi row AUTO_ADJUSTED của mã (tuần tự cũ → mới, đúng thứ tự
+ * nhân chuỗi) — gọi ngay sau khi backfill xong từng mã. Không đụng REVERSED
+ * (người đã từ chối) và SUSPECTED (chưa từng sửa giá).
+ */
+export async function reapplyAutoAdjustments(instrumentId: string): Promise<number> {
+  const events = await db.corporateEvent.findMany({
+    where: { instrumentId, status: "AUTO_ADJUSTED" },
+    orderBy: { date: "asc" },
+  });
+  let barsAdjusted = 0;
+  for (const ev of events) {
+    const f = ev.ratio;
+    if (!(f > 0) || f === 1) continue;
+    const preBars = await db.bar.findMany({
+      where: { instrumentId, date: { lt: ev.date } },
+      orderBy: { date: "asc" },
+      select: { date: true, open: true, high: true, low: true, close: true, volume: true },
+    });
+    if (preBars.length === 0) continue;
+    const adjustedAt = new Date();
+    // F-611R-10 — interactive form + timeout 60s (deep history × WAN vượt 5s
+    // mặc định; array-form của Prisma 6.19 không nhận timeout).
+    await db.$transaction(
+      async (tx) => {
+        for (const b of preBars) {
+          const open = roundToTick(b.open * f);
+          const high = roundToTick(b.high * f);
+          const low = roundToTick(b.low * f);
+          const close = roundToTick(b.close * f);
+          const volume = Math.max(0, Math.round(b.volume / f));
+          const value = BigInt(volume) * BigInt(close);
+          await tx.bar.update({
+            where: { instrumentId_date: { instrumentId, date: b.date } },
+            data: { open, high, low, close, volume, value, updatedAt: adjustedAt },
+          });
+        }
+      },
+      { timeout: 60_000 }
+    );
+    barsAdjusted += preBars.length;
+    // Ghi vết tái áp vào detail (giữ khoá cũ — audit trail)
+    try {
+      const detail = ev.detail ? (JSON.parse(ev.detail) as Record<string, unknown>) : {};
+      detail.reappliedAfterDeepBackfill = adjustedAt.toISOString();
+      detail.barsAdjusted = preBars.length;
+      await db.corporateEvent.update({
+        where: { id: ev.id },
+        data: { detail: JSON.stringify(detail) },
+      });
+    } catch {
+      // detail cũ hỏng JSON — không chặn tái áp giá
+    }
+  }
+  return barsAdjusted;
+}
+
 /* ═══════════════════════ Đảo ngược (lớp an toàn 8-3b) ═══════════════════════ */
 
 export interface ReverseResult {
@@ -522,8 +758,13 @@ export interface ReverseResult {
 /**
  * ĐẢO NGƯỢC 1 auto-adjust từ AuditLog pre-values (gọi bởi script
  * scripts/reverse-corporate-event.ts hoặc route POST manual):
- *   1. Đọc CorporateEvent row (status AUTO_ADJUSTED) + AuditLog tương ứng;
- *   2. Restore từng bar về pre-values (đúng cả value BigInt);
+ *   1. Đọc CorporateEvent row + HỢP CÁC AuditLog của event (F-611A-03/#61:
+ *      eod-sync đè lookback tạo NHIỀU audit từng vòng re-adjust, mỗi audit
+ *      chỉ chứa pre-values TẬP CON — trước đây chỉ lấy audit MỚI NHẤT →
+ *      restore một phần, chuỗi lẫn ×f vĩnh viễn. Giờ: union theo ngày,
+ *      audit CŨ NHẤT thắng — đó là pre-values GỐC đầu tiên);
+ *   2. Restore từng bar về pre-values (đúng cả value BigInt) — MỘT transaction
+ *      cùng row update + audit REVERSED (F-611A-07);
  *   3. Đổi status row → REVERSED (scan sau này KHÔNG tự adjust lại).
  * Chỉ đảo được khi AuditLog còn pre-values đầy đủ (bars > 0).
  */
@@ -534,13 +775,16 @@ export async function reverseCorporateEvent(eventId: string): Promise<ReverseRes
     if (row.status === "REVERSED") {
       return { ok: false, error: "sự kiện đã REVERSED từ trước", status: row.status };
     }
-    // AuditLog mới nhất của event này (entityId = instrumentId, action đúng)
+    // F-611A-03/#61 + F-611A-11: lấy TẤT CẢ audit của event theo ngày TĂNG
+    // DẦN (audit cũ nhất = vòng adjust ĐẦU TIÊN chứa pre-values gốc đầy đủ
+    // nhất), take 200 (trước đây take 50 desc — chuỗi re-adjust hằng ngày có
+    // thể đẩy audit mục tiêu ra ngoài cửa sổ).
     const audits = await db.auditLog.findMany({
       where: { action: "CORPORATE_EVENT_AUTO_ADJUSTED", entityId: row.instrumentId },
-      orderBy: { createdAt: "desc" },
-      take: 50,
+      orderBy: { createdAt: "asc" },
+      take: 200,
     });
-    const match = audits.find((a) => {
+    const matches = audits.filter((a) => {
       try {
         const b = JSON.parse(a.before ?? "{}") as { eventDate?: string; kind?: string };
         return (
@@ -551,23 +795,43 @@ export async function reverseCorporateEvent(eventId: string): Promise<ReverseRes
         return false;
       }
     });
-    if (!match?.before) {
+    if (matches.length === 0) {
       return { ok: false, error: "không tìm thấy AuditLog pre-values của event này" };
     }
-    const pre = JSON.parse(match.before) as {
-      symbol: string;
-      bars?: { date: string; open: number; high: number; low: number; close: number; volume: number; value: string | null }[];
-    };
-    const bars = pre.bars ?? [];
+    // Union pre-values theo NGÀY — audit cũ nhất thắng (vòng adjust đầu ghi
+    // giá GỐC của toàn chuỗi; các vòng sau chỉ ghi lại tập con đã bị nguồn đè
+    // lại — pre-values của chúng cũng là giá gốc, nhưng cũ nhất là đủ tin).
+    const unionByDate = new Map<
+      string,
+      { date: string; open: number; high: number; low: number; close: number; volume: number; value: string | null }
+    >();
+    let symbol = row.instrumentId;
+    for (const m of matches) {
+      try {
+        const pre = JSON.parse(m.before ?? "{}") as {
+          symbol?: string;
+          bars?: { date: string; open: number; high: number; low: number; close: number; volume: number; value: string | null }[];
+        };
+        if (pre.symbol) symbol = pre.symbol;
+        for (const b of pre.bars ?? []) {
+          if (!unionByDate.has(b.date)) unionByDate.set(b.date, b);
+        }
+      } catch {
+        // audit hỏng JSON — bỏ qua audit này, audit khác cùng event vẫn có
+      }
+    }
+    const bars = [...unionByDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
     if (bars.length === 0) {
       return { ok: false, error: "AuditLog không chứa pre-values bars (rỗng)" };
     }
     const restoredAt = new Date();
-    for (let i = 0; i < bars.length; i += 200) {
-      const chunk = bars.slice(i, i + 200);
-      await db.$transaction(
-        chunk.map((b) =>
-          db.bar.update({
+    // F-611A-07/#61 — MỘT transaction: restore bars + row REVERSED + audit
+    // (F-611R-10: interactive form + timeout 30s cho chuỗi dài qua WAN —
+    // array-form của Prisma 6.19 không nhận timeout).
+    await db.$transaction(
+      async (tx) => {
+        for (const b of bars) {
+          await tx.bar.update({
             where: {
               instrumentId_date: {
                 instrumentId: row.instrumentId,
@@ -583,34 +847,35 @@ export async function reverseCorporateEvent(eventId: string): Promise<ReverseRes
               value: b.value != null ? BigInt(b.value) : null,
               updatedAt: restoredAt,
             },
-          })
-        )
-      );
-    }
-    await db.corporateEvent.update({
-      where: { id: row.id },
-      data: {
-        status: "REVERSED",
-        detail: JSON.stringify({
-          reversedAt: restoredAt.toISOString(),
-          reversedFromAuditLog: match.id,
-          barsRestored: bars.length,
-          note: "đã đảo ngược thủ công — scan KHÔNG tự adjust lại (kill-switch per-event)",
-        }),
+          });
+        }
+        await tx.corporateEvent.update({
+          where: { id: row.id },
+          data: {
+            status: "REVERSED",
+            detail: JSON.stringify({
+              reversedAt: restoredAt.toISOString(),
+              reversedFromAuditLogs: matches.map((m) => m.id),
+              barsRestored: bars.length,
+              note: "đã đảo ngược thủ công (union mọi vòng adjust — audit cũ nhất thắng) — scan KHÔNG tự adjust lại (kill-switch per-event)",
+            }),
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: "CORPORATE_EVENT_REVERSED",
+            entity: "CorporateEvent",
+            entityId: row.id,
+            before: JSON.stringify({ status: row.status, ratio: row.ratio }),
+            after: JSON.stringify({ status: "REVERSED", barsRestored: bars.length }),
+          },
+        });
       },
-    });
-    await db.auditLog.create({
-      data: {
-        action: "CORPORATE_EVENT_REVERSED",
-        entity: "CorporateEvent",
-        entityId: row.id,
-        before: JSON.stringify({ status: row.status, ratio: row.ratio }),
-        after: JSON.stringify({ status: "REVERSED", barsRestored: bars.length }),
-      },
-    });
+      { timeout: 30_000 }
+    );
     return {
       ok: true,
-      symbol: pre.symbol,
+      symbol,
       eventDate: row.date.toISOString().slice(0, 10),
       barsRestored: bars.length,
       status: "REVERSED",

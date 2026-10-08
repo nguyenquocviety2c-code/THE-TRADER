@@ -110,17 +110,45 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
   // ForeignFlow (mode "simulated" trung thực) — trước đây re-sinh deterministic
   // KHÔNG lưu → B8 scorecard mất lịch sử arm flows (G6 §0.5). Upsert theo
   // @@unique([instrumentId, date]) idempotent: mô phỏng deterministic cùng
-  // (mã, ngày) → chạy lại không nhân đôi, giá trị hội tụ.
+  // (mã, ngày) → chạy lại không nhân đôi; cùng ngày snapshot sau cùng thắng
+  // (turnover dùng Quote đang chạy — intraday đổi theo volume/last thật).
+  //
+  // F-611-04/#61 — KHÔNG ĐÈ row mode "live": khi nhà cung cấp thật được kết
+  // nối sau này, một lần chạy fallback mô phỏng không được phép ghi đè cả
+  // netValue lẫn mode của row thật (trước đây update vô điều kiện ghi
+  // mode: "simulated" → hạ cấp dữ liệu thật thành mô phỏng).
   const flowDate = new Date(`${dateIso}T15:00:00.000Z`); // convention Bar 15:00 UTC
+  // F-611R-03/#61 (Vòng 2) — guard live-row FAIL-CLOSED: query lỗi → KHÔNG
+  // persist gì cả (trước đây .catch(() => []) cho tập rỗng → mô phỏng ghi đè
+  // netValue của row live trong khi mode giữ "live" — row "live" mang số
+  // mô phỏng, tệ hơn cả đè cả hai).
+  let liveInstrumentIds: Set<string> | null = null;
+  try {
+    const liveRows = await db.foreignFlow.findMany({
+      where: { date: flowDate, mode: { not: "simulated" } },
+      select: { instrumentId: true },
+    });
+    liveInstrumentIds = new Set(liveRows.map((r) => r.instrumentId));
+  } catch (err) {
+    console.error("[flows] guard live-row lỗi — bỏ qua persist lần này (fail-closed):", err);
+  }
   let persisted = 0;
+  let skippedLive = 0;
   for (const inst of instruments) {
     const item = items.find((it) => it.symbol === inst.symbol);
     if (!item) continue;
+    if (liveInstrumentIds == null) {
+      continue; // guard không đọc được → không ghi (fail-closed)
+    }
+    if (liveInstrumentIds.has(inst.id)) {
+      skippedLive++;
+      continue; // giữ nguyên row live — mô phỏng không đè dữ liệu thật
+    }
     await db.foreignFlow
       .upsert({
         where: { instrumentId_date: { instrumentId: inst.id, date: flowDate } },
         create: { instrumentId: inst.id, date: flowDate, netValue: BigInt(item.netValue), mode: "simulated" },
-        update: { netValue: BigInt(item.netValue), mode: "simulated" },
+        update: { netValue: BigInt(item.netValue) }, // mode giữ nguyên (đã lọc live ở trên)
       })
       .then(() => {
         persisted++;
@@ -152,6 +180,8 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
       provider: "internal-simulator",
       // P1-4 — số dòng persist vào ForeignFlow (lịch sử cho B8 scorecard)
       persisted,
+      // F-611-04/#61 — số dòng live bị bỏ qua (mô phỏng không đè dữ liệu thật)
+      skippedLive,
     },
   });
 

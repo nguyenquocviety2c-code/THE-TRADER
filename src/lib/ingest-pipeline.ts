@@ -32,7 +32,7 @@
  */
 
 import { db } from "@/lib/db";
-import { scanOutlierBars, type ScanBarInput, type SymbolOutlierScan } from "@/lib/data-quality";
+import { priceBand, scanOutlierBars, type ScanBarInput, type SymbolOutlierScan } from "@/lib/data-quality";
 import { scanCorporateEvents, type CorporateEventScanResult } from "@/lib/corporate-events";
 
 /* ═══════════════════════ REGISTRY 10 ĐƯỜNG NẠP (§0.3) ═══════════════════════ */
@@ -73,12 +73,12 @@ export const INGEST_REGISTRY: IngestRouteDef[] = [
   {
     no: 2,
     name: "Backfill sâu",
-    route: "POST /api/market/eod-sync?force=deep",
+    route: 'POST /api/market/eod-sync (body {force: "deep"})',
     source: "dchart 2013→nay → Bar",
     targets: ["Bar"],
-    schedule: "thủ công (force=deep)",
-    defenses: "như #1, chunk 1000",
-    postCheck: "CorporateEvent scan hội tụ sâu (P1-1) — chạy thủ công sau backfill",
+    schedule: "thủ công (body {force: \"deep\"})",
+    defenses: "như #1, chunk 1000, $transaction từng mã + giữ PIT firstSeenAt (F-611B-04/#61)",
+    postCheck: "CorporateEvent scan hội tụ sâu (P1-1) — chạy kèm route (P1-6)",
     statusKey: "eod-history",
   },
   {
@@ -183,8 +183,13 @@ export interface PostIngestCheckResult {
   outlierSymbols: string[];
   /** Mã nghi-vấn split (đã qua CorporateEvent scan — còn lại = chưa điều chỉnh). */
   splitSuspects: string[];
-  /** Kết quả CorporateEvent scan (P1-1) — null khi route không chạy (US/HK). */
+  /** Kết quả CorporateEvent scan (P1-1) — null khi route không chạy (US/HK) HOẶC lỗi. */
   corporateEvents: CorporateEventScanResult | null;
+  /** F-611B-06/#61 — lỗi DB trong hậu kiểm (không nuốt im lặng như F-591-02):
+   * true ⇒ các số trên KHÔNG phải "sạch" mà là "chưa kiểm được". */
+  dbFail: boolean;
+  /** Chi tiết lỗi dbFail (tối đa 5 dòng — ghi vào meta cho operator). */
+  dbFailNotes: string[];
   durationMs: number;
 }
 
@@ -214,49 +219,80 @@ export async function runPostIngestChecks(p: {
   includeCorporateScan?: boolean;
 }): Promise<PostIngestCheckResult> {
   const startedAt = Date.now();
+  const dbFailNotes: string[] = [];
 
-  // Tập mã kiểm: truyền vào thì dùng, không thì toàn bộ VN active
-  const instruments = await db.instrument
-    .findMany({
+  // Tập mã kiểm: truyền vào thì dùng, không thì toàn bộ VN active.
+  // F-611B-06/#61 — lỗi DB ghi cờ dbFail (KHÔNG nuốt im lặng: trước đây
+  // `.catch(() => [])` cho «instruments rỗng» → checked:0/outlierSymbols:[]
+  // trông như "sạch" trong khi thực ra chưa kiểm được gì — đúng mẫu F-591-02).
+  let instruments: { id: string; symbol: string; market: string; type: string }[] = [];
+  try {
+    instruments = await db.instrument.findMany({
       where: p.instrumentIds
         ? { id: { in: p.instrumentIds } }
         : { isActive: true, market: { in: ["HOSE", "HNX", "UPCOM"] } },
       select: { id: true, symbol: true, market: true, type: true },
-    })
-    .catch(() => [] as { id: string; symbol: string; market: string; type: string }[]);
+    });
+  } catch (err) {
+    dbFailNotes.push(
+      `instrument query: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 
   const cutoff = new Date(Date.now() - POST_CHECK_WINDOW_DAYS * 86_400_000);
   const outlierSymbols: string[] = [];
   const splitSuspects: string[] = [];
 
   for (const inst of instruments) {
-    const bars = await db.bar
-      .findMany({
+    let bars: ScanBarInput[];
+    try {
+      bars = await db.bar.findMany({
         where: { instrumentId: inst.id, date: { gte: cutoff } },
         orderBy: { date: "asc" },
         select: {
           date: true, open: true, high: true, low: true, close: true,
           volume: true, value: true,
         },
-      })
-      .catch(() => [] as ScanBarInput[]);
+      });
+    } catch (err) {
+      dbFailNotes.push(
+        `bars ${inst.symbol}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      continue;
+    }
     if (bars.length < 2) continue;
     const scan: SymbolOutlierScan = scanOutlierBars(inst.market, inst.type, bars);
-    if (scan.structural > 0 || scan.bandViolations > 0 || scan.hampelIssue) {
+    // F-611B-05/#61 — Hampel chỉ tính cho mã CÓ dải giá (VN) — đúng vũ trụ
+    // của A9 (chu kỳ A9 outlier chỉ quét VN; US/HK có ngày ±10% THẬT — đếm
+    // Hampel US/HK là crying wolf mà A9 không bao giờ báo, phá cam kết
+    // "CÙNG một định nghĩa" giữa route-runtime và chu kỳ A9).
+    const hasBand = priceBand(inst.market, inst.type) != null;
+    if (scan.structural > 0 || scan.bandViolations > 0 || (hasBand && scan.hampelIssue)) {
       outlierSymbols.push(inst.symbol);
     }
     if (scan.splitSuspect) splitSuspects.push(inst.symbol);
   }
 
-  // CorporateEvent scan (P1-1) — chỉ khi route nạp bar VN
+  // CorporateEvent scan (P1-1) — chỉ khi route nạp bar VN.
+  // F-611B-06/#61 — lỗi scan ghi cờ (không trả null im lặng — null giờ
+  // nghĩa là "route không chạy" hoặc "lỗi — xem dbFailNotes").
   let corporateEvents: CorporateEventScanResult | null = null;
   if (p.includeCorporateScan !== false) {
-    corporateEvents = await scanCorporateEvents({
-      instrumentIds: p.instrumentIds,
-    }).catch((err) => {
+    try {
+      corporateEvents = await scanCorporateEvents({
+        instrumentIds: p.instrumentIds,
+      });
+      if (corporateEvents.failures.length > 0) {
+        dbFailNotes.push(
+          `corporate scan: ${corporateEvents.failures.length} mã lỗi (${corporateEvents.failures[0].symbol}: ${corporateEvents.failures[0].error})`
+        );
+      }
+    } catch (err) {
       console.error("[ingest-pipeline] corporateEvents scan lỗi:", err);
-      return null;
-    });
+      dbFailNotes.push(
+        `corporate scan throw: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   const result: PostIngestCheckResult = {
@@ -272,13 +308,21 @@ export async function runPostIngestChecks(p: {
           candidates: corporateEvents.candidates.slice(0, 10),
         }
       : null,
+    dbFail: dbFailNotes.length > 0,
+    dbFailNotes: dbFailNotes.slice(0, 5),
     durationMs: Date.now() - startedAt,
   };
 
   // Ghi DataSourceStatus "ingest-pipeline" — meta merge theo route (giữ
-  // lịch sử 5 route gần nhất). Row KHÔNG phải nguồn thị trường → A9 source
-  // check đọc theo whitelist 7 nguồn, bỏ qua row này (như "engine-state").
-  await recordPostCheck(p.route, result).catch(() => undefined);
+  // trạng thái MỚI NHẤT từng route — F-611B-09/#61: comment cũ nói "lịch sử
+  // 5 route" là sai, đã sửa cách diễn đạt). Row KHÔNG phải nguồn thị trường
+  // → A9 source check đọc theo whitelist 7 nguồn, bỏ qua row này (như
+  // "engine-state"). Ghi kèm dbFail để operator phân biệt "sạch" vs "mù".
+  const recordErr = await recordPostCheck(p.route, result).catch((err) => {
+    dbFailNotes.push(`recordPostCheck: ${err instanceof Error ? err.message : String(err)}`);
+    return err;
+  });
+  if (recordErr) result.dbFail = true;
 
   return result;
 }
@@ -300,6 +344,9 @@ async function recordPostCheck(route: string, result: PostIngestCheckResult): Pr
     outliers: result.outlierSymbols.length,
     splitSuspects: result.splitSuspects.length,
     adjusted: result.corporateEvents?.adjusted.length ?? 0,
+    // F-611B-06/#61 — cờ trung thực: false = sạch, true = CHƯA KIỂM ĐƯỢC
+    dbFail: result.dbFail,
+    ...(result.dbFailNotes.length > 0 ? { dbFailNotes: result.dbFailNotes } : {}),
     durationMs: result.durationMs,
   };
   meta.updatedAt = result.ranAt;
@@ -332,7 +379,11 @@ export interface IngestRouteStatus extends IngestRouteDef {
  * chu kỳ đưa vào IngestSummary (P1-6: "S0 mới thực sự thành chủ registry").
  */
 export async function liveIngestRegistry(): Promise<IngestRouteStatus[]> {
-  const rows = await db.dataSourceStatus.findMany().catch(() => []);
+  // F-612R-08/#61 (Vòng 2) — KHÔNG nuốt lỗi DB: S0 đọc trạng thái nguồn là
+  // CHÍNH XỨC SỞ NGHIỆM VỤ — lỗi phải ném lên để S0 ghi nhận (trước đây
+  // .catch(() => []) → S0 broadcast "10 đường — 0 nguồn real/live" + không
+  // thấy nguồn nào lỗi — im lặng sai lệch).
+  const rows = await db.dataSourceStatus.findMany();
   const byKey = new Map(rows.map((r) => [r.key, r]));
   return INGEST_REGISTRY.map((def) => {
     const row = def.statusKey ? byKey.get(def.statusKey) : null;

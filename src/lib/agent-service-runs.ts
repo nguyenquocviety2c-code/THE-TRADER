@@ -198,12 +198,16 @@ async function runDataCollector(): Promise<ServiceRunResult> {
       db.bar.count(),
       db.quote.findMany({ select: { instrumentId: true, tradedAt: true } }),
       db.newsItem.count({ where: { publishedAt: { gte: since24h } } }),
-      db.dataSourceStatus.findMany().catch(() => []),
+      // F-612R-08/#61 (Vòng 2) — sourceRows + registry KHÔNG nuốt lỗi: S0 sở
+      // hữu việc báo trạng thái nguồn; nuốt → "0 nguồn real/live + không
+      // nguồn nào lỗi" (nói dối 2 chiều). Lỗi ném → S0 failed lộ liễu.
+      db.dataSourceStatus.findMany(),
       db.bar.aggregate({ _max: { date: true } }).catch(() => ({ _max: { date: null as Date | null } })),
       db.bar.groupBy({ by: ["instrumentId"] }).catch(() => [] as { instrumentId: string }[]),
       // P1-6 — S0 làm CHỦ REGISTRY 10 đường nạp §0.3 (kết thúc "hữu danh vô
       // thực" §1.2): mỗi chu kỳ gắn trạng thái sống vào IngestSummary
-      liveIngestRegistry().catch(() => [] as Awaited<ReturnType<typeof liveIngestRegistry>>),
+      // (liveIngestRegistry giờ tự ném lỗi DB — F-612R-08)
+      liveIngestRegistry(),
     ]);
   // Quote update-in-place: 1 dòng/mã — tradedAt lớn nhất = báo giá mới nhất
   const lastQuoteAt = quoteRows.reduce<Date | null>(

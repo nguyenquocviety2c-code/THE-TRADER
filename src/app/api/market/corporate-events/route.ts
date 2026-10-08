@@ -9,7 +9,10 @@ import {
 } from "@/lib/corporate-events";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+// F-611A-14/#61 — scan toàn VN (150+ mã × query bars 92 ngày) + khi có
+// adjust chạy thêm full A9 (6 phép) — thực đo #60: ~10-60s, vượt maxDuration
+// 120 cũ khi DB chậm. Đồng bộ 300 như eod-sync (cùng lớp tải).
+export const maxDuration = 300;
 
 /**
  * GET /api/market/corporate-events — danh sách CorporateEvent (P1-1) + trạng
@@ -56,18 +59,28 @@ export async function GET(req: NextRequest) {
         ok: true,
         total,
         enabled,
-        events: events.map((e) => ({
-          id: e.id,
-          symbol: e.instrument.symbol,
-          market: e.instrument.market,
-          date: e.date,
-          kind: e.kind,
-          ratio: e.ratio,
-          status: e.status,
-          source: e.source,
-          detail: JSON.parse(e.detail || "{}"),
-          createdAt: e.createdAt,
-        })),
+        // F-612R-10/#61 (Vòng 2) — parse per-row có guard: 1 ô detail hỏng
+        // JSON không nên 500 cả danh sách (pattern parse() của data-quality)
+        events: events.map((e) => {
+          let detail: unknown = {};
+          try {
+            detail = JSON.parse(e.detail || "{}");
+          } catch {
+            detail = { parseError: true, raw: (e.detail ?? "").slice(0, 120) };
+          }
+          return {
+            id: e.id,
+            symbol: e.instrument.symbol,
+            market: e.instrument.market,
+            date: e.date,
+            kind: e.kind,
+            ratio: e.ratio,
+            status: e.status,
+            source: e.source,
+            detail,
+            createdAt: e.createdAt,
+          };
+        }),
       })
     );
   } catch (err) {

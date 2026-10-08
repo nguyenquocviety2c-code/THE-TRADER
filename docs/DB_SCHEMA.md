@@ -1,7 +1,7 @@
 # The Trader — Data Dictionary & Database Schema
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.6.0 · **Updated:** 2026-10-07
+> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.7.1 · **Updated:** 2026-10-08
 > **Source of truth:** [`prisma/schema.prisma`](../prisma/schema.prisma) — tài liệu này mô tả đúng schema đã implement. Mọi thay đổi schema phải được phản ánh lại đây.
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface) · [DATA_SOURCES.md](./DATA_SOURCES.md) (field mapping theo nguồn dữ liệu)
 
@@ -928,7 +928,7 @@ model DataQualityReport {
 
 ## 7. Enum Dictionary
 
-12 enum (native enum type trên Postgres schema `trader`, validate bởi Prisma Client). `AgentRole` mở rộng đủ **23 giá trị** từ v0.5 (đúng kiến trúc Gen-1 DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A; nhóm hiển thị theo `Agent.group`); `Market` mở rộng **5 giá trị** từ v0.6.0 (phiên #38):
+13 enum (native enum type trên Postgres schema `trader`, validate bởi Prisma Client — **fixbug #61 F-612R-04: sửa từ "12"**). `AgentRole` mở rộng đủ **23 giá trị** từ v0.5 (đúng kiến trúc Gen-1 DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A; nhóm hiển thị theo `Agent.group`); `Market` mở rộng **5 giá trị** từ v0.6.0 (phiên #38); `CorporateEventKind` thêm ở v0.7.0 (phiên #60 — P1-1; `CorporateEvent.status` và `ForeignFlow.mode` là String validate ở tầng code, không phải enum):
 
 | Enum | Giá trị | Diễn giải (VN) |
 |---|---|---|
@@ -942,6 +942,10 @@ model DataQualityReport {
 | | `FUND` | Quỹ mở/đóng |
 | | `BOND` | Trái phiếu |
 | | `INDEX` | Chỉ số (VN-Index, VN30) |
+| `CorporateEventKind` | `SPLIT` | Chia tách / sáp nhập (f > 1 — hợp nhất; Yahoo split events) — **fixbug #61 F-612R-04: bổ sung dòng thiếu** |
+| | `BONUS` | Cổ thưởng / chia tách làm giá giảm (f < 1 — phổ biến VN 1,2/1,3/1,5) |
+| | `DIVIDEND` | Cổ tức tiền mặt (Yahoo dividends — không đổi hệ số giá) |
+| | `RESTATE` | Điều chỉnh lại số liệu (dự phòng — chưa có nguồn tự động) |
 | `AgentRole` | `MARKET_ANALYST` | Phân tích kỹ thuật & vi mô (A2 — nhóm research, LLM) |
 | | `NEWS_SENTIMENT` | Tin tức & cảm xúc thị trường (A4 — research, LLM) |
 | | `RISK_MANAGER` | Quản trị rủi ro (A6 — control, VETO, LLM) |
@@ -1016,6 +1020,7 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 
 | Ngày | Thay đổi |
 |---|---|
+| 2026-10-08 | **v0.7.1 — fixbug #61 (F-612R-03/04, 0 đổi schema):** (1) §7 Enum Dictionary sửa **12 → 13 enum** + bổ sung dòng `CorporateEventKind` thiếu (SPLIT/BONUS/DIVIDEND/RESTATE — làm rõ `CorporateEvent.status`/`ForeignFlow.mode` là String validate tầng code, không phải enum); (2) đồng bộ 2 chỗ blueprint §5 P1 ghi "detail Json / checks Json" → "String (JSON-hoá)" đúng schema thật — chi tiết vòng rà + findings xem DATA_PLATFORM_BLUEPRINT Changelog v1.5 |
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; đồng bộ 1-1 với `prisma/schema.prisma` (17 model, 12 enum) |
 | 2026-10-06 | **v0.2 — Giai đoạn 2:** thêm 2 model `NewsItem` (S5 RSS, dedupe theo `url`) + `DataSourceStatus` (S4 stale marking, singleton-theo-`key`) → tổng **19 model**; cập nhật ERD + dictionary §6.18/§6.19; ghi nhận quote được cập nhật bởi tick engine `POST /api/market/tick`; bổ sung action audit mới |
 | 2026-10-06 | **v0.3 — Audit vòng 1+2 (Task 21/22):** `AgentMessage` thêm `@@index([createdAt])` (F-116); §6.4 Quote bổ sung vòng đời phiên EOD rollover + fill engine; §6.2 `equity` ghi rõ chính sách snapshot (chốt khi khớp lệnh/EOD, live do `/api/portfolio` tính); §4.3 làm rõ Quote là update-in-place tại chỗ (không append-only — khớp DATA_SOURCES Q4); §9 cập nhật equity migration; thay lễ 2026-04-10 → 2026-04-27 trong lịch (ở `market-session.ts`) |

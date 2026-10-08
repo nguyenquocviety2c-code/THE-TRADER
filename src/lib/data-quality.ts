@@ -691,7 +691,15 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
   let readinessReady = 0;
   let readinessTotal = 0;
   {
-    const basket = await topByAdtv(10, { market: "HOSE", type: "STOCK" }).catch(() => []);
+    // F-612R-02/#61 (Vòng 2): rổ topByAdtv giờ qua guard() — query lỗi vào
+    // dbFail → verdict SEVERE (trước đây .catch(() => []) cho rỗ trống →
+    // readiness 0/0 = PASS GIẢ khi đúng query rổ chết — F-591-02 trở lại
+    // qua đường dated-series mà #59 chưa phủ).
+    const basket = await guard(
+      topByAdtv(10, { market: "HOSE", type: "STOCK" }),
+      "readiness.rổ topByAdtv",
+      [] as Awaited<ReturnType<typeof topByAdtv>>
+    );
     readinessTotal = basket.length;
     // Fixbug #59 F-591-03: take 65 → 70 — cùng độ sâu nạp với S2
     // (runFeatureStore) để "cùng thư viện → CÙNG SỐ" là đúng từng chữ: chuỗi

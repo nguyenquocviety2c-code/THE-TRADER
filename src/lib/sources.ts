@@ -61,7 +61,17 @@ export async function markSource(
     update: {
       mode: patch.mode ?? undefined,
       lastSuccessAt: patch.success === false ? undefined : now,
-      lastError: patch.lastError !== undefined ? patch.lastError : undefined,
+      // F-611-02/#61 — success=true → XOÁ lỗi cũ (đúng như comment hợp đồng
+      // khai báo từ đầu). Trước đây update chỉ ghi lastError khi caller truyền
+      // rõ → 1 lần finfo chớp nettle ở tick (fallback path) để lastError dính
+      // MÃI MÃI: S0 "nguồn lỗi: market-quotes" + registry P1-6 lastError
+      // crying wolf mỗi chu kỳ dù nguồn đã hồi phục từ lâu.
+      lastError:
+        patch.lastError !== undefined
+          ? patch.lastError
+          : patch.success === true
+            ? null
+            : undefined, // không đổi (caller chỉ meta/mode)
       meta: patch.meta ? safeJson(patch.meta) : undefined,
     },
   });

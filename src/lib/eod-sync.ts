@@ -29,6 +29,7 @@
  */
 
 import { db } from "@/lib/db";
+import { reapplyAutoAdjustments } from "@/lib/corporate-events";
 import { markSource } from "@/lib/sources";
 import type { UnitSpec } from "@/lib/types";
 import { vnDateIso } from "@/lib/market-session";
@@ -450,19 +451,36 @@ export interface EodSyncOutcome {
 
 /* ── P1-3 (blueprint v1.3 §5): đối chiếu chéo nguồn sau EOD-sync ──
  *
- * So CLOSE finfo realtime CUỐI PHIÊN (dòng Quote trước khi anchor đè) vs bar
+ * So CLOSE finfo realtime CUỐI PHIÊN (ảnh Quote TRƯỚC khi anchor đè) vs bar
  * dchart EOD CÙNG NGÀY ICT; lệch > 1% → RiskAlert INFO (dedupe 24h theo code
  * DQ_CROSS_SOURCE). CHỈ so khi DataSourceStatus "market-quotes" mode=real
  * (mô phỏng random-walk quanh EOD thì khớp là hiển nhiên — crying wolf).
+ *
+ * F-611B-01/#61 (P0): TRƯỚC ĐÂY hàm tự đọc Quote SAU vòng lặp upsert — tức
+ * SAU khi anchorQuoteToRealEod ĐÃ ĐÈ Quote bằng close dchart → so dchart với
+ * chính dchart, diffPct ≡ 0, phép kiểm chết lặng. Giờ: syncEodFromDchart
+ * chụp ảnh Quote finfo TRƯỚC vòng anchor rồi TRUYỀN MAP vào đây.
+ *
  * Re-validate cột value = volume×close cho toàn bộ bar vừa upsert (bắt bar
  * hỏng tồn sẵn trong DB — toRealBars luôn ghi đúng nên mismatch = DB cũ lỗi).
  */
 const CROSS_SOURCE_DIFF_PCT = 1; // % — ngưỡng RiskAlert INFO (blueprint P1-3)
 const CROSS_SOURCE_ALERT_CODE = "DQ_CROSS_SOURCE";
 
-async function crossCheckFinfoVsEod(
+/** Ảnh Quote finfo chụp TRƯỚC vòng anchor (F-611B-01) — truyền vào cross-check. */
+export interface PreAnchorQuote {
+  /** Quote.last — Int NOT NULL theo schema. */
+  last: number;
+  /** Quote.close — Int? (nullable theo schema). */
+  close: number | null;
+  tradedAt: Date;
+}
+
+export async function crossCheckFinfoVsEod(
   instruments: { id: string; symbol: string }[],
-  latestBarBySymbol: Map<string, { close: number; date: Date }>
+  latestBarBySymbol: Map<string, { close: number; date: Date }>,
+  /** Map instrumentId → Quote finfo trước anchor (F-611B-01). */
+  preAnchorQuotes: Map<string, PreAnchorQuote>
 ): Promise<EodCrossCheck> {
   // Chỉ so khi nguồn quote là finfo THẬT (mode real) — đọc 1 lần cho cả lượt
   const quoteSource = await db.dataSourceStatus
@@ -477,9 +495,7 @@ async function crossCheckFinfoVsEod(
   for (const inst of instruments) {
     const bar = latestBarBySymbol.get(inst.symbol);
     if (!bar || !(bar.close > 0)) continue;
-    const q = await db.quote
-      .findFirst({ where: { instrumentId: inst.id }, select: { last: true, close: true, tradedAt: true } })
-      .catch(() => null);
+    const q = preAnchorQuotes.get(inst.id);
     if (!q) continue;
     // Cùng NGÀY ICT (quote cuối phiên hôm nay vs bar EOD hôm nay)
     if (vnDateIso(q.tradedAt) !== vnDateIso(bar.date)) continue;
@@ -499,7 +515,9 @@ async function crossCheckFinfoVsEod(
       .findFirst({ where: { code: CROSS_SOURCE_ALERT_CODE, createdAt: { gte: since24h } }, select: { id: true } })
       .catch(() => null);
     if (!dup) {
-      const worst = mismatches[0];
+      // F-611B-09/#61 — "lớn nhất" = diffPct MAX (trước đây lấy mismatches[0]
+      // theo thứ tự mã — không phải lớn nhất như message khai báo)
+      const worst = [...mismatches].sort((a, b) => b.diffPct - a.diffPct)[0];
       await db.riskAlert
         .create({
           data: {
@@ -577,6 +595,24 @@ export async function syncEodFromDchart(opts?: {
   // update CHỈ đụng lastSyncedAt (firstSeenAt = lần đầu thấy — PIT).
   const syncAt = new Date();
 
+  // F-611B-01/#61 (P0) — CHỤP ẢNH Quote finfo TRƯỚC vòng anchor: vòng lặp
+  // dưới đây gọi anchorQuoteToRealEod ĐÈ Quote bằng close dchart — nếu
+  // cross-check đọc Quote sau đó thì so dchart với chính dchart (diff ≡ 0,
+  // phép kiểm P1-3 chết lặng). 1 query findMany thay ~150 findFirst cũ.
+  const preAnchorQuotes = new Map<string, PreAnchorQuote>();
+  try {
+    const quotes = await db.quote.findMany({
+      where: { instrumentId: { in: instruments.map((i) => i.id) } },
+      select: { instrumentId: true, last: true, close: true, tradedAt: true },
+    });
+    for (const q of quotes) {
+      preAnchorQuotes.set(q.instrumentId, { last: q.last, close: q.close, tradedAt: q.tradedAt });
+    }
+  } catch (err) {
+    // Ảnh trước-anchor là tối ưu — không có thì cross-check so 0 mã trung thực
+    console.error("[eod-sync] chụp ảnh Quote trước anchor lỗi (cross-check sẽ so 0 mã):", err);
+  }
+
   for (const inst of instruments) {
     try {
       const res = await fetchDchartHistory({
@@ -639,12 +675,13 @@ export async function syncEodFromDchart(opts?: {
     }
   }
 
-  // P1-3 — đối chiếu chéo SAU lượt upsert (dùng ảnh bar cuối trước khi anchor
-  // đè Quote — hàm tự đọc Quote hiện có; chạy sau vòng for để không chậm đường
-  // nạp chính, mismatch chỉ là INFO không chặn outcome)
+  // P1-3 — đối chiếu chéo SAU lượt upsert, dùng ẢNH QUOTE FINFO THẬT chụp
+  // TRƯỚC vòng anchor (F-611B-01/#61 — trước đây hàm tự đọc Quote sau khi
+  // anchor đã đè bằng close dchart → diff ≡ 0 vĩnh viễn)
   const crossCheck = await crossCheckFinfoVsEod(
     instruments.map((i) => ({ id: i.id, symbol: i.symbol })),
-    latestBarBySymbol
+    latestBarBySymbol,
+    preAnchorQuotes
   ).catch(() => ({ compared: 0, mismatches: [] }));
 
   const outcome: EodSyncOutcome = {
@@ -708,6 +745,7 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
   const symbolsEmpty: string[] = [];
   const symbolsFailed: { symbol: string; error: string }[] = [];
   let barsUpserted = 0;
+  let barsReadjustedTotal = 0; // F-611R-01 — bar tái áp adjustment sau backfill
   let barsSkipped = 0;
   let lastTradeDate: string | null = null;
   const valueMismatches: EodSyncOutcome["valueMismatches"] = [];
@@ -731,12 +769,28 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
         symbolsEmpty.push(inst.symbol);
         continue;
       }
-      // Thay toàn bộ lịch sử synthetic bằng bar thật (idempotent khi chạy lại)
-      await db.bar.deleteMany({ where: { instrumentId: inst.id } });
+      // F-611B-04/#61 — deep backfill phải TÔN TRỌNG PIT (spec P1-2: "không
+      // đường nạp nào được reset firstSeenAt"): giữ firstSeenAt CŨ của từng
+      // bar đã có, bar MỚI mới stamp syncAt (trước đây deleteMany+createMany
+      // đặt firstSeenAt=syncAt toàn chuỗi ~215k bar → xoá sạch dòng thời gian
+      // "hồi đó dữ liệu thế nào"). Đồng thời delete+create trong MỘT transaction
+      // từng mã — crash giữa chừng không còn mất vĩnh viễn lịch sử sâu (eod-sync
+      // hằng ngày chỉ khôi phục 10 ngày).
+      const existingBars = await db.bar.findMany({
+        where: { instrumentId: inst.id },
+        select: { date: true, firstSeenAt: true },
+      });
+      const firstSeenByDate = new Map(
+        existingBars.map((b) => [b.date.toISOString(), b.firstSeenAt])
+      );
+      // Data chunk (build TƯỜNG — dùng bên trong tx qua tx.bar.createMany;
+      // PrismaPromise tạo từ db sẽ chạy NGOÀI transaction)
+      type BarChunkData = NonNullable<Parameters<typeof db.bar.createMany>[0]>["data"];
+      const createChunks: BarChunkData[] = [];
       for (let i = 0; i < bars.length; i += 1000) {
         const chunk = bars.slice(i, i + 1000);
-        await db.bar.createMany({
-          data: chunk.map((b) => ({
+        createChunks.push(
+          chunk.map((b) => ({
             instrumentId: inst.id,
             date: b.date,
             open: b.open,
@@ -745,13 +799,34 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
             close: b.close,
             volume: b.volume,
             value: b.value,
-            // P1-2 — deep backfill: cả chuỗi được thấy lần đầu cùng một mốc
-            firstSeenAt: syncAt,
+            // P1-2 — bar cũ giữ mốc thấy lần ĐẦU, bar mới stamp mốc này
+            firstSeenAt: firstSeenByDate.get(b.date.toISOString()) ?? syncAt,
             lastSyncedAt: syncAt,
-          })),
-        });
+          }))
+        );
       }
+      await db.$transaction(
+        async (tx) => {
+          await tx.bar.deleteMany({ where: { instrumentId: inst.id } });
+          for (const data of createChunks) {
+            await tx.bar.createMany({ data });
+          }
+        },
+        { timeout: 60_000 } // F-611R-10 — deep history ~3k bar/mã × WAN vượt 5s mặc định
+      );
       barsUpserted += bars.length;
+      // F-611R-01/#61 (Vòng 2) — TÁI ÁP adjustment đã ghi nhận: delete+create vừa
+      // thay bar bằng giá GỐC nguồn; event NGOÀI cửa sổ quét 92 ngày sẽ không
+      // bao giờ được scan lại → chuỗi giữ giá gốc vĩnh viễn trong khi row vẫn
+      // nói AUTO_ADJUSTED. Tái áp từ chính row (tuần tự cũ→mới, đúng nhân chuỗi).
+      const barsReadjusted = await reapplyAutoAdjustments(inst.id).catch((err) => {
+        symbolsFailed.push({
+          symbol: inst.symbol,
+          error: `tái áp corporate adjustment sau backfill: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return 0;
+      });
+      barsReadjustedTotal += barsReadjusted;
       await anchorQuoteToRealEod(inst.id, bars, unit);
       symbolsOk.push(inst.symbol);
       const d = bars[bars.length - 1].date.toISOString().slice(0, 10);
@@ -788,6 +863,7 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
       symbolsEmpty: symbolsEmpty.length,
       symbolsFailed: symbolsFailed.length,
       barsUpserted,
+      barsReadjusted: barsReadjustedTotal, // F-611R-01 — tái áp CorporateEvent AUTO_ADJUSTED
       barsSkipped,
       lastTradeDate,
       note: "Deep backfill 2013→nay — bar EOD thật (đã adjust) từ dchart VNDIRECT",

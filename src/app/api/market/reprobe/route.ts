@@ -55,6 +55,11 @@ export const maxDuration = 300;
 
 const COOLDOWN_MS = 60_000;
 let lastRunAt = 0;
+/** F-612R-01/#61 (Vòng 2) — mutex in-process (pattern F-441-01/F-611B-02):
+ * route 18 ứng viên × probe 15s + deep backfill 30s có thể chạy >120s;
+ * cooldown tính từ lúc BẮT ĐẦU → caller retry khi lần cũ chưa xong sẽ chồng
+ * lấn (probe trùng + TOCTOU meta). Đang chạy → 429 ngay. */
+let inFlight = false;
 
 /** Ứng viên watcher — market/type gán theo niêm yết lịch sử của mã. */
 interface ReprobeCandidate {
@@ -147,6 +152,14 @@ async function backfillSingleSymbol(
 }
 
 export async function POST(req: NextRequest) {
+  if (inFlight) {
+    return NextResponse.json(
+      { error: "Watcher re-probe đang chạy (mutex F-612R-01) — vui lòng đợi hoàn tất." },
+      { status: 429, headers: { "Retry-After": "60" } }
+    );
+  }
+  // Cooldown check TRƯỚC khi cắm mutex (429/400 sớm phải nhả lại cờ —
+  // tránh leak mutex khoá route vĩnh viễn)
   const now = Date.now();
   const sinceLast = now - lastRunAt;
   if (sinceLast < COOLDOWN_MS) {
@@ -163,6 +176,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  inFlight = true;
+  try {
   // Body { candidates?: string[] } — override tập con danh sách chuẩn.
   // Mã ngoài registry → 400 kèm danh sách hợp lệ (không đoán mò market/type).
   let candidates: ReprobeCandidate[] = DEFAULT_CANDIDATES;
@@ -285,9 +300,14 @@ export async function POST(req: NextRequest) {
     // CorporateEvent scan trên chuỗi backfill mới (fail-soft)
     let postCheck: Awaited<ReturnType<typeof runPostIngestChecks>> | null = null;
     if (created.length > 0) {
-      const createdRows = await db.instrument
-        .findMany({ where: { symbol: { in: created } }, select: { id: true } })
-        .catch(() => [] as { id: string }[]);
+      // F-612R-05/#61 (Vòng 2) — KHÔNG nuốt lỗi lookup (trước đây .catch(() => [])
+      // → instrumentIds: [] (mảng RỖNG vẫn là truthy) → runPostIngestChecks ghi
+      // meta checked:0/dbFail:false "sạch" trong khi chẳng kiểm được mã nào:
+      // F-611B-06 quay lại qua cửa call-site).
+      const createdRows = await db.instrument.findMany({
+        where: { symbol: { in: created } },
+        select: { id: true },
+      });
       postCheck = await runPostIngestChecks({
         route: "reprobe",
         instrumentIds: createdRows.map((r) => r.id),
@@ -316,5 +336,9 @@ export async function POST(req: NextRequest) {
       { error: "Watcher re-probe thất bại — xem log server để biết chi tiết." },
       { status: 500 }
     );
+  }
+  } finally {
+    // F-612R-01 — mutex nhả ở MỌI đường thoát (400 sớm · 500 · thành công)
+    inFlight = false;
   }
 }

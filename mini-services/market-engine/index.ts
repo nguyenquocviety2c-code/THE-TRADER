@@ -316,14 +316,23 @@ async function ingestNewsAndBroadcast(): Promise<void> {
 }
 
 /** Đồng bộ EOD thật: kéo bar dchart → neo Quote → broadcast "eod".
- * F-481-01: guard in-flight — eod-sync route KHÔNG có mutex, từng có 2 sync
- * chồng lấn (dev.log 1960/1961); guard engine-side chặn bắn thêm khi cũ
- * chưa xong (eodSyncDue() đọc cờ này). */
+ * F-481-01: guard in-flight engine-side chặn bắn thêm khi cũ chưa xong.
+ * F-611B-02/#61: POST eod-sync giờ mang chuỗi hậu kiểm P1-6 nặng (scan
+ * outlier + corporate scan + A9 re-run khi adjust — thực đo #60: 9,7s/vòng,
+ * có adjust + full A9 → ~60-90s) trong khi maxDuration route là 300s. Timeout
+ * mặc định 120s của postJson SẼ cắt sớm khi tải nặng → abort + do đó eod-sync
+ * chạy tiếp server-side → guard in-flight engine đã NHẢ ở lúc abort →
+ * due-check 60s sau bắn POST THỨ HAI chồng lên (route từng không mutex).
+ * Cả 2 lớp đã vá: timeout 280s < 300s (như INTL_SYNC_POST_TIMEOUT_MS) +
+ * route-side mutex 429 (pattern F-441-01). */
 let eodSyncInFlight = false;
+const EOD_SYNC_POST_TIMEOUT_MS = 280_000;
 async function syncEodAndBroadcast(): Promise<void> {
   eodSyncInFlight = true;
   try {
-    const data = await postJson("/api/market/eod-sync", { days: 10 });
+    const data = await postJson("/api/market/eod-sync", { days: 10 }, {
+      timeoutMs: EOD_SYNC_POST_TIMEOUT_MS,
+    });
     stats.lastEodSyncAt = new Date().toISOString();
     stats.eodSyncRuns++;
     stats.lastEodSyncError = null;
@@ -418,7 +427,11 @@ let reprobeInFlight = false;
 async function reprobeAndBroadcast(): Promise<void> {
   reprobeInFlight = true;
   try {
-    const data = await postJson("/api/market/reprobe", {});
+    // F-612R-01/#61 (Vòng 2) — timeout 280s < maxDuration route 300s (18 ứng
+    // viên × probe 15s + deep backfill 30s có thể vượt 120s mặc định → abort
+    // engine trong khi route vẫn chạy → re-fire chồng lấn; route giờ có mutex
+    // 429 nhưng đúng lịch vẫn nên để 1 lần chạy tới cùng)
+    const data = await postJson("/api/market/reprobe", {}, { timeoutMs: 280_000 });
     stats.lastReprobeAt = new Date().toISOString();
     stats.reprobeRuns++;
     stats.lastReprobeError = null;
