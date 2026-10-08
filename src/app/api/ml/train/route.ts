@@ -3,9 +3,11 @@ import { db } from "@/lib/db";
 import {
   buildTrainingSet,
   loadTopSeries,
+  trainingWindowDigest,
   ML_FEATURE_COUNT,
   ML_HORIZON_DAYS,
   standardize,
+  type TrainingWindowMeta,
 } from "@/lib/ml/features";
 import { MLP } from "@/lib/ml/nn";
 import { buildBasket, policyStance, trainQTable } from "@/lib/ml/rl";
@@ -62,12 +64,15 @@ async function nextVersion(kind: string): Promise<number> {
   return (agg._max.version ?? 0) + 1;
 }
 
-/** Lưu model mới: archive bản serving cũ + create version mới. */
+/** Lưu model mới: archive bản serving cũ + create version mới.
+ *  P1-2 (#60): meta = JSON TrainingWindowMeta (window-hash SHA-256 + biên
+ *  ngày train) — null giữ cho model không có window (gọi trực tiếp). */
 async function saveModel(
   kind: string,
   weights: string,
   featureNorm: string | null,
-  metrics: Record<string, unknown>
+  metrics: Record<string, unknown>,
+  meta: TrainingWindowMeta | null = null
 ): Promise<number> {
   const version = await nextVersion(kind);
   await db.mlModel.updateMany({
@@ -75,7 +80,15 @@ async function saveModel(
     data: { status: "archived" },
   });
   await db.mlModel.create({
-    data: { kind, version, status: "serving", weights, featureNorm, metrics: JSON.stringify(metrics) },
+    data: {
+      kind,
+      version,
+      status: "serving",
+      weights,
+      featureNorm,
+      metrics: JSON.stringify(metrics),
+      ...(meta ? { meta: JSON.stringify(meta) } : {}),
+    },
   });
   return version;
 }
@@ -90,6 +103,9 @@ async function trainDlMlp(): Promise<TrainedDlMlpMetrics> {
   if (set.X.length < 600) {
     throw new Error(`chỉ có ${set.X.length} mẫu huấn luyện (cần ≥ 600) — kiểm tra dữ liệu EOD`);
   }
+  // P1-2 — digest cửa sổ train TRÊN CHÍNH chuỗi dữ liệu vừa dùng (tái lập PIT)
+  const series = await loadTopSeries(20);
+  const windowMeta = trainingWindowDigest(series, { samples: set.X.length });
   const { mean, std, Xstd } = standardize(set.X);
   const mlp = new MLP();
   const fit = mlp.fit(Xstd, set.y);
@@ -121,7 +137,7 @@ async function trainDlMlp(): Promise<TrainedDlMlpMetrics> {
     features: ML_FEATURE_COUNT,
     topSymbols,
   };
-  await saveModel("dl-mlp", mlp.toJSON(), JSON.stringify({ mean, std }), { ...metrics });
+  await saveModel("dl-mlp", mlp.toJSON(), JSON.stringify({ mean, std }), { ...metrics }, windowMeta);
   return metrics;
 }
 
@@ -135,6 +151,8 @@ async function trainRlQ(): Promise<TrainedRlQMetrics> {
   if (series.length < 5 || Math.min(...closes.map((c) => c.length)) < 80) {
     throw new Error("rổ top-10 không đủ dữ liệu (≥ 80 phiên/mã) để train Q-learning");
   }
+  // P1-2 — digest rổ Q-learning (tái lập PIT — cùng hàm với dl-mlp)
+  const windowMeta = trainingWindowDigest(series);
   const q = trainQTable(closes);
   const basket = buildBasket(closes);
   const stance = policyStance(q.qTable, basket, 0.5);
@@ -148,7 +166,7 @@ async function trainRlQ(): Promise<TrainedRlQMetrics> {
     exposure: stance.exposure,
     qMax: stance.qMax,
   };
-  await saveModel("rl-q", JSON.stringify({ qTable: q.qTable }), null, { ...metrics });
+  await saveModel("rl-q", JSON.stringify({ qTable: q.qTable }), null, { ...metrics }, windowMeta);
   return metrics;
 }
 

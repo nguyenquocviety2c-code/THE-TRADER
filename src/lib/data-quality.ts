@@ -132,10 +132,13 @@ const MARKET_WINDOWS: Record<string, MarketWindow> = {
   UPCOM: { open1: 540, close1: 690, open2: 780, close2: 900, band: 0.15 },
 };
 
-const VN_MARKETS = new Set(["HOSE", "HNX", "UPCOM"]);
+/** Các sàn VN (corporate-events P1-1 tái dùng — auto-adjust CHỈ VN). */
+export const VN_MARKETS = new Set(["HOSE", "HNX", "UPCOM"]);
 
-/** Dải giá theo (market, type) — ETF HOSE ±10% (quy định hiện hành). */
-function priceBand(market: string, type: string): number | null {
+/** Dải giá theo (market, type) — ETF HOSE ±10% (quy định hiện hành).
+ *  P1-1 (#60): xuất public cho corporate-events.ts (cùng công thức dải +
+ *  biên tick — tránh 2 nguồn sự thật lệch nhau). */
+export function priceBand(market: string, type: string): number | null {
   if (!VN_MARKETS.has(market)) return null; // US/HK: crash thật — không band
   if (type === "INDEX" || type === "FUND") return null; // chỉ số/quỹ mở: không band
   if (type === "ETF" && market === "HOSE") return 0.1;
@@ -153,7 +156,7 @@ const VN_TICK = 100;
  * TCB 31.300→33.500 = 7,03% là ngày trần THẬT (tick làm tròn lên), lọc >7%
  * cứng sẽ crying wolf mỗi ngày trần/sàn — phải trừ đúng biên tick.
  */
-function beyondBand(close: number, prevClose: number, band: number): boolean {
+export function beyondBand(close: number, prevClose: number, band: number): boolean {
   if (!(prevClose > 0) || !(close > 0)) return false;
   const ceiling = Math.ceil((prevClose * (1 + band)) / VN_TICK) * VN_TICK + VN_TICK;
   const floor = Math.floor((prevClose * (1 - band)) / VN_TICK) * VN_TICK - VN_TICK;
@@ -255,6 +258,94 @@ function hampelFlagCount(rets: number[], window = 20): number {
     if (Math.abs(rets[t] - med) > 3 * 1.4826 * mad) flags++;
   }
   return flags;
+}
+
+/* ═══════════════ Scan outlier thuần (P1-6 — dùng chung route ∥ chu kỳ) ═══════════════ */
+
+/** Bar input cho scan outlier thuần (cấu trúc DB tối giản). */
+export interface ScanBarInput {
+  date: Date;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  value: bigint | null;
+}
+
+/** Kết quả scan outlier 1 mã (cấu trúc + dải + Hampel + split-nghi-vấn). */
+export interface SymbolOutlierScan {
+  structural: number;
+  bandViolations: number;
+  hampelFlags: number;
+  hampelIssue: boolean;
+  splitSuspect: boolean;
+  adtv: number;
+}
+
+/**
+ * Scan outlier 2 lớp + split-nghi-vấn cho 1 mã — HÀM THUẦN (P1-6 #60:
+ * blueprint §4.2 "A9-check là hàm thuần gọi được cả từ route (runtime) lẫn
+ * từ runDataIntegrity (chu kỳ)"). runDataQualityChecks và ingest-pipeline
+ * CÙNG gọi đây — một định nghĩa, không rẽ nhánh. Thuật toán giữ nguyên từng
+ * dấu với P0-4/#59 (regression: verdict không đổi). US/HK: band=null →
+ * chỉ kiểm cấu trúc (crash thật không bị bắt là outlier).
+ */
+export function scanOutlierBars(market: string, type: string, bars: ScanBarInput[]): SymbolOutlierScan {
+  const band = priceBand(market, type);
+  let structural = 0;
+  let bandViolations = 0;
+  let splitSuspect = false;
+  const rets: number[] = [];
+  let adtvSum = 0;
+  let adtvCount = 0;
+  const tail45 = bars.slice(-45);
+  for (const b of tail45) {
+    const v = b.value != null ? Number(b.value) : b.close * b.volume;
+    if (v > 0) {
+      adtvSum += v;
+      adtvCount++;
+    }
+  }
+  const adtv = adtvCount > 0 ? adtvSum / adtvCount : 0;
+  let prevClose: number | null = null;
+  for (const b of bars) {
+    if (!(b.close > 0)) {
+      structural++; // giá ≤ 0 — artefact dữ liệu
+      continue;
+    }
+    if (b.high < b.low || b.open <= 0 || b.high <= 0 || b.low <= 0 || b.volume < 0) {
+      structural++;
+    }
+    if (prevClose != null && prevClose > 0) {
+      rets.push(Math.log(b.close / prevClose));
+      if (band != null) {
+        if (beyondBand(b.close, prevClose, band)) bandViolations++;
+        // (iv) split-nghi-vấn: gap open/prevClose VƯỢT dải (cùng biên tick)
+        // + volume ≥ 3× ADTV corroborate
+        if (
+          b.open > 0 &&
+          beyondBand(b.open, prevClose, band) &&
+          adtv > 0 &&
+          b.close * b.volume >= 3 * adtv
+        ) {
+          splitSuspect = true;
+        }
+      }
+    } else {
+      rets.push(0);
+    }
+    prevClose = b.close;
+  }
+  const hampelFlags = hampelFlagCount(rets);
+  return {
+    structural,
+    bandViolations,
+    hampelFlags,
+    hampelIssue: hampelFlags >= HAMPEL_ISSUE_MIN,
+    splitSuspect,
+    adtv,
+  };
 }
 
 /* ═══════════════════════ 6 phép kiểm ═══════════════════════ */
@@ -514,58 +605,14 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
       const inst = byId.get(instrumentId);
       if (!inst) continue;
       const band = priceBand(inst.market, inst.type);
-      let structural = 0;
-      let bandViolations = 0;
-      const rets: number[] = [];
-      let adtvSum = 0;
-      let adtvCount = 0;
-      const tail45 = bars.slice(-45);
-      for (const b of tail45) {
-        const v = b.value != null ? Number(b.value) : b.close * b.volume;
-        if (v > 0) {
-          adtvSum += v;
-          adtvCount++;
-        }
-      }
-      const adtv = adtvCount > 0 ? adtvSum / adtvCount : 0;
-      let prevClose: number | null = null;
-      for (const b of bars) {
-        if (!(b.close > 0)) {
-          structural++; // giá ≤ 0 — artefact dữ liệu
-          continue;
-        }
-        if (b.high < b.low || b.open <= 0 || b.high <= 0 || b.low <= 0 || b.volume < 0) {
-          structural++;
-        }
-        if (prevClose != null && prevClose > 0) {
-          rets.push(Math.log(b.close / prevClose));
-          if (band != null) {
-            const closeMove = beyondBand(b.close, prevClose, band);
-            if (closeMove) bandViolations++;
-            // (iv) split-nghi-vấn: gap open/prevClose VƯỢT dải (cùng biên tick)
-            // + volume ≥ 3× ADTV corroborate
-            if (
-              b.open > 0 &&
-              beyondBand(b.open, prevClose, band) &&
-              adtv > 0 &&
-              b.close * b.volume >= 3 * adtv
-            ) {
-              if (!splitSuspects.includes(inst.symbol)) splitSuspects.push(inst.symbol);
-            }
-          }
-        } else {
-          rets.push(0);
-        }
-        prevClose = b.close;
-      }
-      const flags = hampelFlagCount(rets);
-      hampelFlags += flags;
-      const hampelIssue = flags >= HAMPEL_ISSUE_MIN;
-      if (structural > 0 || bandViolations > 0 || hampelIssue) {
+      const scan = scanOutlierBars(inst.market, inst.type, bars);
+      hampelFlags += scan.hampelFlags;
+      if (scan.splitSuspect) splitSuspects.push(inst.symbol);
+      if (scan.structural > 0 || scan.bandViolations > 0 || scan.hampelIssue) {
         outlierSymbols++;
         if (outlierBits.length < 5) {
           outlierBits.push(
-            `${inst.symbol}: ${structural > 0 ? `${structural} thanh cấu trúc` : ""}${bandViolations > 0 ? `${structural > 0 ? " · " : ""}${bandViolations} thanh vượt dải ±${band != null ? Math.round(band * 100) : "?"}%` : ""}${hampelIssue ? `${structural > 0 || bandViolations > 0 ? " · " : ""}${flags} cờ Hampel` : ""}`
+            `${inst.symbol}: ${scan.structural > 0 ? `${scan.structural} thanh cấu trúc` : ""}${scan.bandViolations > 0 ? `${scan.structural > 0 ? " · " : ""}${scan.bandViolations} thanh vượt dải ±${band != null ? Math.round(band * 100) : "?"}%` : ""}${scan.hampelIssue ? `${scan.structural > 0 || scan.bandViolations > 0 ? " · " : ""}${scan.hampelFlags} cờ Hampel` : ""}`
           );
         }
       }
@@ -587,7 +634,7 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
       level: splitSuspects.length > 0 ? "DEGRADED" : "PASS",
       detail:
         splitSuspects.length > 0
-          ? `${splitSuspects.length} mã nghi-vấn split (VN: gap open/prevClose vượt dải sàn + volume ≥ 3× ADTV — P0 chỉ CẢNH BÁO, tự điều chỉnh là P1-1): ${splitSuspects.join(", ")}`
+          ? `${splitSuspects.length} mã nghi-vấn split (VN: gap open/prevClose vượt dải sàn + volume ≥ 3× ADTV — P1-1 pipeline TỰ ĐIỀU CHỈNH khi khớp heuristic mức CAO ±1% cả 2 phép; còn trong verdict = chưa khớp hoặc kill-switch tắt — xem CorporateEvent SUSPECTED): ${splitSuspects.join(", ")}`
           : "0 nghi-vấn split (điều kiện: VN + gap vượt dải sàn + volume ≥ 3× ADTV)",
     });
   }

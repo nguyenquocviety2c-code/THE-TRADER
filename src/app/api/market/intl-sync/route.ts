@@ -6,6 +6,7 @@ import {
   INTL_RANGES,
   DEFAULT_INTL_RANGE,
 } from "@/lib/intl-eod";
+import { runPostIngestChecks } from "@/lib/ingest-pipeline";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -90,13 +91,25 @@ export async function POST(req: NextRequest) {
     const outcome = await syncIntlEod({ range });
     // Cooldown tính từ lúc HOÀN THÀNH (F-441-01) — không phải lúc bắt đầu
     lastSyncAt = Date.now();
+    // P1-6 — chuỗi hậu kiểm một cửa: A9-check cấu trúc cho các mã vừa nạp
+    // (US/HK KHÔNG gap-infer — CorporateEvent US/HK đã parse từ payload events
+    // bên trong syncIntlEod, P1-1 — nên ở đây TẮT scan gap-infer VN)
+    const postCheck = await runPostIngestChecks({
+      route: "intl-sync",
+      instrumentIds: await intlInstrumentIds(),
+      includeCorporateScan: false,
+    }).catch((err) => {
+      console.error("[api/market/intl-sync] postIngestChecks lỗi (bỏ qua):", err);
+      return null;
+    });
     // Universe US/HK chưa seed (0 mã ok + 0 mã lỗi) → kèm note hướng dẫn
     // (outcome vẫn ok=true — hợp lệ, không phải lỗi hệ thống)
     const note =
       outcome.symbolsOk.length === 0 && outcome.symbolsFailed.length === 0
         ? "Chạy prisma/expand-universe.ts --intl để seed universe US/HK trước"
         : undefined;
-    return NextResponse.json(toPlain(note ? { ...outcome, note } : outcome), {
+    const payload = note ? { ...outcome, note } : { ...outcome };
+    return NextResponse.json(toPlain(postCheck ? { ...payload, postCheck } : payload), {
       status: outcome.ok ? 200 : 502,
     });
   } catch (err) {
@@ -110,4 +123,15 @@ export async function POST(req: NextRequest) {
   } finally {
     inFlight = false;
   }
+}
+
+/** Id các instrument US/HK active (tập hậu kiểm P1-6 của route này). */
+async function intlInstrumentIds(): Promise<string[]> {
+  const rows = await db.instrument
+    .findMany({
+      where: { isActive: true, market: { in: ["US", "HK"] } },
+      select: { id: true },
+    })
+    .catch(() => [] as { id: string }[]);
+  return rows.map((r) => r.id);
 }

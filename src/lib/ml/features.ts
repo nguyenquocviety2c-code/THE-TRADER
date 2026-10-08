@@ -24,6 +24,8 @@
 
 import { db } from "@/lib/db";
 import { loadTopDatedSeries, topByAdtv } from "@/lib/dated-series";
+// P1-2 PIT — SHA-256 window-hash của cửa sổ train (node:crypto, backend only)
+import { createHash } from "node:crypto";
 
 /** Số đặc trưng đầu vào của MLP (thay đổi phải đổi cả kiến trúc mạng). */
 export const ML_FEATURE_COUNT = 10;
@@ -50,6 +52,69 @@ export interface TrainingSet {
 export interface FeatureNorm {
   mean: number[];
   std: number[];
+}
+
+/* ── P1-2 PIT (blueprint v1.3 §5 — phiên #60): window-hash SHA-256 + biên ngày
+ * train — tái lập được "hồi đó dữ liệu thế nào" khi train lại cho ra số khác
+ * (§9.1: PIT là rủi ro duy nhất làm nghiên cứu hồi tố SAI không phát hiện —
+ * Bar upsert đè lịch sử giờ để lại dấu vết so hash). */
+
+/** Meta PIT lưu MlModel.meta (JSON string) sau mỗi lần train. */
+export interface TrainingWindowMeta {
+  /** SHA-256 hex (64 ký tự) trên nội dung cửa sổ dữ liệu train — deterministic. */
+  windowHash: string;
+  /** Ngày phiên ĐẦU TIÊN dùng trong cửa sổ train. */
+  trainDateFrom: string | null;
+  /** Ngày phiên CUỐI CÙNG dùng trong cửa sổ train (biên trên — sau này PIT
+   *  backtest biết hết hạn nhìn tới tương lai của window này). */
+  trainDateTo: string | null;
+  /** Số bar trong cửa sổ (per mã — digest tính trên chính các bar này). */
+  bars: number;
+  /** Số mẫu huấn luyện cuối (sau cap ML_MAX_SAMPLES). */
+  samples: number;
+  /** Rổ mã tham gia (train/serving cùng định nghĩa rổ — P0-2). */
+  symbols: string[];
+  horizonDays: number;
+  featureCount: number;
+  /** Thuật toán sinh hash (đổi cách hash → đổi version chuỗi này). */
+  digestVersion: string;
+}
+
+/**
+ * SHA-256 cửa sổ train: hash từng bar (symbol|date|close|volume) theo thứ tự
+ * ổn định (symbol asc, date asc) — 2 lần train trên cùng dữ liệu cho cùng
+ * hash; bar bị upsert đè (restate/PIT leak) → hash KHÁC → đối chiếu phát
+ * hiện được. Kèm biên ngày from/to lấy từ chính các bar đó.
+ */
+export function trainingWindowDigest(
+  series: SymbolSeries[],
+  opts: { samples?: number; horizonDays?: number; featureCount?: number } = {}
+): TrainingWindowMeta {
+  const hash = createHash("sha256");
+  let bars = 0;
+  let from: string | null = null;
+  let to: string | null = null;
+  for (const s of [...series].sort((a, b) => (a.symbol < b.symbol ? -1 : 1))) {
+    hash.update(`#${s.symbol}\n`);
+    for (const b of s.bars) {
+      const d = b.date.toISOString().slice(0, 10);
+      hash.update(`${d}|${b.close}|${b.volume}\n`);
+      bars++;
+      if (from == null || d < from) from = d;
+      if (to == null || d > to) to = d;
+    }
+  }
+  return {
+    windowHash: hash.digest("hex"),
+    trainDateFrom: from,
+    trainDateTo: to,
+    bars,
+    samples: opts.samples ?? 0,
+    symbols: [...series].sort((a, b) => (a.symbol < b.symbol ? -1 : 1)).map((s) => s.symbol),
+    horizonDays: opts.horizonDays ?? ML_HORIZON_DAYS,
+    featureCount: opts.featureCount ?? ML_FEATURE_COUNT,
+    digestVersion: "sha256-symbol-date-close-volume-v1",
+  };
 }
 
 /** Chuỗi chỉ báo đã tính sẵn cho một mã (mảng cùng chiều closes, null khi warmup). */

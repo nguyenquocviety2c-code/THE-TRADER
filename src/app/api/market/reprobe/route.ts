@@ -8,6 +8,7 @@ import {
   anchorQuoteToRealEod,
   resolveUnitSpec,
 } from "@/lib/eod-sync";
+import { runPostIngestChecks } from "@/lib/ingest-pipeline";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -121,6 +122,8 @@ async function backfillSingleSymbol(
   }
 
   if (bars.length === 0) return 0;
+  // P1-2 — đồng hồ mốc backfill mã mới (PIT firstSeenAt/lastSyncedAt)
+  const syncAt = new Date();
   // Instrument vừa tạo → 0 bar cũ, createMany thẳng (chunk 1000 như eod-sync)
   for (let i = 0; i < bars.length; i += 1000) {
     const chunk = bars.slice(i, i + 1000);
@@ -134,6 +137,8 @@ async function backfillSingleSymbol(
         close: b.close,
         volume: b.volume,
         value: b.value,
+        firstSeenAt: syncAt,
+        lastSyncedAt: syncAt,
       })),
     });
   }
@@ -276,6 +281,21 @@ export async function POST(req: NextRequest) {
     }
 
     const probed = candidates.length - skippedExisting;
+    // P1-6 — hậu kiểm một cửa cho MÃ VỪA TẠO (created) — A9-check +
+    // CorporateEvent scan trên chuỗi backfill mới (fail-soft)
+    let postCheck: Awaited<ReturnType<typeof runPostIngestChecks>> | null = null;
+    if (created.length > 0) {
+      const createdRows = await db.instrument
+        .findMany({ where: { symbol: { in: created } }, select: { id: true } })
+        .catch(() => [] as { id: string }[]);
+      postCheck = await runPostIngestChecks({
+        route: "reprobe",
+        instrumentIds: createdRows.map((r) => r.id),
+      }).catch((err) => {
+        console.error("[api/market/reprobe] postIngestChecks lỗi (bỏ qua):", err);
+        return null;
+      });
+    }
     return NextResponse.json(
       toPlain({
         probed,
@@ -285,6 +305,7 @@ export async function POST(req: NextRequest) {
         failed,
         barsCreated,
         durationMs: Date.now() - startedAt,
+        ...(postCheck ? { postCheck } : {}),
       })
     );
   } catch (err) {

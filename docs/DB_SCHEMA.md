@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Phiên #34 thêm cấu hình runtime (`AppSetting`) + nhận định Bayes (`MarketAssessment`); phiên #35 thêm 3 bảng học máy (`MlModel` · `BanditArm` · `BanditEvent`); **phiên #38 (MARKET_EXPANSION_BLUEPRINT) thêm dữ liệu tài chính cơ bản (`FinancialFundamental`) + mở rộng `Market` (US · HK) + `Instrument.currency` + `Signal.consensusGate/consensusRatio`**. Tổng cộng **26 model** (phiên #51 thêm `RiskQuantSnapshot` — đồng bộ số đếm theo cam kết §9.1 DATA_PLATFORM_BLUEPRINT lúc triển khai P0 #57).
+The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Phiên #34 thêm cấu hình runtime (`AppSetting`) + nhận định Bayes (`MarketAssessment`); phiên #35 thêm 3 bảng học máy (`MlModel` · `BanditArm` · `BanditEvent`); **phiên #38 (MARKET_EXPANSION_BLUEPRINT) thêm dữ liệu tài chính cơ bản (`FinancialFundamental`) + mở rộng `Market` (US · HK) + `Instrument.currency` + `Signal.consensusGate/consensusRatio`**. Tổng cộng **29 model** (phiên #51 thêm `RiskQuantSnapshot` — đồng bộ số đếm theo cam kết §9.1 lúc triển khai P0 #57; **phiên #60 — DATA_PLATFORM_BLUEPRINT P1** thêm 3 bảng: `CorporateEvent` (§6.26 — sự kiện doanh nghiệp + auto-adjust split) · `ForeignFlow` (§6.27 — dòng khối ngoại persist mode simulated) · `DataQualityReport` (§6.28 — verdict A9 theo asOf); kèm cột additive `Bar.firstSeenAt/lastSyncedAt` (PIT) + `MlModel.meta` (window-hash SHA-256) — backup trước push ở `db/backup-pre-p1/`).
 
 Schema được thiết kế theo chuẩn **financial-grade**:
 
@@ -19,7 +19,7 @@ Schema được thiết kế theo chuẩn **financial-grade**:
 - **Integer money** — toàn bộ giá trị tiền tệ VND là số nguyên (xem §3), tránh sai số dấu chấm động vốn là yêu cầu bắt buộc trong hệ thống tài chính.
 - **Unique + composite indexes** phục vụ đúng truy vấn của dashboard và ràng buộc toàn vẹn dữ liệu thị trường (dedup OHLCV theo `(instrumentId, date)`).
 
-**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 26 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
+**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 29 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
 
 ---
 
@@ -862,6 +862,70 @@ Mỗi phiếu bầu trong `MarketAssessment` (detail.drivers source `llm-vote:<c
 
 ---
 
+### 6.26 `CorporateEvent` — Sự kiện doanh nghiệp + tự điều chỉnh split (phiên #60 — DATA_PLATFORM_BLUEPRINT P1-1)
+
+Sự kiện chia tách/cổ thưởng/cổ tức/restate được **gap-infer** từ chuỗi VN (điều kiện mức CAO: gap open/prevClose vượt dải sàn ± biên tick · value ≥ 3× ADTV-45 · tỷ số khớp ±1% cả 2 phép open/close) hoặc **parse từ payload `events` Yahoo** cho US/HK (nguồn chính xác — không heuristic). Auto-adjust nhân chuỗi TRƯỚC event f = open[t]/close[t−1] (giá ×f · volume ×(1/f) · value tính lại) kèm AuditLog pre-values đảo ngược được.
+
+```prisma
+model CorporateEvent {
+  id           String             @id @default(cuid())
+  instrumentId String
+  instrument   Instrument         @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  date         DateTime // ex-date — ngày giao dịch đầu tiên theo thang MỚI
+  kind         CorporateEventKind // SPLIT | BONUS | DIVIDEND | RESTATE
+  ratio        Float              @default(0) // f = open/prevClose (BONUS/SPLIT); DIVIDEND = 0
+  status       String             @default("SUSPECTED") // AUTO_ADJUSTED | SUSPECTED | REVERSED
+  source       String // gap-infer-dchart (VN) | yahoo-events (US/HK)
+  detail       String             @default("{}") // JSON: gapPct, corroborate, adjustedBy, reverseBy…
+
+  @@unique([instrumentId, date, kind]) // chống trùng — upsert idempotent tự hội tụ
+  @@index([instrumentId, date(sort: Desc)])
+}
+```
+
+- `status`: `AUTO_ADJUSTED` (pipeline đã nhân chuỗi — hoặc Yahoo adjclose đã adjust sẵn) · `SUSPECTED` (gap vượt dải nhưng không khớp heuristic mức CAO — chỉ ghi nhận) · `REVERSED` (đã đảo ngược bằng `scripts/reverse-corporate-event.ts` từ AuditLog — **kill-switch per-event**: scan không tự adjust lại).
+- Kill-switch toàn cục: AppSetting `corporate-event-autoadjust` `{enabled}` — tắt thì scan chỉ ghi SUSPECTED (PUT `/api/market/corporate-events`).
+- Chống double-apply khi eod-sync đè lookback 10 ngày: chỉ nhân f lên bar trước event có `lastSyncedAt > adjustedAt` lần trước (bar nguồn gửi lại GỐC) — deep backfill hội tụ về đúng 1 lần nhân.
+
+### 6.27 `ForeignFlow` — Dòng khối ngoại ròng persist (phiên #60 — P1-4)
+
+Trước đây flows re-sinh deterministic theo (mã, ngày) KHÔNG lưu (G6 §0.5 — B8 scorecard thiếu arm dữ liệu). Giờ `getForeignFlows` upsert mỗi lần gọi — mode `simulated` trung thực cho tới khi nguồn ngoài kết nối (`live`).
+
+```prisma
+model ForeignFlow {
+  id           String    @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  date         DateTime // ngày giao dịch (convention 15:00 UTC như Bar)
+  netValue     BigInt // VND — dương = mua ròng, âm = bán ròng (clamp 2–80 tỷ)
+  mode         String // simulated | live
+
+  @@unique([instrumentId, date]) // idempotent — mô phỏng deterministic hội tụ
+  @@index([date(sort: Desc)])
+}
+```
+
+### 6.28 `DataQualityReport` — Báo cáo chất lượng dữ liệu theo asOf (phiên #60 — P1-7)
+
+A9 Data Integrity mỗi chu kỳ INSERT 1 dòng verdict chuẩn (song song AgentRun.output — S1/extractVerdict đọc output như cũ). Thay thế JSON lồng khi cần truy vấn lịch sử dài / trend chất lượng — index asOf DESC cho truy vấn < 100ms (thực đo 46ms nóng).
+
+```prisma
+model DataQualityReport {
+  id        String   @id @default(cuid())
+  asOf      DateTime // mốc kiểm định (verdict.asOf)
+  level     String // PASS | DEGRADED | SEVERE
+  checks    String // JSON DqCheck[] — 6 phép + dbFail
+  summary   String? // JSON DqSummary
+  createdAt DateTime @default(now())
+
+  @@index([asOf(sort: Desc)])
+}
+```
+
+- Route đọc: `GET /api/data-quality?limit&from&to` → `{latest, history[], trend {PASS,DEGRADED,SEVERE,total}, queryMs}`.
+
+---
+
 ## 7. Enum Dictionary
 
 12 enum (native enum type trên Postgres schema `trader`, validate bởi Prisma Client). `AgentRole` mở rộng đủ **23 giá trị** từ v0.5 (đúng kiến trúc Gen-1 DESIGN.md §4.1 — 4 dịch vụ S + 19 agent A; nhóm hiển thị theo `Agent.group`); `Market` mở rộng **5 giá trị** từ v0.6.0 (phiên #38):
@@ -957,4 +1021,5 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 | 2026-10-06 | **v0.3 — Audit vòng 1+2 (Task 21/22):** `AgentMessage` thêm `@@index([createdAt])` (F-116); §6.4 Quote bổ sung vòng đời phiên EOD rollover + fill engine; §6.2 `equity` ghi rõ chính sách snapshot (chốt khi khớp lệnh/EOD, live do `/api/portfolio` tính); §4.3 làm rõ Quote là update-in-place tại chỗ (không append-only — khớp DATA_SOURCES Q4); §9 cập nhật equity migration; thay lễ 2026-04-10 → 2026-04-27 trong lịch (ở `market-session.ts`) |
 | 2026-10-06 | **v0.4 — Giai đoạn 3 (PHASE3_BLUEPRINT B2):** `AgentMessage.direction` (AGENT\|USER) + index `[fromAgentId, broadcast, createdAt desc]` cho thread chat 1-1; `Signal.status` (ACTIVE\|ACTED\|REJECTED\|EXPIRED) + `rejectedAt`/`rejectNote` + index `[status, createdAt desc]` — tín hiệu giờ chờ trader phê duyệt (chu kỳ không tự tạo lệnh); audit action mới `SIGNAL_CREATED`/`SIGNAL_APPROVED`(via decision)/`SIGNAL_REJECTED`/`AGENT_CHAT`; backfill migration `scripts/set-signal-status.ts` (13 ACTED · 3 ACTIVE); API mới: `GET /api/agents/[id]`, `POST /api/agents/[id]/run`, `POST /api/agents/[id]/chat`, `POST /api/signals/[id]/decision` (§4 TECHNICAL_BLUEPRINT) |
 | 2026-10-06 | **v0.5 — Mở rộng 23 agents (Gen-1 DESIGN.md §4.1):** `enum AgentRole` **+18 giá trị** (tổng 23: 5 cũ + S0–S3 dịch vụ + A3/A5/A7–A9/A11–A19 chuyên gia); model `Agent` thêm field **`group`** (String, default `"research"` — research\|control\|executive\|platform\|ml) + index **`@@index([group])`**; `Agent.model` default `"glm-4.6"` → **`"space-bunny-free"`** (Opencode Zen free-tier — model runtime vẫn resolve từ `src/lib/llm.ts`); seed dùng roster `src/lib/agent-roster.ts` + script migrate idempotent `prisma/expand-agents.ts` (upsert theo `code`, không đụng lịch sử runs/messages); chu kỳ chạy 5 đợt A→E — chi tiết [TECHNICAL_BLUEPRINT.md §5](./TECHNICAL_BLUEPRINT.md) |
+| 2026-10-08 | **v0.7.0 — DATA_PLATFORM_BLUEPRINT P1 (phiên #60, 26 → 29 model):** (1) **§6.26 `CorporateEvent`** `{instrumentId, date, kind SPLIT/BONUS/DIVIDEND/RESTATE, ratio, status AUTO_ADJUSTED/SUSPECTED/REVERSED, source, detail}` + `@@unique([instrumentId,date,kind])` — auto-adjust VN gap vượt dải (f = open/prevClose · giá×f · volume×(1/f) · value tính lại) kèm AuditLog đảo ngược + kill-switch AppSetting `corporate-event-autoadjust` + Yahoo events parse US/HK (source `yahoo-events`); phơi thật đầu tiên: APC HNX f=1,1455 · 24 bar; (2) **§6.27 `ForeignFlow`** `{instrumentId, date, netValue BigInt VND, mode simulated|live}` + `@@unique([instrumentId,date])` — persist 76 dòng/ngày từ mô phỏng deterministic; (3) **§6.28 `DataQualityReport`** `{asOf, level, checks, summary}` + index asOf DESC — A9 INSERT mỗi chu kỳ (AgentRun.output vẫn ghi song song + reportId); truy vấn asOf 46ms nóng; (4) cột additive: `Bar.firstSeenAt/lastSyncedAt` (PIT — create đặt cả 2, upsert chỉ lastSyncedAt) + `MlModel.meta` (TrainingWindowMeta: windowHash SHA-256 + trainDateFrom/To); (5) backup `db/backup-pre-p1/` (26 bảng JSON + 215.402 bar NDJSON) trước `db push` — nghi thức B1 |
 | 2026-10-07 | **v0.6.0 — Đồng bộ sau phiên #34/#35/#38 (24→25 model; #51 thêm RiskQuantSnapshot → 26, đồng bộ #57):** (1) bổ sung dictionary 6 model còn thiếu — §6.20 `AppSetting` · §6.21 `MarketAssessment` (phiên #34) · §6.23 `MlModel` · §6.24 `BanditArm` (6 arms từ #38) · §6.25 `BanditEvent` (phiên #35) · **§6.22 `FinancialFundamental` (phiên #38 — B11 finfo pending-egress, đơn vị VND nguyên/tỷ lệ thô, `@@unique([instrumentId, period, year])`)**; (2) **phiên #38:** `enum Market` +2 giá trị **US · HK** (Yahoo Finance); `Instrument.currency` (VND \| USD \| HKD — UnitSpec là nguồn đơn vị thật); `Signal.consensusGate/consensusRatio` (snapshot cổng đồng thuận 80% lúc sinh tín hiệu — B9); `BanditEvent.confidence` (Brier score — B8); ERD thêm `FINANCIAL_FUNDAMENTAL` nối `Instrument`; (3) `DataSourceStatus`: nguồn mới `eod-history` (mode `real` — #33) · `intl-eod` · `fundamentals` (mode `pending`) — 7 dòng; (4) schema thật: 25 model — **backup DB trước `db push` ở `db/backup-pre-b1/`**; dữ liệu thật 90 instrument active · 215.327 bar |

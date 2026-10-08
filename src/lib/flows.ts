@@ -72,6 +72,7 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
   const instruments = await db.instrument.findMany({
     where: { isActive: true },
     select: {
+      id: true,
       symbol: true,
       quotes: {
         orderBy: { tradedAt: "desc" },
@@ -105,6 +106,28 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
     items.push({ symbol: inst.symbol, netValue: net });
   }
 
+  // P1-4 (blueprint v1.3 §5 — phiên #60): PERSIST dòng mô phỏng vào bảng
+  // ForeignFlow (mode "simulated" trung thực) — trước đây re-sinh deterministic
+  // KHÔNG lưu → B8 scorecard mất lịch sử arm flows (G6 §0.5). Upsert theo
+  // @@unique([instrumentId, date]) idempotent: mô phỏng deterministic cùng
+  // (mã, ngày) → chạy lại không nhân đôi, giá trị hội tụ.
+  const flowDate = new Date(`${dateIso}T15:00:00.000Z`); // convention Bar 15:00 UTC
+  let persisted = 0;
+  for (const inst of instruments) {
+    const item = items.find((it) => it.symbol === inst.symbol);
+    if (!item) continue;
+    await db.foreignFlow
+      .upsert({
+        where: { instrumentId_date: { instrumentId: inst.id, date: flowDate } },
+        create: { instrumentId: inst.id, date: flowDate, netValue: BigInt(item.netValue), mode: "simulated" },
+        update: { netValue: BigInt(item.netValue), mode: "simulated" },
+      })
+      .then(() => {
+        persisted++;
+      })
+      .catch(() => undefined); // fail-soft — persist không chặn phục vụ flows
+  }
+
   const totalNet = totalBuy - totalSell;
   const sortedAsc = [...items].sort((a, b) => b.netValue - a.netValue);
   const summary: FlowsSummary = {
@@ -127,6 +150,8 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
       totalNet,
       dateIso,
       provider: "internal-simulator",
+      // P1-4 — số dòng persist vào ForeignFlow (lịch sử cho B8 scorecard)
+      persisted,
     },
   });
 

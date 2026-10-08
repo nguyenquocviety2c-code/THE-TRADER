@@ -87,7 +87,7 @@ export interface YahooChart {
 
 export type FetchYahooResult =
   | { empty: true }
-  | { empty: false; bars: YahooChart; nullSkipped: number };
+  | { empty: false; bars: YahooChart; nullSkipped: number; events: YahooEvent[] };
 
 /** Response đổi hình dạng so với golden signature — cần rà soát nguồn. */
 export class YahooConfigError extends Error {}
@@ -121,6 +121,75 @@ export interface RawYahooChartNode {
     } | null> | null;
     adjclose?: Array<{ adjclose?: unknown } | null> | null;
   } | null;
+  /** P1-1 (#60) — payload `events` Yahoo (đang bị BỎ ĐI): splits[] +
+   *  dividends[] — nguồn XÁC ĐỊNH CHÍNH XÁC sự kiện doanh nghiệp US/HK
+   *  (không gap-infer như VN — crash −50%/ngày có thật ở Mỹ). */
+  events?: {
+    splits?: Array<{
+      date?: unknown;
+      numerator?: unknown;
+      denominator?: unknown;
+    } | null> | null;
+    dividends?: Array<{ date?: unknown; amount?: unknown } | null> | null;
+  } | null;
+}
+
+/** Sự kiện doanh nghiệp US/HK parse từ payload `events` Yahoo (P1-1). */
+export interface YahooEvent {
+  /** Ngày hiệu lực (ex-date) — đã đổi về convention Bar 15:00 UTC. */
+  date: Date;
+  kind: "SPLIT" | "DIVIDEND";
+  /** SPLIT: hệ số nhân giá f = denominator/numerator (4:1 → 0,25); DIVIDEND: 0. */
+  ratio: number;
+  /** SPLIT: numerator/denominator gốc (vd 4/1); DIVIDEND: amount/cổ phiếu. */
+  detail: Record<string, number | string>;
+}
+
+/** Parse mảng events của Yahoo — bỏ dòng date không phải số, minh bạch. */
+export function parseYahooEvents(node: RawYahooChartNode): YahooEvent[] {
+  const out: YahooEvent[] = [];
+  const splits = node.events?.splits;
+  if (Array.isArray(splits)) {
+    for (const s of splits) {
+      if (!s || typeof s.date !== "number" || s.date <= 0) continue;
+      const numerator = typeof s.numerator === "number" && s.numerator > 0 ? s.numerator : null;
+      const denominator =
+        typeof s.denominator === "number" && s.denominator > 0 ? s.denominator : null;
+      const d = new Date(s.date * 1000);
+      const date = new Date(
+        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 15, 0, 0)
+      );
+      const ratio = numerator && denominator ? denominator / numerator : 0;
+      out.push({
+        date,
+        kind: "SPLIT",
+        ratio,
+        detail: {
+          numerator: numerator ?? "?",
+          denominator: denominator ?? "?",
+          note: `split ${numerator ?? "?"}:${denominator ?? "?"} — f giá = denominator/numerator`,
+        },
+      });
+    }
+  }
+  const dividends = node.events?.dividends;
+  if (Array.isArray(dividends)) {
+    for (const d0 of dividends) {
+      if (!d0 || typeof d0.date !== "number" || d0.date <= 0) continue;
+      const amount = typeof d0.amount === "number" ? d0.amount : null;
+      const d = new Date(d0.date * 1000);
+      const date = new Date(
+        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 15, 0, 0)
+      );
+      out.push({
+        date,
+        kind: "DIVIDEND",
+        ratio: 0,
+        detail: { amount: amount ?? "?", note: "cổ tức tiền mặt — không đổi hệ số giá" },
+      });
+    }
+  }
+  return out;
 }
 
 export interface CleanedYahooSeries extends YahooChart {
@@ -286,8 +355,10 @@ export async function fetchYahooChart(p: {
       if (!node || typeof node !== "object") return { empty: true };
       const cleaned = cleanYahooSeries(node as RawYahooChartNode);
       if (!cleaned) return { empty: true };
+      // P1-1 — parse payload events (split/div) TRƯỚC KHI bị bỏ đi
+      const events = parseYahooEvents(node as RawYahooChartNode);
       const { nullSkipped, ...bars } = cleaned;
-      return { empty: false, bars, nullSkipped };
+      return { empty: false, bars, nullSkipped, events };
     }
 
     if (res.status === 429 || res.status >= 500) {
@@ -325,6 +396,8 @@ export interface IntlSyncOutcome {
   nullSkipped: number;
   /** §B12 v1.1 — các mã dùng chuỗi adjclose (đã adjust) làm giá đóng. */
   adjcloseUsed: string[];
+  /** P1-1 — số CorporateEvent US/HK parse từ payload events Yahoo. */
+  eventsPersisted: number;
   lastTradeDate: string | null;
   durationMs: number;
   error?: string;
@@ -379,8 +452,11 @@ export async function syncIntlEod(opts?: {
   let barsUpserted = 0;
   let barsSkipped = 0;
   let nullSkipped = 0;
+  let eventsPersisted = 0;
   let lastTradeDate: string | null = null;
   let failStreak = 0;
+  // P1-2 — đồng hồ sync dùng chung (firstSeenAt/lastSyncedAt)
+  const syncAt = new Date();
 
   for (const inst of instruments) {
     if (failStreak >= 3) {
@@ -399,6 +475,50 @@ export async function syncIntlEod(opts?: {
       }
       nullSkipped += res.nullSkipped;
       if (res.bars.adjcloseUsed) adjcloseUsed.push(inst.symbol);
+
+      // P1-1 — persist sự kiện doanh nghiệp từ payload events Yahoo
+      // (nguồn XÁC ĐỊNH CHÍNH XÁC — không heuristic gap-infer như VN).
+      // Chuỗi giá đang dùng adjclose → ĐÃ adjust sẵn; fallback raw close
+      // → detail cảnh báo "chuỗi chưa adjust" để người đọc biết.
+      for (const ev of res.events) {
+        await db.corporateEvent
+          .upsert({
+            where: {
+              instrumentId_date_kind: {
+                instrumentId: inst.id,
+                date: ev.date,
+                kind: ev.kind,
+              },
+            },
+            create: {
+              instrumentId: inst.id,
+              date: ev.date,
+              kind: ev.kind,
+              ratio: ev.ratio,
+              status: "AUTO_ADJUSTED",
+              source: "yahoo-events",
+              detail: JSON.stringify({
+                ...ev.detail,
+                adjustedBy: res.bars.adjcloseUsed ? "yahoo-adjclose" : "raw-close-fallback",
+                note: res.bars.adjcloseUsed
+                  ? `${ev.detail.note} · chuỗi giá đã adjust bởi adjclose Yahoo`
+                  : `${ev.detail.note} · CẢNH BÁO: chuỗi đang dùng close thô (adjclose thiếu) — gap split có thể còn nguyên trong giá`,
+              }),
+            },
+            update: {
+              ratio: ev.ratio,
+              source: "yahoo-events",
+              detail: JSON.stringify({
+                ...ev.detail,
+                adjustedBy: res.bars.adjcloseUsed ? "yahoo-adjclose" : "raw-close-fallback",
+              }),
+            },
+          })
+          .then(() => {
+            eventsPersisted++;
+          })
+          .catch(() => undefined); // fail-soft — event row không chặn sync
+      }
 
       const unit = resolveUnitSpec(inst.market, inst.type);
       const { bars, skipped } = toRealBars(inst.symbol, res.bars, unit);
@@ -420,6 +540,9 @@ export async function syncIntlEod(opts?: {
             close: b.close,
             volume: b.volume,
             value: b.value,
+            // P1-2 — PIT: create đặt cả 2 mốc, update chỉ lastSyncedAt
+            firstSeenAt: syncAt,
+            lastSyncedAt: syncAt,
           },
           update: {
             open: b.open,
@@ -428,6 +551,7 @@ export async function syncIntlEod(opts?: {
             close: b.close,
             volume: b.volume,
             value: b.value,
+            lastSyncedAt: syncAt,
           },
         });
       }
@@ -460,6 +584,7 @@ export async function syncIntlEod(opts?: {
     barsSkipped,
     nullSkipped,
     adjcloseUsed,
+    eventsPersisted,
     lastTradeDate,
     durationMs: Date.now() - startedAt,
   };
@@ -484,8 +609,9 @@ export async function syncIntlEod(opts?: {
       barsSkipped,
       nullSkipped,
       adjcloseUsed: adjcloseUsed.length,
+      eventsPersisted,
       lastTradeDate,
-      note: "Bar EOD quốc tế — adjclose ưu tiên (adjust split/cổ tức), cents ×100 / index điểm ×100 (§3.2)",
+      note: "Bar EOD quốc tế — adjclose ưu tiên (adjust split/cổ tức), cents ×100 / index điểm ×100 (§3.2) · PIT P1-2 · events parse P1-1",
     },
   });
 

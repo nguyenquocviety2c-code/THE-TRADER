@@ -31,6 +31,7 @@
 import { db } from "@/lib/db";
 import { markSource } from "@/lib/sources";
 import type { UnitSpec } from "@/lib/types";
+import { vnDateIso } from "@/lib/market-session";
 
 export const DCHART_BASE =
   process.env.DCHART_BASE_URL ?? "https://dchart-api.vndirect.com.vn";
@@ -424,6 +425,13 @@ export async function anchorQuoteToRealEod(
   }
 }
 
+export interface EodCrossCheck {
+  /** Số mã so được (có quote finfo cuối phiên cùng ngày ICT + mode real). */
+  compared: number;
+  /** Mã lệch close finfo realtime vs dchart EOD > 1% (P1-3 → RiskAlert INFO). */
+  mismatches: { symbol: string; finfoClose: number; eodClose: number; diffPct: number }[];
+}
+
 export interface EodSyncOutcome {
   ok: boolean;
   symbolsOk: string[];
@@ -433,7 +441,107 @@ export interface EodSyncOutcome {
   barsSkipped: number;
   lastTradeDate: string | null;
   durationMs: number;
+  /** P1-3 — đối chiếu chéo finfo realtime cuối phiên vs dchart EOD cùng ngày. */
+  crossCheck?: EodCrossCheck;
+  /** P1-3 — re-validate cột value = volume×close sau upsert (bar hỏng trong DB). */
+  valueMismatches: { symbol: string; date: string; value: string; expected: string }[];
   error?: string;
+}
+
+/* ── P1-3 (blueprint v1.3 §5): đối chiếu chéo nguồn sau EOD-sync ──
+ *
+ * So CLOSE finfo realtime CUỐI PHIÊN (dòng Quote trước khi anchor đè) vs bar
+ * dchart EOD CÙNG NGÀY ICT; lệch > 1% → RiskAlert INFO (dedupe 24h theo code
+ * DQ_CROSS_SOURCE). CHỈ so khi DataSourceStatus "market-quotes" mode=real
+ * (mô phỏng random-walk quanh EOD thì khớp là hiển nhiên — crying wolf).
+ * Re-validate cột value = volume×close cho toàn bộ bar vừa upsert (bắt bar
+ * hỏng tồn sẵn trong DB — toRealBars luôn ghi đúng nên mismatch = DB cũ lỗi).
+ */
+const CROSS_SOURCE_DIFF_PCT = 1; // % — ngưỡng RiskAlert INFO (blueprint P1-3)
+const CROSS_SOURCE_ALERT_CODE = "DQ_CROSS_SOURCE";
+
+async function crossCheckFinfoVsEod(
+  instruments: { id: string; symbol: string }[],
+  latestBarBySymbol: Map<string, { close: number; date: Date }>
+): Promise<EodCrossCheck> {
+  // Chỉ so khi nguồn quote là finfo THẬT (mode real) — đọc 1 lần cho cả lượt
+  const quoteSource = await db.dataSourceStatus
+    .findUnique({ where: { key: "market-quotes" } })
+    .catch(() => null);
+  const mismatches: EodCrossCheck["mismatches"] = [];
+  if (!quoteSource || quoteSource.mode !== "real") {
+    return { compared: 0, mismatches };
+  }
+
+  let compared = 0;
+  for (const inst of instruments) {
+    const bar = latestBarBySymbol.get(inst.symbol);
+    if (!bar || !(bar.close > 0)) continue;
+    const q = await db.quote
+      .findFirst({ where: { instrumentId: inst.id }, select: { last: true, close: true, tradedAt: true } })
+      .catch(() => null);
+    if (!q) continue;
+    // Cùng NGÀY ICT (quote cuối phiên hôm nay vs bar EOD hôm nay)
+    if (vnDateIso(q.tradedAt) !== vnDateIso(bar.date)) continue;
+    const finfoClose = q.close ?? q.last;
+    if (!(finfoClose > 0)) continue;
+    compared++;
+    const diffPct = Math.abs(finfoClose - bar.close) / bar.close * 100;
+    if (diffPct > CROSS_SOURCE_DIFF_PCT) {
+      mismatches.push({ symbol: inst.symbol, finfoClose, eodClose: bar.close, diffPct: Number(diffPct.toFixed(2)) });
+    }
+  }
+
+  if (mismatches.length > 0) {
+    // Dedupe 24h — pattern raiseSevereAlerts (data-quality.ts)
+    const since24h = new Date(Date.now() - 24 * 3_600_000);
+    const dup = await db.riskAlert
+      .findFirst({ where: { code: CROSS_SOURCE_ALERT_CODE, createdAt: { gte: since24h } }, select: { id: true } })
+      .catch(() => null);
+    if (!dup) {
+      const worst = mismatches[0];
+      await db.riskAlert
+        .create({
+          data: {
+            severity: "INFO",
+            code: CROSS_SOURCE_ALERT_CODE,
+            message: `[P1-3 đối chiếu chéo] ${mismatches.length} mã lệch close finfo realtime vs dchart EOD > 1% cùng ngày (${mismatches.slice(0, 5).map(m => `${m.symbol} ${m.diffPct}%`).join(" · ")}${mismatches.length > 5 ? "…" : ""}) — lớn nhất ${worst.symbol}: finfo ${worst.finfoClose} vs EOD ${worst.eodClose}. Kiểm tra nguồn trước khi tin số EOD.`,
+            metricKey: "data-quality.cross-source",
+            metricValue: worst.diffPct,
+            threshold: CROSS_SOURCE_DIFF_PCT,
+          },
+        })
+        .catch(() => null); // fail-soft — cross-check không làm hỏng sync
+    }
+  }
+  return { compared, mismatches };
+}
+
+/** P1-3 — re-validate value = volume×close cho bar vừa upsert của 1 mã. */
+async function revalidateValues(
+  instrumentId: string,
+  symbol: string,
+  windowFrom: Date
+): Promise<EodSyncOutcome["valueMismatches"]> {
+  const bars = await db.bar
+    .findMany({
+      where: { instrumentId, date: { gte: windowFrom } },
+      select: { date: true, volume: true, close: true, value: true },
+    })
+    .catch(() => [] as { date: Date; volume: number; close: number; value: bigint | null }[]);
+  const out: EodSyncOutcome["valueMismatches"] = [];
+  for (const b of bars) {
+    const expected = BigInt(Math.max(0, b.volume)) * BigInt(b.close);
+    if (b.value !== expected) {
+      out.push({
+        symbol,
+        date: b.date.toISOString().slice(0, 10),
+        value: b.value == null ? "null" : b.value.toString(),
+        expected: expected.toString(),
+      });
+    }
+  }
+  return out;
 }
 
 /**
@@ -462,6 +570,12 @@ export async function syncEodFromDchart(opts?: {
   let barsUpserted = 0;
   let barsSkipped = 0;
   let lastTradeDate: string | null = null;
+  const valueMismatches: EodSyncOutcome["valueMismatches"] = [];
+  // P1-3 — bar cuối mỗi mã (cho cross-check finfo vs EOD sau lượt sync)
+  const latestBarBySymbol = new Map<string, { close: number; date: Date }>();
+  // P1-2 — đồng hồ sync dùng chung: create đặt firstSeenAt/lastSyncedAt,
+  // update CHỈ đụng lastSyncedAt (firstSeenAt = lần đầu thấy — PIT).
+  const syncAt = new Date();
 
   for (const inst of instruments) {
     try {
@@ -493,6 +607,8 @@ export async function syncEodFromDchart(opts?: {
             close: b.close,
             volume: b.volume,
             value: b.value,
+            firstSeenAt: syncAt,
+            lastSyncedAt: syncAt,
           },
           update: {
             open: b.open,
@@ -501,13 +617,19 @@ export async function syncEodFromDchart(opts?: {
             close: b.close,
             volume: b.volume,
             value: b.value,
+            lastSyncedAt: syncAt,
           },
         });
       }
       barsUpserted += bars.length;
+      // P1-3 — re-validate value = volume×close sau upsert (fail-soft)
+      const bad = await revalidateValues(inst.id, inst.symbol, bars[0].date);
+      if (bad.length > 0) valueMismatches.push(...bad.slice(0, 5));
       await anchorQuoteToRealEod(inst.id, bars, unit);
       symbolsOk.push(inst.symbol);
-      const d = bars[bars.length - 1].date.toISOString().slice(0, 10);
+      const lastBar = bars[bars.length - 1];
+      latestBarBySymbol.set(inst.symbol, { close: lastBar.close, date: lastBar.date });
+      const d = lastBar.date.toISOString().slice(0, 10);
       if (d > (lastTradeDate ?? "")) lastTradeDate = d;
     } catch (err) {
       symbolsFailed.push({
@@ -516,6 +638,14 @@ export async function syncEodFromDchart(opts?: {
       });
     }
   }
+
+  // P1-3 — đối chiếu chéo SAU lượt upsert (dùng ảnh bar cuối trước khi anchor
+  // đè Quote — hàm tự đọc Quote hiện có; chạy sau vòng for để không chậm đường
+  // nạp chính, mismatch chỉ là INFO không chặn outcome)
+  const crossCheck = await crossCheckFinfoVsEod(
+    instruments.map((i) => ({ id: i.id, symbol: i.symbol })),
+    latestBarBySymbol
+  ).catch(() => ({ compared: 0, mismatches: [] }));
 
   const outcome: EodSyncOutcome = {
     ok: symbolsOk.length > 0 && symbolsFailed.length < instruments.length,
@@ -526,6 +656,8 @@ export async function syncEodFromDchart(opts?: {
     barsSkipped,
     lastTradeDate,
     durationMs: Date.now() - startedAt,
+    crossCheck,
+    valueMismatches,
   };
 
   await markSource("eod-history", {
@@ -541,8 +673,11 @@ export async function syncEodFromDchart(opts?: {
       barsSkipped,
       lastTradeDate,
       lookbackDays,
+      // P1-3 — kết quả đối chiếu chéo + value re-validate vào meta nguồn
+      crossCheck: { compared: crossCheck.compared, mismatched: crossCheck.mismatches.length },
+      valueMismatches: valueMismatches.length,
       note:
-        "Bar EOD thật (đã adjust) từ dchart VNDIRECT — Tier 1 DATA_SOURCES §3.1",
+        "Bar EOD thật (đã adjust) từ dchart VNDIRECT — Tier 1 DATA_SOURCES §3.1 · PIT firstSeenAt/lastSyncedAt (P1-2)",
     },
   });
 
@@ -559,6 +694,8 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
   const fromYear = opts?.fromYear ?? 2013;
   const fromSec = Math.floor(Date.UTC(fromYear, 0, 1) / 1000);
   const toSec = Math.floor(Date.now() / 1000) + 86_400;
+  // P1-2 — đồng hồ mốc backfill (toàn chuỗi thấy lần đầu cùng mốc)
+  const syncAt = new Date();
 
   const instruments = await db.instrument.findMany({
     where: { isActive: true, market: { in: ["HOSE", "HNX", "UPCOM"] } },
@@ -573,6 +710,7 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
   let barsUpserted = 0;
   let barsSkipped = 0;
   let lastTradeDate: string | null = null;
+  const valueMismatches: EodSyncOutcome["valueMismatches"] = [];
 
   for (const inst of instruments) {
     try {
@@ -607,6 +745,9 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
             close: b.close,
             volume: b.volume,
             value: b.value,
+            // P1-2 — deep backfill: cả chuỗi được thấy lần đầu cùng một mốc
+            firstSeenAt: syncAt,
+            lastSyncedAt: syncAt,
           })),
         });
       }
@@ -632,6 +773,7 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
     barsSkipped,
     lastTradeDate,
     durationMs: Date.now() - startedAt,
+    valueMismatches,
   };
 
   await markSource("eod-history", {

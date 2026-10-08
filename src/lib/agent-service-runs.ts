@@ -26,6 +26,7 @@ import {
   extractVerdict,
   type DataQualityVerdict,
 } from "@/lib/data-quality";
+import { liveIngestRegistry } from "@/lib/ingest-pipeline";
 import { MLP } from "@/lib/ml/nn";
 import { mlForecastEnsemble } from "@/lib/ml/ensemble";
 import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
@@ -188,7 +189,7 @@ async function portfolioSnapshot(): Promise<{
  * (registry 10 đường thật đợi P1-6 — engine + API routes là máy móc). */
 async function runDataCollector(): Promise<ServiceRunResult> {
   const since24h = new Date(Date.now() - 24 * 3_600_000);
-  const [instruments, barCount, quoteRows, news24h, sourceRows, barMaxAgg, barInstrumentGroup] =
+  const [instruments, barCount, quoteRows, news24h, sourceRows, barMaxAgg, barInstrumentGroup, registry] =
     await Promise.all([
       db.instrument.findMany({
         where: { isActive: true },
@@ -200,6 +201,9 @@ async function runDataCollector(): Promise<ServiceRunResult> {
       db.dataSourceStatus.findMany().catch(() => []),
       db.bar.aggregate({ _max: { date: true } }).catch(() => ({ _max: { date: null as Date | null } })),
       db.bar.groupBy({ by: ["instrumentId"] }).catch(() => [] as { instrumentId: string }[]),
+      // P1-6 — S0 làm CHỦ REGISTRY 10 đường nạp §0.3 (kết thúc "hữu danh vô
+      // thực" §1.2): mỗi chu kỳ gắn trạng thái sống vào IngestSummary
+      liveIngestRegistry().catch(() => [] as Awaited<ReturnType<typeof liveIngestRegistry>>),
     ]);
   // Quote update-in-place: 1 dòng/mã — tradedAt lớn nhất = báo giá mới nhất
   const lastQuoteAt = quoteRows.reduce<Date | null>(
@@ -230,6 +234,7 @@ async function runDataCollector(): Promise<ServiceRunResult> {
         : `${Math.round(ageSec / 60)} phút trước`;
 
   // P0-6 — IngestSummary (AgentRun.output): nạp hôm nay · nguồn hỏng · backlog
+  // P1-6 — + registry 10 đường §0.3 (S0 chủ kho & điều phối nạp)
   const failedSources = sourceRows
     .filter((s) => s.lastError)
     .map((s) => ({ key: s.key, mode: s.mode, lastError: s.lastError!.slice(0, 120) }));
@@ -249,15 +254,24 @@ async function runDataCollector(): Promise<ServiceRunResult> {
       zeroBarSymbols: zeroBarSymbols.slice(0, 20),
       noQuoteCount,
     },
+    // P1-6 — registry 10 đường nạp với trạng thái sống mỗi chu kỳ
+    registry: registry.map((r) => ({
+      no: r.no,
+      name: r.name,
+      route: r.route,
+      schedule: r.schedule,
+      targets: r.targets,
+      status: r.status,
+    })),
   };
 
   // B11 — ingest fundamentals finfo (tuần: chỉ chạy Chủ nhật theo lịch ICT)
   const fundNote = await ingestFundamentalsWeekly();
 
   return {
-    content: `Đồng bộ hoàn tất: ${instrumentCount} mã đa sàn (HOSE · HNX · UPCOM · ETF · INDEX · QT) · ${barCount.toLocaleString("vi-VN")} nến lịch sử · báo giá mới nhất ${ageLabel} (chế độ ${mode}) · ${news24h} tin RSS trong 24h qua. Nạp gần nhất: ${ingest.lastBarDate ? `${barsAtLastDate.toLocaleString("vi-VN")} nến ngày ${ingest.lastBarDate}` : "chưa có nến"} · backlog ${zeroBarSymbols.length} mã 0 nến · ${noQuoteCount} mã thiếu báo giá${failedSources.length > 0 ? ` · nguồn lỗi: ${failedSources.map((f) => f.key).join(", ")}` : ""}.${fundNote ? ` Dữ liệu cơ bản: ${fundNote}.` : ""} Dữ liệu sẵn sàng cho Hội đồng Nghiên cứu.`,
+    content: `Đồng bộ hoàn tất: ${instrumentCount} mã đa sàn (HOSE · HNX · UPCOM · ETF · INDEX · QT) · ${barCount.toLocaleString("vi-VN")} nến lịch sử · báo giá mới nhất ${ageLabel} (chế độ ${mode}) · ${news24h} tin RSS trong 24h qua. Nạp gần nhất: ${ingest.lastBarDate ? `${barsAtLastDate.toLocaleString("vi-VN")} nến ngày ${ingest.lastBarDate}` : "chưa có nến"} · backlog ${zeroBarSymbols.length} mã 0 nến · ${noQuoteCount} mã thiếu báo giá${failedSources.length > 0 ? ` · nguồn lỗi: ${failedSources.map((f) => f.key).join(", ")}` : ""}.${fundNote ? ` Dữ liệu cơ bản: ${fundNote}.` : ""} Registry nạp (P1-6): 10 đường — ${registry.filter((r) => r.status?.mode === "real" || r.status?.mode === "live").length} nguồn real/live${ingest.registry.some((r) => r.status?.lastError) ? `, lưu ý: ${ingest.registry.filter((r) => r.status?.lastError).map((r) => `${r.name} (${r.status!.lastError!.slice(0, 40)}…)`).slice(0, 2).join(" · ")}` : ""}. Dữ liệu sẵn sàng cho Hội đồng Nghiên cứu.`,
     reasoning:
-      "P0-6 IngestSummary: đếm Bar theo date mới nhất + DataSourceStatus 7 nguồn (lastError) + backlog 0-bar/thiếu quote + ingest finfo (B11 pending-egress).",
+      "P0-6 IngestSummary + P1-6 registry 10 đường §0.3 (S0 chủ kho — ingest-pipeline.ts liveIngestRegistry): đếm Bar theo date mới nhất + DataSourceStatus 7 nguồn (lastError) + backlog 0-bar/thiếu-quote + ingest finfo (B11 pending-egress).",
     sentiment: null,
     output: { instrumentCount, barCount, quoteAgeSec: ageSec, news24h, mode, fundamentals: fundNote, ingest },
   };
@@ -454,11 +468,31 @@ async function runFeatureStore(): Promise<ServiceRunResult> {
  *  0 consumer) → (i) lưu AgentRun.output (0 đổi schema — review #56; bảng
  *  DataQualityReport đợi P1-7), (ii) RiskAlert khi SEVERE (ack-bắt-buộc,
  *  dedupe 24h), (iii) route tiêm khối TÍNH TRẠNG DỮ LIỆU vào prompt Wave B
- *  + Chủ tịch (8-1b: KHÔNG hard-stop). A9 không bao giờ đụng VETO (A6/A7/A8). */
+ *  + Chủ tịch (8-1b: KHÔNG hard-stop). A9 không bao giờ đụng VETO (A6/A7/A8).
+ *  P1-7 (#60): THÊM persist bảng DataQualityReport {asOf, level, checks,
+ *  summary} mỗi chu kỳ (index asOf — lịch sử dài/trend < 100ms) —
+ *  AgentRun.output vẫn ghi song song (S1/extractVerdict đọc như cũ). */
 async function runDataIntegrity(): Promise<ServiceRunResult> {
   const verdict = await runDataQualityChecks();
   const alertsRaised =
     verdict.level === "SEVERE" ? await raiseSevereAlerts(verdict).catch(() => 0) : 0;
+
+  // P1-7 — persist DataQualityReport (fail-soft: lỗi ghi báo cáo KHÔNG làm
+  // hỏng chu kỳ A9 — verdict vẫn trả về AgentRun.output)
+  let reportId: string | null = null;
+  try {
+    const report = await db.dataQualityReport.create({
+      data: {
+        asOf: new Date(verdict.asOf),
+        level: verdict.level,
+        checks: JSON.stringify(verdict.checks),
+        summary: JSON.stringify(verdict.summary),
+      },
+    });
+    reportId = report.id;
+  } catch (err) {
+    console.error("[A9 P1-7] ghi DataQualityReport lỗi (bỏ qua):", err);
+  }
 
   const levelVi =
     verdict.level === "SEVERE"
@@ -479,7 +513,7 @@ async function runDataIntegrity(): Promise<ServiceRunResult> {
     reasoning:
       "6 phép (data-quality.ts): freshness theo lịch phiên SÀN (3 trạng thái thiếu/đóng-cửa/cũ) · gap per-market quorum 50% + outage · outlier 2 lớp (cấu trúc+dải sàn — Hampel INFO) · split-nghi-vấn VN (gap vượt dải + volume ≥ 3× ADTV) · 7 nguồn DataSourceStatus · readiness FeatureContract — ngưỡng AppSetting data-quality-thresholds.",
     sentiment: verdict.level === "SEVERE" ? "bearish" : verdict.level === "DEGRADED" ? "neutral" : "bullish",
-    output: { verdict, alertsRaised },
+    output: { verdict, alertsRaised, reportId },
   };
 }
 

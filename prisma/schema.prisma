@@ -194,6 +194,8 @@ model Instrument {
   orders Order[]
   trades Trade[]
   fundamentals FinancialFundamental[]
+  corporateEvents CorporateEvent[]
+  foreignFlows ForeignFlow[]
 
   @@index([market])
   @@index([sector])
@@ -236,6 +238,13 @@ model Bar {
   close Int
   volume Int
   value BigInt? // giá trị giao dịch (VND)
+  // P1-2 PIT tối thiểu (DATA_PLATFORM_BLUEPRINT v1.3 §5): firstSeenAt = lần
+  // ĐẦU TIÊN thấy bar này (không bao giờ đổi sau tạo) · lastSyncedAt = lần
+  // CUỐI nguồn xác nhận lại cùng giá trị (upsert eod-sync/intl-sync cập nhật).
+  // → tái lập được "hồi đó dữ liệu thế nào" — rủi ro PIT duy nhất làm nghiên
+  // cứu hồi tố SAI không phát hiện giờ có dấu vết (§9.1).
+  firstSeenAt DateTime @default(now())
+  lastSyncedAt DateTime @default(now())
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -631,6 +640,10 @@ model MlModel {
   weights     String // JSON (MLP layers hoặc Q-table)
   featureNorm String? // JSON z-score mean/std (MLP)
   metrics     String // JSON: epochs/samples/trainAcc/valAcc/... hoặc episodes/epsilonEnd/avgReward/stance
+  // P1-2 PIT (blueprint §5): window-hash SHA-256 + biên ngày train — tái lập
+  // được cửa sổ dữ liệu đã dùng lúc train (meta JSON: windowHash · trainDateFrom ·
+  // trainDateTo · samples · symbols · horizonDays · featureCount).
+  meta        String? // JSON PIT — null với model train trước P1-2
   trainedAt   DateTime @default(now())
   createdAt   DateTime @default(now())
 
@@ -701,4 +714,79 @@ model RiskQuantSnapshot {
   detail           String   @default("{}") // JSON: limits, alerts, model metrics, breach flags…
 
   @@index([createdAt(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────
+// 14. SỰ KIỆN DOANH NGHIỆP + DÒNG KHỐI NGOẠI + BÁO CÁO CHẤT LƯỢNG
+//    (phiên #60 — DATA_PLATFORM_BLUEPRINT v1.3 §5 P1-1 · P1-4 · P1-7)
+// ─────────────────────────────────────────────────────────────────
+
+// P1-1 — Sự kiện doanh nghiệp chia tách/cổ thưởng/cổ tức/restate.
+// Chuỗi dchart VNDIRECT là PRE-ADJUSTED nhưng một số mã có gap vượt dải giá
+// giới hạn sàn (§0.2 G5 — artefact thật, vd APC HNX ±14–16%) — sự kiện ẩn
+// trong chuỗi giờ được GHI NHẬN kèm lớp an toàn đảo ngược (AuditLog pre-values
+// + kill-switch AppSetting "corporate-event-autoadjust" + heuristic mức CAO).
+// @@unique([instrumentId, date, kind]) chống trùng — upsert idempotent tự
+// hội tụ khi eod-sync gửi lại chuỗi chưa chỉnh (blueprint P1-1 "hội tụ").
+enum CorporateEventKind {
+  SPLIT // chia tách / sáp nhập (f > 1 — hợp nhất; Yahoo split events)
+  BONUS // cổ thưởng / chia tách làm giá giảm (f < 1 — phổ biến VN 1,2/1,3/1,5)
+  DIVIDEND // cổ tức tiền mặt (Yahoo dividends — không đổi hệ số giá)
+  RESTATE // điều chỉnh lại số liệu (dự phòng — chưa có nguồn tự động)
+}
+
+model CorporateEvent {
+  id           String             @id @default(cuid())
+  instrumentId String
+  instrument   Instrument         @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  date         DateTime // ngày giao dịch đầu tiên theo thang MỚI (ex-date)
+  kind         CorporateEventKind
+  // Hệ số nhân giá chuỗi TRƯỚC event: f = open[t]/close[t−1] (BONUS/SPLIT/
+  // RESTATE — vd cổ thưởng 1:1,25 → f = 0,8); DIVIDEND = 0 (detail.amount).
+  ratio        Float              @default(0)
+  // AUTO_ADJUSTED (pipeline đã nhân chuỗi trước event — hoặc Yahoo adjclose
+  // đã adjust sẵn) | SUSPECTED (gap vượt dải nhưng KHÔNG khớp heuristic mức
+  // CAO — chỉ cảnh báo, không sửa giá) | REVERSED (đã đảo ngược bằng script
+  // scripts/reverse-corporate-event.ts từ AuditLog pre-values).
+  status       String             @default("SUSPECTED")
+  source       String // gap-infer-dchart (VN) | yahoo-events (US/HK)
+  detail       String             @default("{}") // JSON: pre-values, corroborate, note, adjustedBy
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@unique([instrumentId, date, kind])
+  @@index([instrumentId, date(sort: Desc)])
+}
+
+// P1-4 — Dòng khối ngoại ròng persist (trước đây re-sinh deterministic không
+// lưu — G6 §0.5: B8 scorecard thiếu 1 arm dữ liệu). mode trung thực theo
+// DataSourceStatus "foreign-flows": simulated (mô phỏng deterministic) |
+// live (nguồn ngoài khi kết nối). netValue VND BigInt (clamp 2–80 tỷ).
+model ForeignFlow {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id], onDelete: Cascade)
+  date         DateTime // ngày giao dịch (convention 15:00 UTC như Bar)
+  netValue     BigInt // VND — dương = mua ròng, âm = bán ròng
+  mode         String // simulated | live
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([instrumentId, date])
+  @@index([date(sort: Desc)])
+}
+
+// P1-7 — Báo cáo chất lượng dữ liệu chuẩn theo mốc asOf (thay AgentRun.output
+// JSON của P0 KHI CẦN truy vấn lịch sử dài / trend). A9 mỗi chu kỳ INSERT 1
+// dòng (AgentRun.output vẫn ghi song song — S1/extractVerdict đọc như cũ);
+// index asOf DESC → truy vấn lịch sử < 100ms (test 8 mở rộng blueprint).
+model DataQualityReport {
+  id        String   @id @default(cuid())
+  asOf      DateTime // mốc kiểm định (verdict.asOf)
+  level     String // PASS | DEGRADED | SEVERE
+  checks    String // JSON DqCheck[] — 6 phép + dbFail
+  summary   String? // JSON DqSummary
+  createdAt DateTime @default(now())
+
+  @@index([asOf(sort: Desc)])
 }
