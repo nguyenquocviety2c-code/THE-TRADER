@@ -1506,3 +1506,26 @@ Stage Summary:
 - Kiến trúc đợt A 3 nhịp chạy thật (S0∥S2 → A9 → S1-đọc-verdict); chu kỳ 63,5s trong ngân sách 180s.
 - Infra fix kèm theo: allowedDevOrigins (chặn hydration toàn app trong sandbox) + engine APP_URL 127.0.0.1.
 - Bước tiếp theo (đề xuất): P1 theo blueprint §5 (P1-1 CorporateEvent auto-adjust xử lý đúng APC-class artefact mà A9 vừa phơi · P1-2 PIT · P1-3 cross-check · P1-4 ForeignFlow persist · P1-6 pipeline một cửa · P1-7 DataQualityReport) → sau đó nhóm ② Ban điều hành → ③ Phòng học máy.
+
+---
+Task ID: 58
+Agent: main-orchestrator (Z.ai Code)
+Task: Khôi phục Preview Panel trống (dev server chết) + chuyển sang PM2 duy trì 2 process + xác định phiên bản sandbox có phải mới nhất
+
+Work Log:
+- Chẩn đoán: Preview Panel trống vì KHÔNG có process next/bun nào sống (port 3000/3003 đều không lắng nghe); dev.log cũ chỉ là sót lại từ session trước — user báo đúng triệu chứng
+- Phiên bản: git fetch origin (GitHub THE-TRADER.git) → HEAD = origin/main = 0832dd8 "Session #57 triển khai P0-1→7" (0 behind/0 ahead) → sandbox CÓ phiên bản mới nhất; sau infra commit này đẩy lên c3e1ea4
+- Cài PM2 7.0.4 toàn cục qua `bun add -g pm2`; kiểm chứng PM2 daemon (God Daemon, pm2_home=/home/z/.pm2) SỐNG SÓT qua nhiều lệnh bash kết thúc — điều kiện tiên quyết để PM2 "duy trì" được trong sandbox (khác bài học #57 rằng process con thường bị harness giết; PM2 daemonize đúng cách thoát được)
+- Phát hiện bẫy env: shell nhiễm DATABASE_URL=file:...custom.db (sqlite cũ 1MB ngày 06-10) trong khi .env thật trỏ Supabase postgres (schema=trader, provider postgres) — nếu PM2 truyền env shell xuống, Next.js ưu tiên process.env > .env → app trỏ SAI database
+- Tạo ecosystem.config.js: parse .env bằng fs lúc nạp và truyền env chuẩn xuống app (chống nhiễm, không hardcode secret); 2 app — the-trader (bun run dev → next dev 3000, log → dev.log) + market-engine (bun --hot index.ts 3003, log → dev-engine.log, APP_URL 127.0.0.1:3000); autorestart + min_uptime 15s + restart_delay 3s; pm2 save → dump.pm2
+- Khởi động: cả 2 online ngay; the-trader Ready 393ms; engine boot đúng lịch (tick 10s · news 15' · eod 15:45 · intl 06:15 · reprobe SUN:04:00 · agent-cycle TẮT); lỗi "Unable to connect" đầu tiên của engine chỉ là cuộc đua boot (app cần 393ms) — tự phục hồi, POST /api/market/tick 200 chứng minh
+- Nghiệm thu dữ liệu: GET /api/agents trả agent thật với cuid Postgres (cmuwojdpb...) → app kết nối ĐÚNG Supabase, không rơi vào sqlite cũ; VN30 992,16 · thanh khoản 6.764 tỷ ₫ · 12 tín hiệu · assessment "GIẢM 79,4%" từ chu kỳ 23 agents 17:26 08-10
+- Nghiệm thu agent-browser: title + toàn bộ layout render (header/main/footer semantic); click "Mở workspace Tổng hợp" hoạt động (workspace nav); 0 console error · 0 page error; mobile 390px scrollW=innerW=390 (không tràn) · footer đáy nội dung 2372px (push tự nhiên); 2 screenshot docs/pm2-verify-{desktop,mobile}.png
+- .gitignore: /dev.log → /dev.log* + /dev-engine.log* (log xoay không lọt git); commit c3e1ea4 + push origin/main thành công
+
+Stage Summary:
+- NGUYÊN NHÂN Preview Panel trống: dev server chết hoàn toàn (không process, không port) — không phải lỗi app
+- GIẢI PHÁP duy trì: PM2 quản 2 process (the-trader:3000 + market-engine:3003), daemon sống sót qua bash session, `pm2 save` sẵn dump; lệnh vận hành: `pm2 list` · `pm2 logs the-trader` · `pm2 restart all` · nếu daemon bị giết máy restart → `pm2 resurrect` khôi phục nguyên trạng
+- BẪY ENV đã hoá giải: ecosystem tự đọc .env truyền xuống — DATABASE_URL shell nhiễm sqlite cũ không thể rò vào app nữa (bài học #57 Fixbug §4 nay được khoá vĩnh viễn ở tầng hạ tầng)
+- PHIÊN BẢN: sandbox đang ở commit mới nhất 0832dd8 (Session #57 — P0-1→7 DATA_PLATFORM v1.2), khớp 100% GitHub origin/main (0/0); commit infra #58 c3e1ea4 vừa đẩy lên tiếp tục là đầu dòng mới
+- App xác minh end-to-end: render + điều hướng + dữ liệu Supabase thật + 0 lỗi console — Preview Panel sẽ hiển thị đầy đủ khi user mở lại
