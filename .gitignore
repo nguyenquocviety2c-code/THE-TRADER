@@ -28,7 +28,8 @@
 /skills
 /download
 /upload
-/dev.log
+/dev.log*
+/dev-engine.log*
 /examples
 /tool-results
 /agent-ctx
