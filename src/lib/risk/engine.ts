@@ -29,6 +29,7 @@
 import { db } from "@/lib/db";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
 import { loadTopSeries } from "@/lib/ml/features";
+import { returnsDated } from "@/lib/dated-series";
 import { buildBasket } from "@/lib/ml/rl";
 import type { BayesEvidence } from "@/lib/bayes/types";
 import {
@@ -465,21 +466,20 @@ export async function runRiskQuantEngine(): Promise<RiskQuantResult> {
           .catch(() => [])
       : [];
   // Return theo NGÀY từng mã (fixbug #52-F2 — căn mép theo NGÀY thay vì
-  // index trailing: mã đình quyền/thiếu bar không làm lệch chuỗi hợp nhất;
-  // return = close/prevClose − 1 của CHÍNH mã đó, date ISO từ bar EOD)
+  // index trailing: mã đình quyền/thiếu bar không làm lệch chuỗi hợp nhất).
+  // P0-1 (phiên #57): chuyển sang hợp đồng `returnsDated` của dated-series.ts
+  // — một định nghĩa duy nhất toàn hệ thống (ret = close/prevClose − 1 của
+  // CHÍNH mã đó, date ISO từ bar EOD; toán tử giống hệt bản inline cũ).
   const retsById = new Map<string, DatedReturn[]>();
   {
-    const prevCloseById = new Map<string, number>();
+    const rowsById = new Map<string, { date: Date; close: number }[]>();
     for (const b of barRows) {
       if (!(b.close > 0)) continue;
-      const prev = prevCloseById.get(b.instrumentId);
-      if (prev != null && prev > 0) {
-        const list = retsById.get(b.instrumentId) ?? [];
-        list.push({ date: b.date.toISOString().slice(0, 10), ret: b.close / prev - 1 });
-        retsById.set(b.instrumentId, list);
-      }
-      prevCloseById.set(b.instrumentId, b.close);
+      const list = rowsById.get(b.instrumentId) ?? [];
+      list.push({ date: b.date, close: b.close });
+      rowsById.set(b.instrumentId, list);
     }
+    for (const [id, rows] of rowsById) retsById.set(id, returnsDated(rows));
   }
 
   // Mã đủ lịch sử: ≥ 59 return (≈ 60 close như chuẩn cũ MIN_REAL_SESSIONS)

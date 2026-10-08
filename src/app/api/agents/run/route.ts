@@ -15,7 +15,16 @@ import {
   buildLiquidityBlock,
 } from "@/lib/agent-context";
 import { AGENT_ROSTER } from "@/lib/agent-roster";
-import { runServiceAgent, type ServiceRunResult } from "@/lib/agent-service-runs";
+import {
+  runServiceAgent,
+  type ServiceRunContext,
+  type ServiceRunResult,
+} from "@/lib/agent-service-runs";
+import {
+  dataQualityPromptBlock,
+  extractVerdict,
+  type DataQualityVerdict,
+} from "@/lib/data-quality";
 import { buildEvidenceBundle, type LlmVoteInput } from "@/lib/bayes/evidence";
 import { synthesizeMarketAssessment } from "@/lib/bayes/synthesis";
 import { saveMarketAssessment, attachCycleRunId, attachRiskQuantKelly } from "@/lib/bayes/persist";
@@ -37,8 +46,11 @@ export const maxDuration = 300;
 /**
  * POST /api/agents/run — chu kỳ phân tích đầy đủ 23 AGENTS, 6 ĐỢT (phiên #34):
  *
- *  ĐỢT A · Nền tảng dữ liệu (4 service, song song — 0 LLM):
- *    data-collector · notification-officer · feature-store · data-integrity
+ *  ĐỢT A · Nền tảng dữ liệu (4 service — 0 LLM, 3 nhịp con §3.3 — #57):
+ *    nhịp 1: S0 data-collector ∥ S2 feature-store → nhịp 2: A9 data-integrity
+ *    (6 phép kiểm → DataQualityVerdict; SEVERE → RiskAlert ack) → nhịp 3: S1
+ *    notification-officer (digest có dòng chất lượng dữ liệu — P0-7). Verdict
+ *    ≠ PASS → khối TÍNH TRẠNG DỮ LIỆU vào prompt nghiên cứu + Chủ tịch (P0-4).
  *  ĐỢT B · Hội đồng Nghiên cứu + Phòng Học máy:
  *    service song song (8): ml-forecast · backtest · learning-rag · rl-gym ·
  *    rl-policy · dl-trainer · rl-trainer · model-registry
@@ -66,6 +78,7 @@ const CYCLE_COOLDOWN_MS = 60_000;
 let lastCycleStartedAt = 0;
 
 // ── Sơ đồ đợt (tất cả code đều nằm trong AGENT_ROSTER 23 agents) ──
+// Đợt A chia 3 nhịp con (§3.3 — #57): WAVE_A_BEAT1 ∥ → A9 → S1 (đọc verdict)
 const WAVE_A_CODES = ["data-collector", "notification-officer", "feature-store", "data-integrity"] as const;
 const WAVE_B_SERVICE_CODES = [
   "ml-forecast", "backtest", "learning-rag", "rl-gym",
@@ -399,10 +412,11 @@ export async function POST() {
   const failures: string[] = [];
 
   /** Chạy + persist MỘT service agent (deterministic) — trả về result để đọc verdict VETO.
-   *  ctx (phiên #51 — CRB): truyền kết quả RiskQuantEngine (exposure A7 đọc hạn mức động). */
+   *  ctx (phiên #51 — CRB): truyền kết quả RiskQuantEngine (exposure A7 đọc
+   *  hạn mức động). ctx (P0-7 — #57): truyền verdict A9 cho S1 (đợt A nhịp 3). */
   async function runOneServiceAgent(
     code: string,
-    ctx?: { riskQuant?: RiskQuantResult | null }
+    ctx?: ServiceRunContext
   ): Promise<ServiceRunResult | null> {
     const agent = byCode.get(code)!;
     const startedAt = Date.now();
@@ -461,30 +475,45 @@ export async function POST() {
       ]);
     const marketBlock = market.block;
 
-    // ── 2. Role prompts cho các agent LLM ──────────────────────────
+    // ══ ĐỢT A · Nền tảng dữ liệu — 3 NHỊP CON (§3.3 blueprint v1.1 — #57) ══
+    // Tránh phụ thuộc vòng trong cùng đợt song song: nhịp 1: S0 ∥ S2 →
+    // nhịp 2: A9 (readiness do chính A9 tính qua FeatureContract — cùng thư
+    // viện với S2 nên cùng số, KHÔNG phụ thuộc output S2 cùng chu kỳ) →
+    // nhịp 3: S1 (đọc verdict A9 VỪA LƯU cùng chu kỳ — P0-7). Verdict A9 +
+    // readiness S2 được lưu TRƯỚC khi Wave B bắt đầu.
+    await Promise.all(
+      (["data-collector", "feature-store"] as const).map((code) => runOneServiceAgent(code))
+    );
+    const dqRun = await runOneServiceAgent("data-integrity");
+    const dqVerdict: DataQualityVerdict | null = dqRun ? extractVerdict(dqRun.output) : null;
+    await runOneServiceAgent("notification-officer", { dataQuality: dqVerdict });
+
+    // ── 2. Role prompts cho các agent LLM (dựng SAU đợt A — để tiêm cờ A9) ─
+    // P0-4 §3.3 + chốt 8-1b: verdict ≠ PASS → khối "TÍNH TRẠNG DỮ LIỆU" vào
+    // prompt 4 agent nghiên cứu LLM + Chủ tịch (ml-forecast là service — 5
+    // agent nghiên cứu đủ phủ). PASS → không tiêm (tiết kiệm token).
+    const dqPromptBlock =
+      dqVerdict && dqVerdict.level !== "PASS" ? dataQualityPromptBlock(dqVerdict) : null;
     const prompts: Record<string, { system: string; user: string }> = {
       "market-analyst": {
         system: ROLE_PROMPTS["market-analyst"].system,
-        user: [marketBlock, flowsBlock].join("\n\n"),
+        user: [marketBlock, flowsBlock, ...(dqPromptBlock ? [dqPromptBlock] : [])].join("\n\n"),
       },
       "fair-value": {
         system: ROLE_PROMPTS["fair-value"].system,
-        user: [marketBlock, valuationBlock].join("\n\n"),
+        user: [marketBlock, valuationBlock, ...(dqPromptBlock ? [dqPromptBlock] : [])].join("\n\n"),
       },
       "news-sentiment": {
         system: ROLE_PROMPTS["news-sentiment"].system,
-        user: [marketBlock, newsBlock, flowsBlock].join("\n\n"),
+        user: [marketBlock, newsBlock, flowsBlock, ...(dqPromptBlock ? [dqPromptBlock] : [])].join("\n\n"),
       },
       liquidity: {
         system: ROLE_PROMPTS["liquidity"].system,
-        user: [marketBlock, liquidityBlock].join("\n\n"),
+        user: [marketBlock, liquidityBlock, ...(dqPromptBlock ? [dqPromptBlock] : [])].join("\n\n"),
       },
       // risk-manager KHÔNG build ở đây — prompt cần khối QUANT của
       // RiskQuantEngine (chạy sau đợt B, trước đợt C — phiên #51 CRB §2)
     };
-
-    // ══ ĐỢT A · Nền tảng dữ liệu (4 service, song song) ════════════
-    await Promise.all(WAVE_A_CODES.map((code) => runOneServiceAgent(code)));
 
     // ══ ĐỢT B · Nghiên cứu + Học máy ═══════════════════════════════
     // Service agents (8) song song trước — nhanh, 0 LLM. Giữ kết quả để
@@ -806,6 +835,9 @@ export async function POST() {
     const strategistUserPrompt = [
       [marketBlock, newsBlock, flowsBlock, valuationBlock, liquidityBlock].join("\n\n"),
       `TÍN HIỆU ĐANG MỞ:\n${openSignalsBlock}`,
+      // P0-4 §3.3 — cờ chất lượng dữ liệu A9 cho Chủ tịch (8-1b: DEGRADED →
+      // cờ prompt; SEVERE → cờ + RiskAlert ack-bắt-buộc; KHÔNG hard-stop)
+      ...(dqPromptBlock ? ["", dqPromptBlock] : []),
       // Phiên #34 — khối Bayes: con số định lượng, Chủ tịch PHẢI nhất quán
       ...(bayesView ? ["", buildBayesPromptBlock(bayesView)] : []),
       // Phiên #51 — CRB v1.1 §6: khối QUANT + gợi ý Kelly ¼ (chỉ tham mưu)

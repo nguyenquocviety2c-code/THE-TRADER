@@ -18,8 +18,16 @@
  *   avgCorr  = trung bình corr các cặp i<j
  *   N_eff_bets = N / (1 + (N−1)·avgCorr)
  *
+ * P0-1 (phiên #57 — DATA_PLATFORM_BLUEPRINT §3.2): DatedReturn và phép ghép
+ * phiên chung `commonReturns` chuyển về hợp đồng `dated-series.ts` — tầng
+ * risk chỉ còn TRỌNG SỐ riêng (HHI/pearson/N_eff), phần căn ngày dùng chung.
+ *
  * Thuần TypeScript, Float64Array — 0 dependency.
  */
+
+import { commonReturns, type DatedReturn } from "@/lib/dated-series";
+
+export type { DatedReturn };
 
 /** Ngưỡng HHI ngành / vị thế (chốt thiết kế §4). */
 export const HHI_SECTOR_THRESHOLD = 0.25;
@@ -105,11 +113,8 @@ export interface CorrelationResult {
   note: string;
 }
 
-/** Một điểm return gắn ngày ISO ("2026-10-07") — căn mép theo NGÀY. */
-export interface DatedReturn {
-  date: string;
-  ret: number;
-}
+/* (P0-1) DatedReturn + commonSessions (ghép phiên chung theo NGÀY — fixbug
+ * #52-F1) chuyển về hợp đồng `dated-series.ts`/`commonReturns` từ phiên #57. */
 
 /**
  * Pearson tương quan 2 chuỗi CÙNG ĐỘ DÀI (đã căn theo phiên chung).
@@ -139,41 +144,10 @@ export function pearson(a: Float64Array, b: Float64Array): number {
   return denom > 1e-12 ? Math.max(-1, Math.min(1, cov / denom)) : 0;
 }
 
-/**
- * Ghép ≤ maxN phiên CHUNG theo NGÀY của 2 chuỗi (đều tăng dần theo ngày)
- * — hai con trỏ từ CUỐI, bỏ phiên lệch (mã đình quyền/thiếu bar), giữ thứ
- * tự thời gian tăng dần ở output (Pearson bất biến với thứ tự nên giữ cho
- * rõ nghĩa). Fixbug #52-F1: ghép theo index đầu sẽ ghép return các NGÀY
- * KHÁC nhau khi 2 chuỗi dài khác nhau → tương quan sai định nghĩa.
+/*
+ * (P0-1) commonSessions xoá — thay bằng `commonReturns` của hợp đồng
+ * dated-series.ts (cùng thuật toán two-pointer từ cuối, cùng fixbug #52-F1).
  */
-function commonSessions(
-  a: DatedReturn[],
-  b: DatedReturn[],
-  maxN: number
-): { ra: Float64Array; rb: Float64Array } {
-  let i = a.length - 1;
-  let j = b.length - 1;
-  const pa: number[] = [];
-  const pb: number[] = [];
-  while (i >= 0 && j >= 0 && pa.length < maxN) {
-    const da = a[i].date;
-    const db = b[j].date;
-    if (da === db) {
-      pa.push(a[i].ret);
-      pb.push(b[j].ret);
-      i--;
-      j--;
-    } else if (da > db) {
-      i--;
-    } else {
-      j--;
-    }
-  }
-  return {
-    ra: Float64Array.from(pa.reverse()),
-    rb: Float64Array.from(pb.reverse()),
-  };
-}
 
 /**
  * CRB-5 — ma trận tương quan top-15 vị thế theo MV, cửa sổ ≤ 60 PHIÊN CHUNG
@@ -193,12 +167,12 @@ export function computeCorrelation(
   let pairsDropped = 0;
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      const { ra, rb } = commonSessions(returnsByPosition[i], returnsByPosition[j], CORR_WINDOW);
+      const { ra, rb } = commonReturns(returnsByPosition[i], returnsByPosition[j], CORR_WINDOW);
       if (ra.length < CORR_MIN_OVERLAP) {
         pairsDropped++;
         continue;
       }
-      sumCorr += pearson(ra, rb);
+      sumCorr += pearson(Float64Array.from(ra), Float64Array.from(rb));
       pairCount++;
     }
   }

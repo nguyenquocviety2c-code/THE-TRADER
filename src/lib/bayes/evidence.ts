@@ -26,12 +26,12 @@ import { db } from "@/lib/db";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
 import { getForeignFlows } from "@/lib/flows";
 import { getConsensusSetting } from "@/lib/consensus";
-import { latestVsMean, macd, pctChange, rsi } from "@/lib/indicators";
+import { pctChange, rsi } from "@/lib/indicators";
 import { classifyRegime } from "@/lib/quant/regime";
 import { holtForecastPct } from "@/lib/quant/forecast";
 import { aggregateSentiment } from "@/lib/quant/sentiment";
 import { historicalBaseRates, zscore } from "@/lib/quant/statistics";
-import { loadSegmentBaskets, loadTopSeries, type SegmentBasket } from "@/lib/ml/features";
+import { loadSegmentBaskets, loadTopSeries, latestFeatureSnapshot, type SegmentBasket } from "@/lib/ml/features";
 import { mlForecastEnsemble } from "@/lib/ml/ensemble";
 import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
 import type {
@@ -320,12 +320,16 @@ export async function buildEvidenceBundle(
     const last = s.last || (closes.length ? closes[closes.length - 1] : 0);
     if (!last || closes.length < 30) continue;
 
-    const rsi14 = rsi(closes, 14);
+    // P0-3 (phiên #57 — FEATURECONTRACT): SMA/RSI/MACD/MOM5/KL-TL20 tính qua
+    // `latestFeatureSnapshot` (ml/features.ts — nơi tính duy nhất) — RSI14 đây
+    // == RSI14 S2 broadcast == RSI14 bảng chỉ báo prompt (nghiệm thu P0-3);
+    // nhãn evidence feature-store.* giờ XỨNG ĐÁNH (trước đây evidence tự tính).
+    const snap = latestFeatureSnapshot(closes, volumes);
+    const rsi14 = snap?.rsi14 ?? null;
     const z90 = closes.length >= 30 ? zscore(last, closes.slice(-90)) : null;
-    const macdHist = macd(closes)?.histogram ?? null;
-    const volRatio = latestVsMean(volumes, 20);
-    const momentum5d =
-      closes.length >= 6 ? pctChange(closes[closes.length - 6], last) : null;
+    const macdHist = snap?.macdHist ?? null;
+    const volRatio = snap?.volRatio20 ?? null;
+    const momentum5d = snap?.mom5Pct ?? null;
     const forecast = holtForecastPct(closes, { horizon: 5 });
 
     // 5a. RSI14 — quá bán/quá mua

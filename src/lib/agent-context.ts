@@ -1,5 +1,7 @@
 import { db } from "@/lib/db";
-import { atr, bollinger, macd, pctChange, rsi, sma, latestVsMean, stochastic } from "@/lib/indicators";
+import { atr, bollinger, stochastic } from "@/lib/indicators";
+import { topByAdtv } from "@/lib/dated-series";
+import { latestFeatureSnapshot } from "@/lib/ml/features";
 import { latestNewsForContext } from "@/lib/news";
 import { getForeignFlows, flowsPromptBlock } from "@/lib/flows";
 import { loadLatestAssessment } from "@/lib/bayes/persist";
@@ -83,9 +85,17 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
     .filter((r): r is NonNullable<typeof r> => r !== null);
 
   // Bảng chính: HOSE-STOCK (continuity #34 — prompt không phình §3.8)
-  const quoteRows = allQuoted
-    .filter((r) => r.market === "HOSE" && r.type === "STOCK")
-    .sort((a, b) => b.volume - a.volume);
+  const quoteRows = allQuoted.filter((r) => r.market === "HOSE" && r.type === "STOCK");
+
+  // P0-2 (phiên #57 — DATA_PLATFORM_BLUEPRINT): top-10 chọn qua rổ DUY NHẤT
+  // `topByAdtv` (ADTV 45 phiên EOD từ Bar.value) — thay xếp theo quote volume
+  // từng tick (lớp bug F6 còn sót 3 chỗ — §0.5 G2). Mã top-ADTV nhưng chưa có
+  // quote → bỏ khỏi bảng (cần giá hiển thị), ghi thiếu ở khối đa thị trường.
+  const adtvTop = await topByAdtv(10, { market: "HOSE", type: "STOCK" }).catch(() => []);
+  const quotedById = new Map(quoteRows.map((r) => [r.id, r]));
+  const top10 = adtvTop
+    .map((t) => quotedById.get(t.id))
+    .filter((r): r is NonNullable<typeof r> => r != null);
 
   // 1 dòng ĐA THỊ TRƯỜNG gọn (B5 — agent nghiên cứu thấy các sàn khác)
   const hnxCount = allQuoted.filter((r) => r.market === "HNX" && r.type === "STOCK").length;
@@ -107,10 +117,10 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
   const losers = [...quoteRows].sort((a, b) => a.changePct - b.changePct).slice(0, 5);
 
   // ── Chỉ báo kỹ thuật top-10 thanh khoản (90 phiên) ──────────────────
-  // B6 — thêm MACD hist (×1000) · %B Bollinger · ATR14% · Stoch %K (cột có sẵn
-  // code trong indicators.ts — RESEARCH_COUNCIL_PLAN §7.1; MACD/BOLL đã được
-  // nhắc tên trong prompt từ #34)
-  const top10 = quoteRows.slice(0, 10);
+  // B6 — MACD hist (×1000) · %B Bollinger · ATR14% · Stoch %K.
+  // P0-3 (phiên #57): SMA/RSI/MACD/MOM5/KL-TL20 tính qua FEATURECONTRACT
+  // `latestFeatureSnapshot` (ml/features.ts — nơi tính duy nhất); BOLL/ATR/
+  // Stoch vẫn từ indicators.ts (vỏ API "giá trị cuối" cho chỉ báo ngoài hợp đồng).
   const barRows = await db.bar.findMany({
     where: { instrumentId: { in: top10.map((t) => t.id) } },
     orderBy: { date: "asc" },
@@ -132,14 +142,16 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
     const bars = barsByInstrument.get(t.id);
     const closes = bars?.closes ?? [];
     const last = lastById.get(t.id) ?? (closes.length ? closes[closes.length - 1] : 0);
-    const sma20 = sma(closes, 20);
-    const sma50 = sma(closes, 50);
-    const rsi14 = rsi(closes, 14);
-    const chg5d = closes.length >= 6 ? pctChange(closes[closes.length - 6], last) : null;
-    const volRatio = bars ? latestVsMean(bars.volumes, 20) : null;
+    // FEATURECONTRACT — cùng số với S2/evidence/MLP trên cùng chuỗi
+    const snap = bars ? latestFeatureSnapshot(closes, bars.volumes) : null;
+    const sma20 = snap?.sma20 ?? null;
+    const sma50 = snap?.sma50 ?? null;
+    const rsi14 = snap?.rsi14 ?? null;
+    const chg5d = snap?.mom5Pct ?? null;
+    const volRatio = snap?.volRatio20 ?? null;
     // B6 — 4 chỉ báo mở rộng (đơn vị: MACD hist tính theo nghìn ₫ = hist VND/1000;
     // %B 0..100; ATR14 % của giá; Stoch %K 0..100)
-    const macdHist = macd(closes)?.histogram ?? null;
+    const macdHist = snap?.macdHist ?? null;
     const percentB = bollinger(closes)?.percentB ?? null;
     const atr14 = bars ? atr(bars.bars, 14) : null;
     const atrPct = atr14 != null && last > 0 ? (atr14 / last) * 100 : null;
@@ -156,7 +168,7 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
       `ATR14% ${atrPct != null ? atrPct.toFixed(2).replace(".", ",") : "—"}`,
       `Stoch%K ${stochK != null ? stochK.toFixed(0) : "—"}`,
       `5 phiên ${chg5d != null ? (chg5d >= 0 ? "+" : "") + chg5d.toFixed(2) + "%" : "—"}`,
-      `KL/TL20 ${volRatio ?? "—"}`,
+      `KL/TL20 ${volRatio != null ? volRatio.toFixed(2) : "—"}`,
     ].join(" · ");
   });
 
@@ -303,20 +315,13 @@ export async function buildValuationBlock(): Promise<string> {
       return q ? { id: i.id, symbol: i.symbol, sector: i.sector, last: q.last } : null;
     })
     .filter((r): r is NonNullable<typeof r> => r !== null);
-  // Top-10 thanh khoản: dùng volume từ quote — cần chọn trước khi gộp bars
-  const volumeRows = await db.quote.findMany({
-    where: { instrumentId: { in: quoteRows.map((r) => r.id) } },
-    orderBy: { tradedAt: "desc" },
-    take: 60, // ~2 quote/mã mới nhất
-    select: { instrumentId: true, volume: true },
-  });
-  const volBy = new Map<string, number>();
-  for (const v of volumeRows) {
-    if (!volBy.has(v.instrumentId)) volBy.set(v.instrumentId, v.volume);
-  }
-  const top10 = [...quoteRows]
-    .sort((a, b) => (volBy.get(b.id) ?? 0) - (volBy.get(a.id) ?? 0))
-    .slice(0, 10);
+  // P0-2 (phiên #57): top-10 qua rổ DUY NHẤT topByAdtv (ADTV 45 phiên
+  // Bar.value) — thay xếp theo quote volume (lớp bug F6 còn sót)
+  const adtvTop = await topByAdtv(10, { market: "HOSE", type: "STOCK" }).catch(() => []);
+  const quotedById = new Map(quoteRows.map((r) => [r.id, r]));
+  const top10 = adtvTop
+    .map((t) => quotedById.get(t.id))
+    .filter((r): r is NonNullable<typeof r> => r != null);
 
   const bars = await db.bar.findMany({
     where: { instrumentId: { in: top10.map((t) => t.id) } },
@@ -403,7 +408,7 @@ export async function buildValuationBlock(): Promise<string> {
  * KL/TL20, giá trị giao dịch, chênh lệch bid-ask, dòng khối ngoại.
  */
 export async function buildLiquidityBlock(): Promise<string> {
-  const [instruments, flows] = await Promise.all([
+  const [instruments, flows, adtvTop] = await Promise.all([
     db.instrument.findMany({
       where: { isActive: true },
       select: {
@@ -425,16 +430,25 @@ export async function buildLiquidityBlock(): Promise<string> {
       },
     }),
     getForeignFlows().catch(() => null),
+    // P0-2 (phiên #57): rổ DUY NHẤT topByAdtv — ADTV 45 phiên từ Bar.value
+    topByAdtv(10, { market: "HOSE", type: "STOCK" }).catch(() => [] as Awaited<ReturnType<typeof topByAdtv>>),
   ]);
 
-  const quoteRows = instruments
-    .map((i) => {
-      const q = i.quotes[0];
-      return q ? { id: i.id, symbol: i.symbol, sector: i.sector, ...q } : null;
+  const quotedById = new Map(
+    instruments
+      .map((i) => {
+        const q = i.quotes[0];
+        return q ? { id: i.id, symbol: i.symbol, sector: i.sector, ...q } : null;
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .map((r) => [r.id, r])
+  );
+  const quoteRows = adtvTop
+    .map((t) => {
+      const q = quotedById.get(t.id);
+      return q ? { ...q, adtv: t.adtv } : null;
     })
-    .filter((r): r is NonNullable<typeof r> => r !== null)
-    .sort((a, b) => b.volume - a.volume)
-    .slice(0, 10);
+    .filter((r): r is NonNullable<typeof r> => r !== null);
 
   const bars = await db.bar.findMany({
     where: { instrumentId: { in: quoteRows.map((t) => t.id) } },
@@ -447,23 +461,29 @@ export async function buildLiquidityBlock(): Promise<string> {
     arr.push(b.volume);
     volsBy.set(b.instrumentId, arr);
   }
+  const closesBy = new Map<string, number[]>();
+  for (const b of bars) {
+    const arr = closesBy.get(b.instrumentId) ?? [];
+    arr.push(b.close);
+    closesBy.set(b.instrumentId, arr);
+  }
 
   const lines = quoteRows.map((t) => {
-    const vols = volsBy.get(t.id) ?? [];
-    const avg20 = vols.length >= 20 ? meanOf(vols.slice(-20)) : null;
-    const ratio = avg20 && avg20 > 0 ? t.volume / avg20 : null;
+    // P0-3: KL/TL20 qua FEATURECONTRACT (cùng số với S2/evidence)
+    const snap = latestFeatureSnapshot(closesBy.get(t.id) ?? [], volsBy.get(t.id) ?? []);
+    const ratio = snap?.volRatio20 ?? null;
     const spreadPct =
       t.bidPrice && t.askPrice && t.askPrice > 0
         ? ((t.askPrice - t.bidPrice) / t.askPrice) * 100
         : null;
-    const adtv = avg20 ? Math.round(avg20 * t.last) : null; // giá trị TB 20 phiên (₫)
+    const adtv = Math.round(t.adtv); // ADTV 45 phiên (VND — Bar.value)
     return [
       `- ${t.symbol} (${t.sector ?? "—"}):`,
       `KL phiên ${t.volume.toLocaleString("vi-VN")} cp`,
       ratio != null ? `KL/TL20 ${ratio.toFixed(2)}×` : "KL/TL20 —",
       `bid/ask ${t.bidPrice?.toLocaleString("vi-VN") ?? "—"}/${t.askPrice?.toLocaleString("vi-VN") ?? "—"}`,
       spreadPct != null ? `chênh ${spreadPct.toFixed(2)}%` : "chênh —",
-      adtv != null ? `ADTV ~${(adtv / 1_000_000_000).toFixed(1)} tỷ ₫` : "ADTV —",
+      adtv > 0 ? `ADTV ~${(adtv / 1_000_000_000).toFixed(1)} tỷ ₫` : "ADTV —",
     ].join(" · ");
   });
 
@@ -472,7 +492,7 @@ export async function buildLiquidityBlock(): Promise<string> {
     : "Dòng khối ngoại: (nguồn không khả dụng — bỏ metric)";
 
   return [
-    "THANH KHOẢN GIAO DỊCH — TOP 10 KHỐI LƯỢNG (ADTV = giá trị giao dịch TB 20 phiên):",
+    "THANH KHOẢN GIAO DỊCH — TOP 10 THEO ADTV 45 PHIẾN (ADTV = giá trị giao dịch TB từ Bar.value — rổ duy nhất P0-2):",
     ...lines,
     flowLine,
   ].join("\n");

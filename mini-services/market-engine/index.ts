@@ -16,7 +16,8 @@
  *      - EOD_SYNC_AT (mặc định 15:45 ICT, hằng ngày, sau giờ chốt phiên):
  *        POST /api/market/eod-sync — kéo bar EOD thật từ dchart VNDIRECT,
  *        neo Quote về mức đóng cửa thật (chỉ chạy MỘT lần/ngày; chạy thêm một
- *        lần lúc boot để môi trường mới tự có dữ liệu thật sớm).
+ *        lần lúc boot khi hôm nay CHƯA sync — P0-5: state đã-sync đọc từ DB,
+ *        restart không refetch EOD đã xong hôm đó).
  *      - INTL_SYNC_AT (mặc định 06:15 ICT hằng ngày — B12, sau đóng cửa Mỹ):
  *        POST /api/market/intl-sync (range auto: lần đầu 1y, sau đó 5d).
  *        F-441-01 (#44): backoff nhân đôi 30p→4h sau mỗi lần sync LỖI thật.
@@ -30,6 +31,10 @@
  *        POST /api/market/reprobe — probe dchart ứng viên các ô ⚪/🟡; mã
  *        đầu tiên CÓ dữ liệu → tự tạo Instrument + backfill → ô tự sáng.
  *      - AGENT_CYCLE_MINUTES (0=off): chu kỳ phân tích đa agent tự động
+ *   3. P0-5 (phiên #57 — DATA_PLATFORM_BLUEPRINT §4.2): schedule STATE vào
+ *      DB qua /api/market/engine-state (DataSourceStatus.meta key
+ *      "engine-state") — boot đọc lại (đã-sync-ngày + backoff intl không còn
+ *      bị quên sau restart — G7), ghi sau mỗi sự kiện eod/intl/reprobe.
  *
  * Frontend kết nối QUA GATEWAY với query XTransformPort=3003:
  *   io("/", { query: { XTransformPort: "3003" } })
@@ -40,7 +45,9 @@ import { createServer } from "node:http";
 import { Server } from "socket.io";
 
 const PORT = 3003;
-const APP_URL = process.env.APP_URL ?? "http://localhost:3000";
+// Phiên #57 — sandbox: "localhost" phân giải ::1 (refused) — app lắng nghe
+// 127.0.0.1; engine kết nối thẳng qua IPv4 loopback
+const APP_URL = process.env.APP_URL ?? "http://127.0.0.1:3000";
 
 /** Validate env số — chống setInterval(NaN) dồn cục API (AUD-CODE #20). */
 function envMs(name: string, fallback: number, minMs: number): number {
@@ -167,6 +174,80 @@ function log(scope: string, msg: string) {
   console.log(`[${new Date().toISOString()}] [${scope}] ${msg}`);
 }
 
+/* ═══ P0-5 (phiên #57): schedule STATE → DB qua /api/market/engine-state ═══ */
+
+/** State engine cần sống sót restart (G7 §0.5 blueprint): ngày đã sync +
+ *  backoff intl. Lưu trong DataSourceStatus.meta key "engine-state". */
+interface EngineState {
+  eodSyncDate?: string | null;
+  intlSyncDate?: string | null;
+  reprobeSunday?: string | null;
+  intlFailStreak?: number;
+  lastIntlFailAt?: number | null;
+  lastEodSyncAt?: string | null;
+  lastIntlSyncAt?: string | null;
+  lastReprobeAt?: string | null;
+}
+
+/** Boot: đọc state từ DB → đổ vào stats + biến backoff (restart không quên). */
+async function hydrateEngineState(): Promise<void> {
+  try {
+    const res = await fetch(`${APP_URL}/api/market/engine-state`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      log("state", `không đọc được engine-state (HTTP ${res.status}) — giữ state rỗng`);
+      return;
+    }
+    const data = (await res.json()) as { state?: EngineState | null };
+    const s = data?.state;
+    if (!s) {
+      log("state", "chưa có engine-state trong DB — bắt đầu state mới (P0-5)");
+      return;
+    }
+    if (typeof s.eodSyncDate === "string") stats.lastEodSyncDate = s.eodSyncDate;
+    if (typeof s.intlSyncDate === "string") stats.lastIntlSyncDate = s.intlSyncDate;
+    if (typeof s.reprobeSunday === "string") stats.lastReprobeSunday = s.reprobeSunday;
+    if (typeof s.lastEodSyncAt === "string") stats.lastEodSyncAt = s.lastEodSyncAt;
+    if (typeof s.lastIntlSyncAt === "string") stats.lastIntlSyncAt = s.lastIntlSyncAt;
+    if (typeof s.lastReprobeAt === "string") stats.lastReprobeAt = s.lastReprobeAt;
+    if (typeof s.intlFailStreak === "number") intlFailStreak = s.intlFailStreak;
+    if (typeof s.lastIntlFailAt === "number") lastIntlFailAt = s.lastIntlFailAt;
+    log(
+      "state",
+      `phục hồi state từ DB (P0-5): eod=${stats.lastEodSyncDate ?? "—"} · intl=${stats.lastIntlSyncDate ?? "—"} · reprobe=${stats.lastReprobeSunday ?? "—"} · intlFailStreak=${intlFailStreak}`
+    );
+  } catch (err) {
+    // App chưa sẵn sàng lúc boot engine — giữ state rỗng, sự kiện sync đầu
+    // tiên sẽ tự ghi state mới (fail-soft, không chặn boot)
+    log("state", `hydrate bỏ qua (app chưa sẵn sàng?): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Ghi state hiện tại vào DB — gọi sau mỗi sự kiện eod/intl/reprobe (thay đổi
+ *  ngày đã-sync / backoff). Thất bại chỉ log — không ảnh hưởng chu kỳ sync. */
+async function persistEngineState(): Promise<void> {
+  try {
+    await fetch(`${APP_URL}/api/market/engine-state`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        eodSyncDate: stats.lastEodSyncDate,
+        intlSyncDate: stats.lastIntlSyncDate,
+        reprobeSunday: stats.lastReprobeSunday,
+        intlFailStreak,
+        lastIntlFailAt,
+        lastEodSyncAt: stats.lastEodSyncAt,
+        lastIntlSyncAt: stats.lastIntlSyncAt,
+        lastReprobeAt: stats.lastReprobeAt,
+      } satisfies EngineState),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    log("state", `không lưu được engine-state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** F-481-01 — lỗi HTTP giữ status để caller phân biệt 429 (route bận:
  * mutex/cooldown — không phải lỗi nguồn dữ liệu) với 502/500 thật. */
 class HttpError extends Error {
@@ -258,6 +339,8 @@ async function syncEodAndBroadcast(): Promise<void> {
     log("eod", `LỖI: ${stats.lastEodSyncError}`);
   } finally {
     eodSyncInFlight = false;
+    // P0-5 — state đã-sync-ngày sống sót restart
+    void persistEngineState();
   }
 }
 
@@ -324,6 +407,8 @@ async function syncIntlAndBroadcast(): Promise<void> {
     );
   } finally {
     intlSyncInFlight = false;
+    // P0-5 — backoff intl sống sót restart (streak + lastFailAt)
+    void persistEngineState();
   }
 }
 
@@ -350,6 +435,8 @@ async function reprobeAndBroadcast(): Promise<void> {
     log("reprobe", `bỏ qua: ${stats.lastReprobeError}`);
   } finally {
     reprobeInFlight = false;
+    // P0-5 — tuần đã reprobe sống sót restart
+    void persistEngineState();
   }
 }
 
@@ -418,14 +505,24 @@ http.listen(PORT, () => {
       AGENT_CYCLE_MINUTES > 0 ? `${AGENT_CYCLE_MINUTES.toFixed(0)}phút` : "TẮT"
     }`
   );
-  // Chạy ngay một vòng lúc khởi động để client có dữ liệu sớm —
-  // EOD sync lúc boot giúp môi trường mới tự có giá thật (lookback 10 ngày)
+  // P0-5 (phiên #57): hydrate state từ DB TRƯỚC khi chạy boot-sync — restart
+  // không quên "hôm nay đã sync EOD" (nghiệm thu: kill engine → restart →
+  // KHÔNG refetch EOD đã xong hôm đó) và không quên backoff intl.
+  void hydrateEngineState().then(() => {
+    // Chạy ngay một vòng lúc khởi động để client có dữ liệu sớm — boot
+    // top-up EOD chỉ khi hôm nay CHƯA sync xong (state từ DB); môi trường
+    // mới (chưa có state) vẫn tự đổ dữ liệu thật sớm như cũ.
+    if (stats.lastEodSyncDate !== ictNow().date) {
+      void syncEodAndBroadcast();
+    } else {
+      log("boot", "EOD hôm nay đã sync (state P0-5 từ DB) — bỏ refetch lúc boot");
+    }
+    // B12 — quốc tế: chạy luôn lúc boot nếu hôm nay đến lịch (Yahoo 429 tạm
+    // thời thì bỏ qua im lặng — job 06:15 ICT ngày mai tự phục hồi)
+    if (intlSyncDue()) void syncIntlAndBroadcast();
+  });
   enqueueTick();
   void ingestNewsAndBroadcast();
-  void syncEodAndBroadcast();
-  // B12 — quốc tế: chạy luôn lúc boot nếu hôm nay đến lịch (Yahoo 429 tạm
-  // thời thì bỏ qua im lặng — job 06:15 ICT ngày mai tự phục hồi)
-  if (intlSyncDue()) void syncIntlAndBroadcast();
   setInterval(enqueueTick, TICK_MS);
   setInterval(ingestNewsAndBroadcast, NEWS_MS);
   // Try/catch quanh cả khối due-check: một due-check hỏng (bug cấu hình,

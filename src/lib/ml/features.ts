@@ -1,18 +1,29 @@
 /**
- * src/lib/ml/features.ts — ĐẶC TRƯNG HỌC MÁY cho MLP dự báo 5 phiên (phiên #35).
+ * src/lib/ml/features.ts — FEATURECONTRACT (P0-3) — NƠI TÍNH ĐẶC TRƯNG
+ * DUY NHẤT của hệ thống + nạp rổ topByAdtv (P0-2).
  *
- * buildTrainingSet(topN): quét top-N mã thanh khoản cao nhất (theo volume
- * quote mới nhất) rồi trượt cửa sổ trên chuỗi EOD thật — mỗi phiên t đủ 60
- * phiên lịch sử và t+5 tồn tại → 10 đặc trưng + nhãn hướng 5 phiên tới.
- * latestFeatures(): vector đặc trưng phiên CUỐI của từng mã top-10 (serving).
+ * DATA_PLATFORM_BLUEPRINT v1.1 §3.2 (phiên #57): mọi consumer (agent-context
+ * · bayes/evidence · S2 feature-store · A9 readiness) gọi qua giao diện này —
+ * không còn 3 đường tính độc lập (indicators latest-only · tự tính trong
+ * evidence · S2 tự tính). `indicators.ts` giữ nguyên vai trò vỏ API "giá trị
+ * cuối" cho các chỉ báo ngoài hợp đồng (BOLL/ATR/Stoch/OBV) và UI.
  *
- * Chuỗi chỉ báo tính TĂNG DẦN O(N) (rolling Wilder RSI · EMA MACD · SMA
- * window-sum) vì src/lib/indicators.ts chỉ trả "giá trị cuối" — gọi per-sample
- * sẽ O(N²) trên ~50k mẫu. Nhãn: close(t+5)/close(t)−1 > +0,5% → 2 (UP),
- * < −0,5% → 0 (DOWN), còn lại 1 (FLAT).
+ * • `rollingFeatures(closes, volumes)` — chuỗi chỉ báo rolling O(N) (Wilder
+ *   RSI · EMA MACD 12/26/9 · SMA window-sum) — thuật toán chuẩn duy nhất.
+ * • `latestFeatureSnapshot` — bộ giá trị PHIÊN CUỐI dùng cho prompt/evidence/S2
+ *   (SMA20/50 · RSI14 · MACD hist · động lượng 5 phiên · KL/TL20).
+ * • `loadTopSeries` — rổ top-N theo topByAdtv (ADTV 45 phiên từ Bar.value —
+ *   định nghĩa rổ duy nhất P0-2, thay ranking avg-volume cũ của fixbug F6 và
+ *   quote-volume của latestFeatures).
+ *
+ * buildTrainingSet(topN): quét top-N mã thanh khoản rồi trượt cửa sổ trên
+ * chuỗi EOD thật — mỗi phiên t đủ 60 phiên lịch sử và t+5 tồn tại → 10 đặc
+ * trưng + nhãn hướng 5 phiên tới. Nhãn: close(t+5)/close(t)−1 > +0,5% → 2
+ * (UP), < −0,5% → 0 (DOWN), còn lại 1 (FLAT).
  */
 
 import { db } from "@/lib/db";
+import { loadTopDatedSeries, topByAdtv } from "@/lib/dated-series";
 
 /** Số đặc trưng đầu vào của MLP (thay đổi phải đổi cả kiến trúc mạng). */
 export const ML_FEATURE_COUNT = 10;
@@ -64,7 +75,7 @@ interface BarRow {
   volume: number;
 }
 
-/** Top-N mã thanh khoản (quote volume mới nhất) + chuỗi bar đầy đủ. */
+/** Top-N mã thanh khoản (topByAdtv — P0-2) + chuỗi bar đầy đủ. */
 export interface SymbolSeries {
   symbol: string;
   instrumentId: string;
@@ -75,7 +86,12 @@ export interface SymbolSeries {
 
 /**
  * Nạp top-N mã isActive thanh khoản cao nhất kèm toàn bộ bar EOD (date asc).
- * Dùng chung cho buildTrainingSet (topN=20) và rổ Q-learning (topN=10).
+ * P0-2 (phiên #57): xếp hạng qua `topByAdtv` — ADTV 45 PHIÊN EOD từ
+ * `Bar.value` (giá trị giao dịch VND) — định nghĩa rổ DUY NHẤT của hệ thống,
+ * thay thế ranking avg-volume cửa sổ 45 NGÀY LỊCH của fixbug #52-F6 (cùng
+ * họ lỗi F6 nhưng đo "số cổ phiếu" thay "số tiền" — mã giá cao ít khối lượng
+ * vẫn lọt top). Dùng chung cho buildTrainingSet (topN=20) · rổ Q-learning
+ * (topN=10) · risk engine proxy (sinceDays ~500 phiên).
  * B5 (§3.4 MARKET_EXPANSION): khoá rổ ML về HOSE-STOCK — MLP/Q-learning
  * tiếp tục train trên chuỗi lịch sử sâu nhất; universe đa sàn KHÔNG làm
  * lệch thành phần rổ (train/serving phải cùng định nghĩa rổ).
@@ -86,85 +102,36 @@ export async function loadTopSeries(
   topN: number,
   options: { sinceDays?: number } = {}
 ): Promise<SymbolSeries[]> {
-  const instruments = await db.instrument.findMany({
-    where: { isActive: true, market: "HOSE", type: "STOCK" },
-    select: { id: true, symbol: true },
+  const series = await loadTopDatedSeries(topN, {
+    market: "HOSE",
+    type: "STOCK",
+    sinceDays: options.sinceDays,
   });
-  // Fixbug #52-F6 — ranking "thanh khoản" theo ADTV ~20 phiên từ bar EOD
-  // (ổn định trong ngày) thay vì volume của quote MỚI NHẤT: ranking cũ xoay
-  // rổ theo từng tick (bằng chứng: 6/10 mã thay đổi chỉ sau vài giờ) làm
-  // CUSUM/CRB-6/CRB-8 (rổ proxy) nhảy số giữa 2 chu kỳ và PHÁ vỡ tính nhất
-  // quán train/serving của Q-learning/MLP (B5 — evidence.ts ghi "CÙNG rổ với
-  // lúc train" nhưng rổ cũ không giữ được thành phần tới lúc serving).
-  // Cửa sổ 45 ngày ≈ 30 phiên GD; ≥ 10 bar mới đủ nền tảng xếp hạng.
-  const ids = instruments.map((i) => i.id);
-  const adtvWindow = new Date(Date.now() - 45 * 86_400_000);
-  const grouped =
-    ids.length > 0
-      ? await db.bar
-          .groupBy({
-            by: ["instrumentId"],
-            where: { instrumentId: { in: ids }, date: { gte: adtvWindow } },
-            _avg: { volume: true },
-            _count: { _all: true },
-          })
-          .catch(() => [])
-      : [];
-  const adtvById = new Map<string, number>();
-  for (const g of grouped) {
-    const avg = g._avg.volume ?? 0;
-    if (avg > 0 && g._count._all >= 10) adtvById.set(g.instrumentId, avg);
-  }
-  const ranked = instruments
-    .map((i) => {
-      const volume = adtvById.get(i.id);
-      return volume != null ? { id: i.id, symbol: i.symbol, volume } : null;
-    })
-    .filter((r): r is NonNullable<typeof r> => r !== null)
-    .sort((a, b) => b.volume - a.volume)
-    .slice(0, topN);
-  if (ranked.length === 0) return [];
-
-  // Phiên #51 — CRB: cutoff ngày tùy chọn (mặc định giữ nguyên toàn lịch sử)
-  const since =
-    options.sinceDays != null && options.sinceDays > 0
-      ? new Date(Date.now() - options.sinceDays * 86_400_000)
-      : null;
-  const bars = await db.bar.findMany({
-    where: {
-      instrumentId: { in: ranked.map((r) => r.id) },
-      ...(since ? { date: { gte: since } } : {}),
-    },
-    orderBy: { date: "asc" },
-    select: { instrumentId: true, date: true, close: true, volume: true },
-  });
-  const byId = new Map<string, BarRow[]>();
-  for (const b of bars) {
-    // Bỏ bar dữ liệu hỏng (close ≤ 0) — không làm lệch log-return
-    if (!(b.close > 0)) continue;
-    const list = byId.get(b.instrumentId) ?? [];
-    list.push({ date: b.date, close: b.close, volume: b.volume });
-    byId.set(b.instrumentId, list);
-  }
-  return ranked.map((r) => {
-    const rows = byId.get(r.id) ?? [];
-    return {
-      symbol: r.symbol,
-      instrumentId: r.id,
-      bars: rows,
-      closes: rows.map((b) => b.close),
-      volumes: rows.map((b) => b.volume),
-    };
-  });
+  return series.map((s) => ({
+    symbol: s.symbol,
+    instrumentId: s.instrumentId,
+    bars: s.bars.map((b) => ({ date: b.date, close: b.close, volume: b.volume })),
+    closes: s.bars.map((b) => b.close),
+    volumes: s.bars.map((b) => b.volume),
+  }));
 }
 
 /* ─────────────────── Rolling indicators O(N) ─────────────────── */
 
 /**
- * Tính chuỗi chỉ báo tăng dần cho một mã — cùng thuật toán chuẩn như
- * src/lib/indicators.ts (Wilder RSI, EMA MACD 12/26/9, SMA) nhưng trả
- * TOÀN chuỗi để lấy mẫu O(1).
+ * FEATURECONTRACT (P0-3) — tính chuỗi chỉ báo tăng dần cho một mã: cùng
+ * thuật toán chuẩn duy nhất (Wilder RSI, EMA MACD 12/26/9, SMA window-sum)
+ * nhưng trả TOÀN chuỗi để lấy mẫu O(1). Trước đây `buildRolling` riêng tư —
+ * giờ là điểm vào hợp đồng cho mọi consumer (evidence · S2 · A9 · MLP).
  */
+export function rollingFeatures(
+  closes: number[],
+  volumes: number[]
+): RollingSeries {
+  return buildRolling(closes, volumes);
+}
+
+/** Trả lại tên cũ cho caller nội bộ (không đổi thuật toán). */
 function buildRolling(closes: number[], volumes: number[]): RollingSeries {
   const n = closes.length;
   const ret1: (number | null)[] = new Array(n).fill(null);
@@ -375,31 +342,87 @@ export async function buildTrainingSet(topN = 20): Promise<TrainingSet> {
   };
 }
 
+/* ─────────────── FEATURECONTRACT · snapshot phiên cuối (P0-3) ─────────────── */
+
+/** Bộ giá trị PHIÊN CUỐI qua hợp đồng — một định nghĩa cho mọi consumer. */
+export interface FeatureSnapshot {
+  /** Số phiên EOD có dữ liệu (sau khi bỏ bar close ≤ 0). */
+  sessions: number;
+  /** Đủ warmup 60 phiên (ML_WARMUP_BARS). */
+  warmup: boolean;
+  sma20: number | null;
+  sma50: number | null;
+  /** RSI14 Wilder — cùng thuật toán với MLP (identical khi cùng chuỗi). */
+  rsi14: number | null;
+  /** MACD histogram (EMA12−EMA26 − signal EMA9) — đơn vị giá. */
+  macdHist: number | null;
+  /** Động lượng 5 phiên (%): (close_n/close_{n−5} − 1)×100. */
+  mom5Pct: number | null;
+  /** KL/TL20: khối lượng bar cuối / TB 20 phiên TRƯỚC nó (không tính chính nó). */
+  volRatio20: number | null;
+  /** Đủ 6 nhóm đặc trưng (readiness S2 · A9). */
+  ready: boolean;
+}
+
+/** Tính snapshot PHIÊN CUỐI từ chuỗi closes/volumes (đã tăng dần theo ngày). */
+export function latestFeatureSnapshot(
+  closes: number[],
+  volumes: number[]
+): FeatureSnapshot | null {
+  const n = closes.length;
+  if (n === 0) return null;
+  const roll = buildRolling(closes, volumes);
+  const t = n - 1;
+  const sma20 = roll.sma20[t] ?? null;
+  const sma50 = roll.sma50[t] ?? null;
+  const rsi14 = roll.rsi14[t] ?? null;
+  const macdHist = roll.macdHist[t] ?? null;
+  const mom5Pct =
+    n >= 6 && closes[n - 6] > 0 ? (closes[n - 1] / closes[n - 6] - 1) * 100 : null;
+  // KL/TL20 = volume cuối / mean(20 phiên trước nó) — cùng semantics
+  // indicators.latestVsMean(volumes, 20) cũ (không đếm phiên đang so)
+  let volRatio20: number | null = null;
+  if (n >= 21) {
+    let s = 0;
+    for (let i = n - 21; i < n - 1; i++) s += volumes[i];
+    const mean = s / 20;
+    if (mean > 0) volRatio20 = volumes[n - 1] / mean;
+  }
+  const warmup = n >= ML_WARMUP_BARS;
+  return {
+    sessions: n,
+    warmup,
+    sma20,
+    sma50,
+    rsi14,
+    macdHist,
+    mom5Pct,
+    volRatio20,
+    ready:
+      warmup &&
+      sma20 != null &&
+      sma50 != null &&
+      rsi14 != null &&
+      macdHist != null &&
+      mom5Pct != null &&
+      volRatio20 != null,
+  };
+}
+
 /**
  * Đặc trưng phiên CUỐI của từng mã top-10 (chỉ nạp 60 bar/mã — nhẹ,
  * dùng cho serving predict). Trả [{symbol, x}] theo thứ tự thanh khoản.
+ * P0-2 (phiên #57): rổ xếp qua topByAdtv (ADTV 45 phiên từ Bar.value) —
+ * thay quote-volume ranking (lớp bug F6 còn sót ở đây); mã không có quote
+ * vẫn vào rổ nếu đủ bar (feature tính từ bar, không cần quote).
  * B5: cùng rổ HOSE-STOCK như lúc train (loadTopSeries) — KHÔNG trộn
  * index/ETF/HNX vào feature serving (drift mô hình).
  */
 export async function latestFeatures(): Promise<{ symbol: string; x: number[] }[]> {
-  const instruments = await db.instrument.findMany({
-    where: { isActive: true, market: "HOSE", type: "STOCK" },
-    select: {
-      id: true,
-      symbol: true,
-      quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { volume: true } },
-    },
-  });
-  const ranked = instruments
-    .map((i) => {
-      const q = i.quotes[0];
-      return q ? { id: i.id, symbol: i.symbol } : null;
-    })
-    .filter((r): r is NonNullable<typeof r> => r !== null);
-  const topIds = ranked.slice(0, 10);
+  const ranked = await topByAdtv(10, { market: "HOSE", type: "STOCK" });
 
   const barLists = await Promise.all(
-    topIds.map((t) =>
+    ranked.map((t) =>
       db.bar
         .findMany({
           where: { instrumentId: t.id },
@@ -412,7 +435,7 @@ export async function latestFeatures(): Promise<{ symbol: string; x: number[] }[
   );
 
   const out: { symbol: string; x: number[] }[] = [];
-  topIds.forEach((t, i) => {
+  ranked.forEach((t, i) => {
     const rows = barLists[i];
     if (rows.length < ML_WARMUP_BARS) return;
     const roll = buildRolling(

@@ -18,7 +18,14 @@ import { llmStatus } from "@/lib/llm";
 import { getTradingMode, TRADING_MODE_LABEL } from "@/lib/trading-mode";
 import { sessionPhase, SESSION_PHASE_LABEL } from "@/lib/market-session";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
-import { latestFeatures, loadTopSeries } from "@/lib/ml/features";
+import { latestFeatures, loadTopSeries, latestFeatureSnapshot } from "@/lib/ml/features";
+import { topByAdtv } from "@/lib/dated-series";
+import {
+  runDataQualityChecks,
+  raiseSevereAlerts,
+  extractVerdict,
+  type DataQualityVerdict,
+} from "@/lib/data-quality";
 import { MLP } from "@/lib/ml/nn";
 import { mlForecastEnsemble } from "@/lib/ml/ensemble";
 import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
@@ -53,7 +60,9 @@ function stdOf(xs: number[]): number {
 
 /** Top-N mã thanh khoản cao nhất (kèm quote + closes + volumes 90 phiên).
  *  B5 §3.4: khoá về HOSE-STOCK — universe đa sàn không làm lệch rổ của các
- *  agent dịch vụ đang dùng (market-analyst bảng chỉ báo, ml-forecast…). */
+ *  agent dịch vụ đang dùng (market-analyst bảng chỉ báo, ml-forecast…).
+ *  P0-2 (phiên #57): xếp hạng qua rổ DUY NHẤT `topByAdtv` (ADTV 45 phiên EOD
+ *  từ Bar.value) — thay quote volume từng tick (lớs bug F6 còn sót ở đây). */
 interface LiquidSymbol {
   id: string;
   symbol: string;
@@ -64,44 +73,41 @@ interface LiquidSymbol {
   volumes: number[];
 }
 async function topLiquid(n: number): Promise<LiquidSymbol[]> {
-  const instruments = await db.instrument.findMany({
-    where: { isActive: true, market: "HOSE", type: "STOCK" },
-    select: {
-      id: true,
-      symbol: true,
-      sector: true,
-      quotes: {
-        orderBy: { tradedAt: "desc" },
-        take: 1,
-        select: { last: true, volume: true },
-      },
-    },
-  });
-  const quoteRows = instruments
-    .map((i) => {
-      const q = i.quotes[0];
-      return q ? { id: i.id, symbol: i.symbol, sector: i.sector, last: q.last, volume: q.volume } : null;
-    })
-    .filter((r): r is NonNullable<typeof r> => r !== null)
-    .sort((a, b) => b.volume - a.volume)
-    .slice(0, n);
-  const bars = await db.bar.findMany({
-    where: { instrumentId: { in: quoteRows.map((t) => t.id) } },
-    orderBy: { date: "asc" },
-    select: { instrumentId: true, close: true, volume: true },
-  });
+  const ranked = await topByAdtv(n, { market: "HOSE", type: "STOCK" });
+  if (ranked.length === 0) return [];
+  const ids = ranked.map((r) => r.id);
+  const [quoteRows, bars] = await Promise.all([
+    db.quote
+      .findMany({ where: { instrumentId: { in: ids } }, select: { instrumentId: true, last: true, volume: true } })
+      .catch(() => []),
+    db.bar
+      .findMany({
+        where: { instrumentId: { in: ids } },
+        orderBy: { date: "asc" },
+        select: { instrumentId: true, close: true, volume: true },
+      })
+      .catch(() => []),
+  ]);
+  const quoteById = new Map(quoteRows.map((q) => [q.instrumentId, q]));
   const series = new Map<string, { closes: number[]; volumes: number[] }>();
   for (const b of bars) {
+    if (!(b.close > 0)) continue;
     const entry = series.get(b.instrumentId) ?? { closes: [], volumes: [] };
     entry.closes.push(b.close);
     entry.volumes.push(b.volume);
     series.set(b.instrumentId, entry);
   }
-  return quoteRows.map((t) => ({
-    ...t,
-    closes: series.get(t.id)?.closes ?? [],
-    volumes: series.get(t.id)?.volumes ?? [],
-  }));
+  return ranked.map((t) => {
+    const q = quoteById.get(t.id);
+    const s = series.get(t.id);
+    return {
+      ...t,
+      last: q?.last ?? 0,
+      volume: q?.volume ?? 0,
+      closes: s?.closes ?? [],
+      volumes: s?.volumes ?? [],
+    };
+  });
 }
 
 /** Vị thế mở + giá hiện tại + NAV (equity tính lại như F-102). */
@@ -173,21 +179,49 @@ async function portfolioSnapshot(): Promise<{
 
 /* ─────────────────────────── Nhóm 4 · platform ─────────────────────────── */
 
-/** S0 Data Collector — tình trạng đồng bộ dữ liệu (B11: + ingest fundamentals
- * finfo tuần trong chu kỳ — try/catch toàn bộ, lỗi mạng → mode pending-egress,
- * KHÔNG bao giờ làm hỏng chu kỳ; DataSourceStatus key "fundamentals" minh bạch). */
+/** S0 Data Collector — chủ kho & điều phối nạp (P0-6 — phiên #57: xuất
+ * IngestSummary cấu trúc trong output — đã nạp gì mới · nguồn nào hỏng +
+ * lastError · backlog gì — đầu vào lịch sử cho A9 và S1, §1.2 blueprint).
+ * B11: + ingest fundamentals finfo tuần trong chu kỳ — try/catch toàn bộ,
+ * lỗi mạng → mode pending-egress, KHÔNG bao giờ làm hỏng chu kỳ;
+ * DataSourceStatus key "fundamentals" minh bạch. Vẫn 0 request thu thập
+ * (registry 10 đường thật đợi P1-6 — engine + API routes là máy móc). */
 async function runDataCollector(): Promise<ServiceRunResult> {
   const since24h = new Date(Date.now() - 24 * 3_600_000);
-  const [instrumentCount, barCount, quoteAgg, news24h, sourceStatus] = await Promise.all([
-    db.instrument.count({ where: { isActive: true } }),
-    db.bar.count(),
-    db.quote.aggregate({ _max: { tradedAt: true } }),
-    db.newsItem.count({ where: { publishedAt: { gte: since24h } } }),
-    db.dataSourceStatus.findUnique({ where: { key: "market-quotes" } }),
-  ]);
-  const lastQuoteAt = quoteAgg._max.tradedAt;
-  const ageSec = lastQuoteAt ? Math.max(0, Math.round((Date.now() - lastQuoteAt.getTime()) / 1000)) : null;
-  const mode = sourceStatus?.mode ?? "simulated";
+  const [instruments, barCount, quoteRows, news24h, sourceRows, barMaxAgg, barInstrumentGroup] =
+    await Promise.all([
+      db.instrument.findMany({
+        where: { isActive: true },
+        select: { id: true, symbol: true, market: true, type: true },
+      }),
+      db.bar.count(),
+      db.quote.findMany({ select: { instrumentId: true, tradedAt: true } }),
+      db.newsItem.count({ where: { publishedAt: { gte: since24h } } }),
+      db.dataSourceStatus.findMany().catch(() => []),
+      db.bar.aggregate({ _max: { date: true } }).catch(() => ({ _max: { date: null as Date | null } })),
+      db.bar.groupBy({ by: ["instrumentId"] }).catch(() => [] as { instrumentId: string }[]),
+    ]);
+  // Quote update-in-place: 1 dòng/mã — tradedAt lớn nhất = báo giá mới nhất
+  const lastQuoteAt = quoteRows.reduce<Date | null>(
+    (acc, q) => (acc == null || q.tradedAt > acc ? q.tradedAt : acc),
+    null
+  );
+  const lastBarDate = barMaxAgg._max.date ?? null;
+  const barsAtLastDate = lastBarDate
+    ? await db.bar.count({ where: { date: lastBarDate } }).catch(() => 0)
+    : 0;
+  const idsWithBars = new Set(barInstrumentGroup.map((g) => g.instrumentId));
+  const quotedIds = new Set(quoteRows.map((q) => q.instrumentId));
+  const zeroBarSymbols = instruments
+    .filter((i) => !idsWithBars.has(i.id))
+    .map((i) => i.symbol);
+  const noQuoteCount = instruments.filter((i) => !quotedIds.has(i.id)).length;
+  const instrumentCount = instruments.length;
+  const ageSec = lastQuoteAt
+    ? Math.max(0, Math.round((Date.now() - lastQuoteAt.getTime()) / 1000))
+    : null;
+  const marketQuotesRow = sourceRows.find((s) => s.key === "market-quotes");
+  const mode = marketQuotesRow?.mode ?? "simulated";
   const ageLabel =
     ageSec == null
       ? "chưa có báo giá"
@@ -195,14 +229,37 @@ async function runDataCollector(): Promise<ServiceRunResult> {
         ? `${ageSec}s trước`
         : `${Math.round(ageSec / 60)} phút trước`;
 
+  // P0-6 — IngestSummary (AgentRun.output): nạp hôm nay · nguồn hỏng · backlog
+  const failedSources = sourceRows
+    .filter((s) => s.lastError)
+    .map((s) => ({ key: s.key, mode: s.mode, lastError: s.lastError!.slice(0, 120) }));
+  const ingest = {
+    asOf: new Date().toISOString(),
+    lastBarDate: lastBarDate ? lastBarDate.toISOString().slice(0, 10) : null,
+    barsAtLastDate,
+    sources: sourceRows.map((s) => ({
+      key: s.key,
+      mode: s.mode,
+      lastSuccessAt: s.lastSuccessAt ? s.lastSuccessAt.toISOString() : null,
+      lastError: s.lastError ? s.lastError.slice(0, 120) : null,
+    })),
+    failedSources,
+    backlog: {
+      zeroBarCount: zeroBarSymbols.length,
+      zeroBarSymbols: zeroBarSymbols.slice(0, 20),
+      noQuoteCount,
+    },
+  };
+
   // B11 — ingest fundamentals finfo (tuần: chỉ chạy Chủ nhật theo lịch ICT)
   const fundNote = await ingestFundamentalsWeekly();
 
   return {
-    content: `Đồng bộ hoàn tất: ${instrumentCount} mã đa sàn (HOSE · HNX · UPCOM · ETF · INDEX · QT) · ${barCount.toLocaleString("vi-VN")} nến lịch sử · báo giá mới nhất ${ageLabel} (chế độ ${mode}) · ${news24h} tin RSS trong 24h qua.${fundNote ? ` Dữ liệu cơ bản: ${fundNote}.` : ""} Dữ liệu sẵn sàng cho Hội đồng Nghiên cứu.`,
-    reasoning: "Đếm trực tiếp từ kho: Instrument/Bar/Quote/NewsItem + ingest finfo (B11 pending-egress).",
+    content: `Đồng bộ hoàn tất: ${instrumentCount} mã đa sàn (HOSE · HNX · UPCOM · ETF · INDEX · QT) · ${barCount.toLocaleString("vi-VN")} nến lịch sử · báo giá mới nhất ${ageLabel} (chế độ ${mode}) · ${news24h} tin RSS trong 24h qua. Nạp gần nhất: ${ingest.lastBarDate ? `${barsAtLastDate.toLocaleString("vi-VN")} nến ngày ${ingest.lastBarDate}` : "chưa có nến"} · backlog ${zeroBarSymbols.length} mã 0 nến · ${noQuoteCount} mã thiếu báo giá${failedSources.length > 0 ? ` · nguồn lỗi: ${failedSources.map((f) => f.key).join(", ")}` : ""}.${fundNote ? ` Dữ liệu cơ bản: ${fundNote}.` : ""} Dữ liệu sẵn sàng cho Hội đồng Nghiên cứu.`,
+    reasoning:
+      "P0-6 IngestSummary: đếm Bar theo date mới nhất + DataSourceStatus 7 nguồn (lastError) + backlog 0-bar/thiếu quote + ingest finfo (B11 pending-egress).",
     sentiment: null,
-    output: { instrumentCount, barCount, quoteAgeSec: ageSec, news24h, mode, fundamentals: fundNote },
+    output: { instrumentCount, barCount, quoteAgeSec: ageSec, news24h, mode, fundamentals: fundNote, ingest },
   };
 }
 
@@ -224,10 +281,13 @@ async function ingestFundamentalsWeekly(): Promise<string | null> {
     : "finfo pending-egress (chờ máy chủ có egress)";
 }
 
-/** S1 Notification Officer — bản tin tình hình hệ thống. */
-async function runNotificationOfficer(): Promise<ServiceRunResult> {
+/** S1 Notification Officer — trạm cảnh báo vận hành (P0-7 — phiên #57:
+ *  bản tin thêm dòng CHẤT LƯỢNG DỮ LIỆU từ verdict A9 cùng chu kỳ — S1 chạy
+ *  nhịp 3 sau A9 theo §3.3; single-run không có ctx → fallback đọc AgentRun
+ *  A9 mới nhất ≤ 30 phút). */
+async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceRunResult> {
   const since24h = new Date(Date.now() - 24 * 3_600_000);
-  const [activeSignals, openAlerts, failedRuns] = await Promise.all([
+  const [activeSignals, openAlerts, failedRuns, dqVerdict] = await Promise.all([
     db.signal.findMany({
       where: { status: "ACTIVE" },
       orderBy: { createdAt: "desc" },
@@ -236,83 +296,180 @@ async function runNotificationOfficer(): Promise<ServiceRunResult> {
     }),
     db.riskAlert.count({ where: { acknowledgedAt: null } }),
     db.agentRun.count({ where: { taskStatus: "FAILED", startedAt: { gte: since24h } } }),
+    ctx?.dataQuality != null
+      ? Promise.resolve(ctx.dataQuality)
+      : latestA9Verdict(),
   ]);
   const signalLines = activeSignals.map(
     (s) => `${s.instrument.symbol} ${s.direction} (${s.score}/100)`
   );
   const needAttention = activeSignals.length > 0 || openAlerts > 0;
 
+  // P0-7 — dòng chất lượng dữ liệu: mức + 2 chi tiết lớn nhất từ verdict A9
+  const dqParts: string[] = [];
+  if (dqVerdict) {
+    const top2 = dqVerdict.checks
+      .filter((c) => c.level !== "PASS")
+      .slice(0, 2)
+      .map((c) => {
+        const d = c.detail.length > 90 ? `${c.detail.slice(0, 90).trimEnd()}…` : c.detail;
+        return `${c.kind}: ${d}`;
+      });
+    dqParts.push(
+      `Chất lượng dữ liệu (A9 chu kỳ này): ${dqVerdict.level}${top2.length > 0 ? ` — ${top2.join(" · ")}` : " — 6 phép kiểm đều đạt"}`
+    );
+  }
+
   const parts = [
     `BẢN TIN CHU KỲ: ${activeSignals.length} tín hiệu chờ phê duyệt`,
     signalLines.length ? `(${signalLines.join(" · ")})` : "",
     `${openAlerts} cảnh báo rủi ro chưa xử lý`,
-    `${failedRuns} agent lỗi trong 24h.`,
+    `${failedRuns} agent lỗi trong 24h`,
+    ...dqParts,
   ].filter(Boolean);
 
   return {
     content: parts.join(" · ") + (needAttention ? " Cần trader xem xét." : " Không có mục cần xử lý gấp."),
-    reasoning: "Đếm Signal ACTIVE + RiskAlert chưa ack + AgentRun FAILED 24h.",
-    sentiment: needAttention ? "neutral" : "bullish",
-    output: { activeSignals: activeSignals.length, openAlerts, failedRuns24h: failedRuns },
+    reasoning:
+      "Đếm Signal ACTIVE + RiskAlert chưa ack + AgentRun FAILED 24h + đọc verdict A9 cùng chu kỳ (P0-7 — ctx hoặc AgentRun ≤ 30').",
+    sentiment: dqVerdict?.level === "SEVERE" || needAttention ? "neutral" : "bullish",
+    output: {
+      activeSignals: activeSignals.length,
+      openAlerts,
+      failedRuns24h: failedRuns,
+      dataQuality: dqVerdict
+        ? { level: dqVerdict.level, asOf: dqVerdict.asOf, checkCount: dqVerdict.checks.length }
+        : null,
+    },
   };
 }
 
-/** S2 Feature Store — tình trạng đặc trưng giao dịch. */
+/** P0-7 — verdict A9 mới nhất (≤ 30') cho single-run S1 (chu kỳ truyền ctx). */
+async function latestA9Verdict(): Promise<DataQualityVerdict | null> {
+  try {
+    const agent = await db.agent.findUnique({
+      where: { code: "data-integrity" },
+      select: { id: true },
+    });
+    if (!agent) return null;
+    const run = await db.agentRun.findFirst({
+      where: { agentId: agent.id, taskStatus: "COMPLETED" },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true, output: true },
+    });
+    if (!run?.output) return null;
+    if (Date.now() - run.startedAt.getTime() > 30 * 60_000) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(run.output);
+    } catch {
+      return null;
+    }
+    return extractVerdict(parsed);
+  } catch {
+    return null;
+  }
+}
+
+/** S2 Feature Store — NGƯỜI PHỤC VỤ ĐẶC TRƯNG (P0-3 — phiên #57): tính qua
+ *  FEATURECONTRACT `latestFeatureSnapshot` (ml/features.ts — nơi tính duy
+ *  nhất, cùng số với bằng chứng Bayes · bảng chỉ báo prompt · readiness A9);
+ *  rổ qua topByAdtv (P0-2). Readiness THẬT: 6 nhóm, RSI14 tính thật Wilder
+ *  (roster có nhắc — trước đây KHÔNG tính), bỏ chữ "biến động" suông. */
 async function runFeatureStore(): Promise<ServiceRunResult> {
-  const top = await topLiquid(10);
-  const ready = top.map((t) => {
-    const closes = t.closes;
-    const sma20 = closes.length >= 20 ? meanOf(closes.slice(-20)) : null;
-    const sma50 = closes.length >= 50 ? meanOf(closes.slice(-50)) : null;
-    const mom5 = closes.length >= 6 ? ((closes[closes.length - 1] - closes[closes.length - 6]) / closes[closes.length - 6]) * 100 : null;
-    const avgVol20 = t.volumes.length >= 20 ? meanOf(t.volumes.slice(-20)) : null;
-    const volRatio = avgVol20 && avgVol20 > 0 ? t.volume / avgVol20 : null;
-    const features = [sma20 != null, sma50 != null, mom5 != null, volRatio != null].filter(Boolean).length;
-    return { symbol: t.symbol, features, sma20, sma50, mom5, volRatio, sessions: closes.length };
+  const basket = await topByAdtv(10, { market: "HOSE", type: "STOCK" });
+  const barLists = await Promise.all(
+    basket.map((t) =>
+      db.bar
+        .findMany({
+          where: { instrumentId: t.id },
+          orderBy: { date: "desc" },
+          take: 70,
+          select: { close: true, volume: true, date: true },
+        })
+        .then((rows) => rows.filter((b) => b.close > 0).reverse())
+        .catch(() => [] as { close: number; volume: number; date: Date }[])
+    )
+  );
+  const nowIso = new Date().toISOString();
+  const ready = basket.map((t, i) => {
+    const rows = barLists[i];
+    const snap = latestFeatureSnapshot(
+      rows.map((b) => b.close),
+      rows.map((b) => b.volume)
+    );
+    return {
+      symbol: t.symbol,
+      sessions: snap?.sessions ?? 0,
+      sma20: snap?.sma20 ?? null,
+      sma50: snap?.sma50 ?? null,
+      rsi14: snap?.rsi14 ?? null,
+      macdHist: snap?.macdHist ?? null,
+      mom5Pct: snap?.mom5Pct ?? null,
+      volRatio20: snap?.volRatio20 ?? null,
+      ready: snap?.ready ?? false,
+      lastBarDate: rows.length ? rows[rows.length - 1].date.toISOString().slice(0, 10) : null,
+      // §4.2.3 — mốc readiness per mã (invalidation hook, 0 schema)
+      featureReadinessAt: snap ? nowIso : null,
+    };
   });
-  const full = ready.filter((r) => r.features === 4).length;
+  const full = ready.filter((r) => r.ready).length;
   const sample = ready
     .slice(0, 3)
-    .map((r) => `${r.symbol} (SMA20 ${r.sma20 ? Math.round(r.sma20).toLocaleString("vi-VN") : "—"}, động lượng 5 phiên ${r.mom5 != null ? fmtPct(r.mom5) : "—"}, KL/TL20 ${r.volRatio != null ? r.volRatio.toFixed(2) + "×" : "—"})`);
+    .map(
+      (r) =>
+        `${r.symbol} (RSI14 ${r.rsi14 != null ? r.rsi14.toFixed(0) : "—"} · SMA20 ${r.sma20 != null ? Math.round(r.sma20).toLocaleString("vi-VN") : "—"} · MACDh ${r.macdHist != null ? (r.macdHist / 1000).toFixed(1) : "—"} · 5 phiên ${r.mom5Pct != null ? (r.mom5Pct >= 0 ? "+" : "") + r.mom5Pct.toFixed(2) + "%" : "—"} · KL/TL20 ${r.volRatio20 != null ? r.volRatio20.toFixed(2) + "×" : "—"})`
+    );
 
   return {
-    content: `Kho đặc trưng sẵn sàng: ${full}/10 mã top thanh khoản có đủ 4 nhóm đặc trưng (SMA20/50 · động lượng 5 phiên · KL/TL20 · biến động) trên ${ready[0]?.sessions ?? 0} phiên. Mẫu: ${sample.join(" · ")}.`,
-    reasoning: "Tính lại trực tiếp từ chuỗi closes/volumes 90 phiên của top-10 thanh khoản.",
+    content: `Kho đặc trưng (FeatureContract P0-3 · rổ topByAdtv ADTV-45): ${full}/${basket.length} mã top thanh khoản đủ 6 nhóm đặc trưng (SMA20 · SMA50 · RSI14 · MACD hist · động lượng 5 phiên · KL/TL20) — RSI14 Wilder tính thật từ chuỗi EOD, cùng số với bằng chứng Bayes và bảng chỉ báo prompt. Mẫu: ${sample.join(" · ")}.`,
+    reasoning:
+      "latestFeatureSnapshot (ml/features.ts — hợp đồng) trên rổ topByAdtv(10); mốc featureReadinessAt per mã ghi AgentRun.output (invalidation §4.2.3).",
     sentiment: null,
-    output: { fullFeatureCount: full, checked: 10, sample: ready.slice(0, 3) },
+    output: {
+      fullFeatureCount: full,
+      checked: basket.length,
+      basket: "topByAdtv-45",
+      features: ["sma20", "sma50", "rsi14", "macdHist", "mom5", "volRatio20"],
+      sample: ready.slice(0, 3),
+      featureReadinessAt: Object.fromEntries(ready.map((r) => [r.symbol, r.featureReadinessAt])),
+    },
   };
 }
 
-/** A9 Data Integrity — kiểm định độ tươi & độ phủ. */
+/** A9 Data Integrity — KIỂM ĐỊNH VIÊN CHUỖI DỮ LIỆU (P0-4 — phiên #57):
+ *  6 phép kiểm thật (freshness theo lịch phiên sàn · gap per-market · outlier
+ *  2 lớp · split-nghi-vấn VN · 7 nguồn · readiness FeatureContract) →
+ *  DataQualityVerdict JSON CÓ CẤU TRÚC (thay câu text "TOÀN VỆN/CẢNH BÁO"
+ *  0 consumer) → (i) lưu AgentRun.output (0 đổi schema — review #56; bảng
+ *  DataQualityReport đợi P1-7), (ii) RiskAlert khi SEVERE (ack-bắt-buộc,
+ *  dedupe 24h), (iii) route tiêm khối TÍNH TRẠNG DỮ LIỆU vào prompt Wave B
+ *  + Chủ tịch (8-1b: KHÔNG hard-stop). A9 không bao giờ đụng VETO (A6/A7/A8). */
 async function runDataIntegrity(): Promise<ServiceRunResult> {
-  const [quoteAgg, barGroup, newsAgg] = await Promise.all([
-    db.quote.aggregate({ _max: { tradedAt: true } }),
-    db.bar.groupBy({ by: ["instrumentId"], _count: { _all: true } }),
-    db.newsItem.aggregate({ _max: { publishedAt: true } }),
-  ]);
-  const lastQuoteAt = quoteAgg._max.tradedAt;
-  const quoteAgeMin = lastQuoteAt
-    ? Math.max(0, Math.round((Date.now() - lastQuoteAt.getTime()) / 60_000))
-    : null;
-  const barCounts = barGroup.map((g) => g._count._all);
-  const minBars = barCounts.length ? Math.min(...barCounts) : 0;
-  const lastNewsAt = newsAgg._max.publishedAt;
-  const newsAgeH = lastNewsAt
-    ? Math.max(0, Math.round((Date.now() - lastNewsAt.getTime()) / 3_600_000))
-    : null;
+  const verdict = await runDataQualityChecks();
+  const alertsRaised =
+    verdict.level === "SEVERE" ? await raiseSevereAlerts(verdict).catch(() => 0) : 0;
 
-  const issues: string[] = [];
-  if (quoteAgeMin != null && quoteAgeMin > 30) issues.push(`báo giá cũ ${quoteAgeMin} phút (>30')`);
-  if (minBars < 90) issues.push(`nến tối thiểu ${minBars}/90 phiên`);
-  if (newsAgeH != null && newsAgeH > 24) issues.push(`tin mới nhất ${newsAgeH}h (>24h)`);
-
-  const verdict = issues.length ? `CẢNH BÁO: ${issues.join("; ")}` : "TOÀN VẸN";
+  const levelVi =
+    verdict.level === "SEVERE"
+      ? "NGHIÊM TRỌNG (SEVERE)"
+      : verdict.level === "DEGRADED"
+        ? "GIỚI HẠN (DEGRADED)"
+        : "ĐẠT (PASS)";
+  const checkLines = verdict.checks.map(
+    (c) => `[${c.kind}${c.level !== "PASS" ? `:${c.level}` : ""}] ${c.detail}`
+  );
 
   return {
-    content: `Kiểm định dữ liệu: báo giá ${quoteAgeMin == null ? "—" : quoteAgeMin + " phút tuổi"} · nến ${minBars}/90 phiên mỗi mã · tin tức ${newsAgeH == null ? "—" : newsAgeH + "h tuổi"} → ${verdict}.${issues.length ? " Agent nghiên cứu nên khai báo độ trễ trong phân tích." : ""}`,
-    reasoning: "So tuổi Quote/News và độ phủ Bar với ngưỡng 30'/90 phiên/24h.",
-    sentiment: issues.length ? "neutral" : "bullish",
-    output: { quoteAgeMin, minBars, newsAgeH, issues },
+    content: `Kiểm định dữ liệu 6 phép (P0-4) → ${levelVi}: ${checkLines.join(" · ")}.${
+      verdict.level !== "PASS"
+        ? " Cờ chất lượng dữ liệu đã vào prompt nghiên cứu + Chủ tịch — khi trích dẫn số liệu, khai báo độ confound (mã thiếu · nguồn fallback) trong luận cứ."
+        : ""
+    }${alertsRaised > 0 ? ` Đã phát ${alertsRaised} RiskAlert SEVERE bắt buộc ack.` : ""}`,
+    reasoning:
+      "6 phép (data-quality.ts): freshness theo lịch phiên SÀN (3 trạng thái thiếu/đóng-cửa/cũ) · gap per-market quorum 50% + outage · outlier 2 lớp (cấu trúc+dải sàn — Hampel INFO) · split-nghi-vấn VN (gap vượt dải + volume ≥ 3× ADTV) · 7 nguồn DataSourceStatus · readiness FeatureContract — ngưỡng AppSetting data-quality-thresholds.",
+    sentiment: verdict.level === "SEVERE" ? "bearish" : verdict.level === "DEGRADED" ? "neutral" : "bullish",
+    output: { verdict, alertsRaised },
   };
 }
 
@@ -371,10 +528,13 @@ async function runMlForecast(): Promise<ServiceRunResult> {
 
 /* ─────────────────────── Nhóm 2 · control (service) ─────────────────────── */
 
-/** Ngữ cảnh chu kỳ truyền vào service agents (phiên #51 — CRB). */
+/** Ngữ cảnh chu kỳ truyền vào service agents (phiên #51 — CRB · P0-7 #57). */
 export interface ServiceRunContext {
   /** Kết quả RiskQuantEngine của chu kỳ — exposure A7 đọc hạn mức ĐỘNG. */
   riskQuant?: RiskQuantResult | null;
+  /** P0-7 (phiên #57) — verdict A9 CÙNG CHU KỲ cho S1 (đợt A nhịp 3 — §3.3
+   *  blueprint: S0∥S2 → A9 → S1 đọc verdict vừa lưu). */
+  dataQuality?: DataQualityVerdict | null;
 }
 
 /** A7 Exposure — VETO phơi nhiễm ngành & vị thế đơn (phiên #51 — CRB: ngưỡng ĐỘNG). */

@@ -1,8 +1,8 @@
 # DATA PLATFORM BLUEPRINT — NHÓM NỀN TẢNG DỮ LIỆU: HỢP ĐỒNG CHUỖI DỮ LIỆU, KIỂM ĐỊNH & PHỤC VỤ ĐẶC TRƯNG
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/DATA_PLATFORM_BLUEPRINT.md` · **Version:** 1.1 · **Created:** 2026-10-08 (phiên #54) · **Chốt:** 2026-10-08 (#55) · **Review-vá:** 2026-10-08 (#56 — 4 lỗi P0 + 5 P1 + 6 P2 tìm ra khi review đối kháng, đã vá hết vào văn bản này)
-> **Status:** **ĐÃ CHỐT TRIỂN KHAI (phiên #55) + ĐÃ REVIEW CHẶT (phiên #56)** — 5 câu hỏi §8 đã trả lời: 1b · 2a · **3b TỰ ĐIỀU CHỈNH split kèm AuditLog (user chọn khác đề xuất — P1-1 thiết kế lại kèm lớp an toàn đảo ngược)** · 4a · 5a. Thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu theo 4 câu hỏi mới của user
+> **Document:** `docs/DATA_PLATFORM_BLUEPRINT.md` · **Version:** 1.2 · **Created:** 2026-10-08 (phiên #54) · **Chốt:** 2026-10-08 (#55) · **Review-vá:** 2026-10-08 (#56 — 4 lỗi P0 + 5 P1 + 6 P2 tìm ra khi review đối kháng, đã vá hết vào văn bản này) · **Triển khai P0:** 2026-10-08 (#57 — P0-1→7 ĐÃ LÊN CODE, xem §10 Ghi chú triển khai)
+> **Status:** **ĐÃ CHỐT TRIỂN KHAI (phiên #55) + ĐÃ REVIEW CHẶT (#56) + P0 ĐÃ TRIỂN KHAI (#57)** — 5 câu hỏi §8 đã trả lời: 1b · 2a · **3b TỰ ĐIỀU CHỈNH split kèm AuditLog (user chọn khác đề xuất — P1-1 thiết kế lại kèm lớp an toàn đảo ngược)** · 4a · 5a. Thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu theo 4 câu hỏi mới của user; §10 ghi chú triển khai P0 thật (2 tinh chỉnh thuật toán phát hiện khi nghiệm thu)
 > **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (UnitSpec B2 · universe 90 mã) · [CONTROL_RISK_QUANT_BLUEPRINT.md](./CONTROL_RISK_QUANT_BLUEPRINT.md) (σ CRB-1 · rổ ADTV §0.4 — gốc bug F6) · [ML_LEARNING_BLUEPRINT.md](./ML_LEARNING_BLUEPRINT.md) (cổng dữ liệu §6 — người tiêu thụ tương lai lớn nhất) · [DATA_SOURCES.md](./DATA_SOURCES.md) · [Fixbug.md](../Fixbug.md) (4/8 bug #52 gốc tầng này)
 > **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #54)
 
@@ -334,12 +334,25 @@ Nguyên tắc chung: **thuật toán viết tay TypeScript thuần** (Hampel, l�
 
 ---
 
+## §10. Ghi chú triển khai P0 thật (phiên #57 — #57 triển khai trọn P0-1→7)
+
+**Bản đồ code→gói:** P0-1+P0-2 `src/lib/dated-series.ts` (mới — DatedBar/alignByDate/returnsDated/unionDates + `topByAdtv` ADTV 45 phiên từ `Bar.value`, fallback close×volume; thực đo 215.402/215.402 bar đều có value) · P0-3 `src/lib/ml/features.ts` (FeatureContract: `rollingFeatures` + `latestFeatureSnapshot` — SMA20/50 · RSI14 Wilder · MACD hist · MOM5 · KL/TL20 một định nghĩa) · P0-4 `src/lib/data-quality.ts` (mới — 6 phép kiểm + ma trận ngưỡng đọc `AppSetting` "data-quality-thresholds" + `dataQualityPromptBlock` + `raiseSevereAlerts` dedupe 24h) · P0-5 `src/app/api/market/engine-state/` (mới) + `market-engine/index.ts` hydrate/persist · P0-6 S0 IngestSummary + P0-7 S1 digest-verdict trong `agent-service-runs.ts` · đợt A 3 nhịp + tiêm khối TÍNH TRẠNG DỮ LIỆU trong `api/agents/run/route.ts` · `risk/concentration.ts`+`risk/engine.ts` chuyển dùng hợp đồng F1/F2 (`commonReturns`/`returnsDated` — toán tử GIỮ NGUYÊN).
+
+**2 tinh chỉnh thuật toán phát hiện khi nghiệm thu (khác chữ v1.1 — trung thực ghi rõ):**
+1. **Dải giá phải trừ biên tick**: kiểm >7% cứng sẽ bắn ngày trần THẬT (TCB 31.300→33.500 = 7,03% — tick 100₫ làm tròn lên ceiling). Đã chuyển sang công thức sàn chính xác `ceiling = ceil(ref×(1+band)/tick)×tick + 1 tick` — sau vá: 36 mã vi phạm → 8 mã (những ngày trần/sàn thật hết cờ; còn lại là artefact thật — APC HNX có 7 thanh ±14–16% bất khả thi trên sàn ±10% → đúng nghĩa G5).
+2. **Cửa sổ Hampel = 1 QUÝ (92 ngày ≈ 60 phiên)** — đúng chữ "≥ 5 cờ/mã/quý"; cửa sổ 90 phiên (1,5 quý) làm ngưỡng dễ hơn 1,5× trên thị trường biến động (SHB MOM5 −11,4%).
+
+**Nghiệm thu thực tế (#57):** chu kỳ 23 agents 63,5s (<< 180s) · 0 lỗi · thứ tự 3 nhịp chứng minh bằng AgentRun.startedAt (S0∥S2 cùng ms → A9 → S1) · S1 digest chứa "Chất lượng dữ liệu (A9 chu kỳ này): SEVERE" · news-sentiment khai báo confound "dữ liệu bị đánh giá SEVERE… 14 mã thiếu nến" trong output (cờ vào prompt ĐƯỢC TIÊU THỤ) · UI tab Phát thanh của A9 hiển thị verdict 6 phép mới (không còn "TOÀN VẸN" suông) · mobile 390px không tràn ngang · 0 console error · restart engine không refetch EOD đã xong (state DB) · verdict hiện tại SEVERE trung thực (outlier 8 mã + 2 nguồn intl-eod fallback · fundamentals pending-egress) — ngưỡng chỉnh được qua AppSetting sau 2 tuần quan sát đúng kế hoạch.
+
+**Sửa infra phát hiện lúc nghiệm thu (ngoài P0 nhưng chặn toàn bộ UI):** Next 16 mặc định chặn cross-origin dev resource từ `127.0.0.1` (HMR chết → app thành SSR shell không hydrate) — đã thêm `allowedDevOrigins: ["127.0.0.1", "localhost"]` vào `next.config.ts`; market-engine `APP_URL` mặc định chuyển `http://127.0.0.1:3000` (localhost phân giải ::1 bị refused trong sandbox).
+
 ## Changelog
 
+- **v1.2 (2026-10-08, #57 — TRIỂN KHAI P0):** P0-1→7 lên code trọn gói (chốt 8-5a) + §10 ghi chú triển khai: 2 tinh chỉnh thuật toán khi nghiệm thu (dải giá trừ biên tick — hết false-positive ngày trần thật 7,03%; Hampel đúng 1 quý) + sửa infra `allowedDevOrigins` (Next 16 chặn dev resource từ 127.0.0.1 làm chết hydration toàn app). Nghiệm thu: chu kỳ 63,5s · 0 lỗi · 3 nhịp đợt A chứng minh bằng AgentRun.startedAt · S1 đọc verdict cùng chu kỳ · LLM nghiên cứu khai báo confound · UI hiển thị verdict 6 phép · verdict đầu sau vá = SEVERE trung thực (APC HNX ±14–16% là artefact thật — mồi cho P1-1 auto-adjust).
 - **v0.1 (2026-10-08, #54):** mở thảo luận — chẩn đoán 4 agents + đo DB + 8 khoảng trống G1–G8 + kiến trúc hợp đồng + gói P0–P2 + 5 câu hỏi mở.
 - **v1.0 (2026-10-08, #55):** 5 câu trả lời chốt (1b · 2a · **3b tự điều chỉnh — khác đề xuất, P1-1 thiết kế lại kèm an toàn đảo ngược** · 4a · 5a) · P1-5 loại bỏ · thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu (26 model · 32 route · 6 hooks) · trạng thái **ĐÃ CHỐT TRIỂN KHAI**.
 - **v1.1 (2026-10-08, #56 — review đối kháng):** vá **4 lỗi P0**: (1) outlier 2 lớp — cấu trúc + dải giá giới hạn làm issue, Hampel chỉ INFO (chống crying wolf trên ngày trần/sàn thật); (2) split-heuristic **chỉ VN + bắt buộc vượt dải giá giới hạn** (crash thật không thể vượt dải → gap vượt là artefact chắc chắn; US/HK dùng parse `events` Yahoo — crash −50%/ngày có thật ở Mỹ), hệ số f bất kỳ giá trị (cổ thưởng 1,2/1,3/1,5), **hướng điều chỉnh f = open[t]/close[t−1] × chuỗi trước event + volume ×(1/f) + tính lại value** (trước đó ambiguous "nhân theo ratio" — nhân ngược sẽ phình giá cũ k lần); (3) **ma trận ngưỡng PASS/DEGRADED/SEVERE** định nghĩa đủ 6 phép (trước đây test 4/7 treo vào chân không); (4) **P0-6/P0-7** phủ vốn cho nhiệm vụ S0 IngestSummary + S1 digest-verdict (§1.2 hứa nhưng không gói nào dựng). Cùng đợt vá 5 lỗi P1: verdict lưu AgentRun.output (giải mâu thuẫn "0 đổi schema") + DataQualityReport dời P1-7 · đợt A 3 nhịp con S0∥S2→A9→S1 (phụ thuộc vòng trong wave song song) · lịch phiên theo sàn + 3 trạng thái thiếu/đóng cửa/cũ (mâu thuẫn footer 09:15–15:00 vs 14:45 đo thực) · gap per-market quorum 50% + kiểm outage tổng · pipeline một cửa dời P1-6 (P0 hậu kiểm post-hoc, không đụng eod-sync ổn định). Test nâng 11 → 15 mục.
 
 ---
 
-*Tài liệu phiên #54–#56 (soạn #54 → chốt #55 → review đối kháng #56). Mọi con số đều đo trực tiếp từ mã nguồn, DB và quy trình vận hành ngày 2026-10-08 — không có số suy đoán.*
+*Tài liệu phiên #54–#57 (soạn #54 → chốt #55 → review đối kháng #56 → triển khai P0 #57). Mọi con số đều đo trực tiếp từ mã nguồn, DB và quy trình vận hành ngày 2026-10-08 — không có số suy đoán.*
