@@ -535,6 +535,8 @@ export interface SettingsResponse {
     maxSectorWeightPct: number;
     maxPositionPct: number;
     maxDrawdownPct: number;
+    /** Fixbug #52-F5 — trạng thái Beta CRB-7 cho UI Cài đặt (nút reset). */
+    riskQuantLimits: RiskQuantLimitView[];
   };
   bayes: {
     enabled: boolean;
@@ -569,6 +571,22 @@ export interface SettingsTestResponse {
     latencyMs: number;
     sampleQuote: { symbol: string; last: number; changePct: number } | null;
   };
+}
+
+/**
+ * Fixbug #52-F5 — trạng thái 1 giới hạn CRB-7 (Beta-Bernoulli posterior vi
+ * phạm) hiển thị ở Cài đặt + phục vụ nút reset về prior Beta(1,99).
+ */
+export interface RiskQuantLimitView {
+  key: "sector" | "position" | "dd" | "dailyLoss";
+  /** α = số lần vi phạm quan sát + prior 1. */
+  alpha: number;
+  /** β = số lần KHÔNG vi phạm quan sát + prior 99. */
+  beta: number;
+  /** Posterior mean Beta(α+1, β+1) — P(vi phạm) ước lượng. */
+  posteriorMean: number;
+  /** Hệ số siết một chiều mult_ℓ ∈ [0,75 · 1] (CRB-7). */
+  mult: number;
 }
 
 /** Một bằng chứng trong mô hình nhân quả Bayes — đóng góp vào log-odds posterior. */
@@ -696,6 +714,8 @@ export interface RiskQuantView {
   proxyMode: boolean;
   volEwmaAnnPct: number;
   volRatio: number;
+  /** Hệ số hạn mức HỢP NHẤT áp cho vị thế = dynMax/static (vol × learning,
+   * kẹp [0,6 · 1,15]) — fixbug #52-F4 (trước đây là vol.mult thuần). */
   mult: number;
   dynMaxPositionPct: number;
   dynMaxSectorPct: number;

@@ -88,20 +88,37 @@ export async function loadTopSeries(
 ): Promise<SymbolSeries[]> {
   const instruments = await db.instrument.findMany({
     where: { isActive: true, market: "HOSE", type: "STOCK" },
-    select: {
-      id: true,
-      symbol: true,
-      quotes: {
-        orderBy: { tradedAt: "desc" },
-        take: 1,
-        select: { volume: true },
-      },
-    },
+    select: { id: true, symbol: true },
   });
+  // Fixbug #52-F6 — ranking "thanh khoản" theo ADTV ~20 phiên từ bar EOD
+  // (ổn định trong ngày) thay vì volume của quote MỚI NHẤT: ranking cũ xoay
+  // rổ theo từng tick (bằng chứng: 6/10 mã thay đổi chỉ sau vài giờ) làm
+  // CUSUM/CRB-6/CRB-8 (rổ proxy) nhảy số giữa 2 chu kỳ và PHÁ vỡ tính nhất
+  // quán train/serving của Q-learning/MLP (B5 — evidence.ts ghi "CÙNG rổ với
+  // lúc train" nhưng rổ cũ không giữ được thành phần tới lúc serving).
+  // Cửa sổ 45 ngày ≈ 30 phiên GD; ≥ 10 bar mới đủ nền tảng xếp hạng.
+  const ids = instruments.map((i) => i.id);
+  const adtvWindow = new Date(Date.now() - 45 * 86_400_000);
+  const grouped =
+    ids.length > 0
+      ? await db.bar
+          .groupBy({
+            by: ["instrumentId"],
+            where: { instrumentId: { in: ids }, date: { gte: adtvWindow } },
+            _avg: { volume: true },
+            _count: { _all: true },
+          })
+          .catch(() => [])
+      : [];
+  const adtvById = new Map<string, number>();
+  for (const g of grouped) {
+    const avg = g._avg.volume ?? 0;
+    if (avg > 0 && g._count._all >= 10) adtvById.set(g.instrumentId, avg);
+  }
   const ranked = instruments
     .map((i) => {
-      const q = i.quotes[0];
-      return q ? { id: i.id, symbol: i.symbol, volume: q.volume } : null;
+      const volume = adtvById.get(i.id);
+      return volume != null ? { id: i.id, symbol: i.symbol, volume } : null;
     })
     .filter((r): r is NonNullable<typeof r> => r !== null)
     .sort((a, b) => b.volume - a.volume)

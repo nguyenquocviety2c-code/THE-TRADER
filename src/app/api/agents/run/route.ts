@@ -278,9 +278,21 @@ function buildBayesPromptBlock(view: MarketAssessmentView): string {
  */
 function buildQuantChairmanBlock(rq: RiskQuantResult): string {
   const fmt1 = (n: number) => n.toFixed(1).replace(".", ",");
+  const fmt2 = (n: number) => n.toFixed(2).replace(".", ",");
+  // Fixbug #52-F3: hệ số hiển thị phải là hệ số HỢP NHẤT (vol × learning,
+  // kẹp [0,6 · 1,15]) — dyn = tĩnh × hợp nhất. Nếu chỉ ghi vol.mult thì khi
+  // CRB-7 learning siết (mult_ℓ < 1) số học trong prompt tự mâu thuẫn.
+  const mergedPos =
+    rq.staticMaxPositionPct > 0 ? rq.dynMaxPositionPct / rq.staticMaxPositionPct : 1;
+  const mergedSec =
+    rq.staticMaxSectorPct > 0 ? rq.dynMaxSectorPct / rq.staticMaxSectorPct : 1;
+  const mergedNote =
+    Math.abs(mergedSec - mergedPos) > 0.005
+      ? ` · hệ số ngành ${fmt2(mergedSec)} = vol ${fmt2(rq.vol.mult)} × learning ${fmt2(rq.limits.sector.mult)}`
+      : "";
   const lines = [
     "ỦY BAN KIỂM SOÁT ĐỊNH LƯỢNG — KHỐI QUANT (CRB v1.1 · deterministic):",
-    `- Hạn mức động: vị thế tối đa ${fmt1(rq.dynMaxPositionPct)}% NAV · ngành ${fmt1(rq.dynMaxSectorPct)}% (tĩnh ${fmt1(rq.staticMaxPositionPct)}/${fmt1(rq.staticMaxSectorPct)}% × hệ số ${rq.vol.mult.toFixed(2).replace(".", ",")}${rq.vol.mult > 1 ? " — nới theo biến động thấp" : ""}) — tín hiệu MUA không được vượt hạn mức này.`,
+    `- Hạn mức động: vị thế tối đa ${fmt1(rq.dynMaxPositionPct)}% NAV · ngành ${fmt1(rq.dynMaxSectorPct)}% (tĩnh ${fmt1(rq.staticMaxPositionPct)}/${fmt1(rq.staticMaxSectorPct)}% × hệ số hợp nhất ${fmt2(mergedPos)} = vol ${fmt2(rq.vol.mult)} × learning ${fmt2(rq.limits.position.mult)}${mergedNote}${mergedPos > 1 + 1e-9 ? " — nới theo biến động thấp" : ""}) — tín hiệu MUA không được vượt hạn mức này.`,
     `- Rủi ro đuôi 5 phiên: VaR95 ${rq.tail.var95Pct.toFixed(2).replace(".", ",")}% · CVaR95 ${rq.tail.cvar95Pct.toFixed(2).replace(".", ",")}% NAV${rq.mc.paths > 0 ? ` · Monte Carlo ${rq.mc.paths.toLocaleString("vi-VN")} path: P(chạm DD 15%) = ${fmt1(rq.mc.pDd * 100)}%` : ""}.`,
   ];
   if (rq.pBreach != null) {

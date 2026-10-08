@@ -921,7 +921,7 @@ function RiskQuantCard({ riskQuant }: { riskQuant: RiskQuantView }) {
           <QuantStat
             label="Hệ số hạn mức"
             value={`× ${nf2.format(rq.mult)}`}
-            hint={loosened ? "Nới +15% trần — INFO alert" : rq.mult <= 0.75 ? "Siết mạnh (vol cao)" : "Siết vừa"}
+            hint={loosened ? "Nới +15% trần — INFO alert" : rq.mult <= 0.75 ? "Siết mạnh (vol/learning)" : "Siết vừa"}
             tone={loosened ? "text-emerald-600 dark:text-emerald-400" : rq.mult <= 0.75 ? "text-rose-600 dark:text-rose-400" : undefined}
           />
           <QuantStat
@@ -947,7 +947,7 @@ function RiskQuantCard({ riskQuant }: { riskQuant: RiskQuantView }) {
           <QuantStat
             label="VaR95 5 phiên"
             value={pctRaw(rq.var95Pct, 2)}
-            hint={rq.var95Vnd > 0 ? `≈ ${formatVnd(rq.var95Vnd)} ₫` : "rổ proxy"}
+            hint={rq.var95Vnd > 0 ? `≈ ${formatVnd(rq.var95Vnd)}` : "rổ proxy"}
           />
           <QuantStat
             label="CVaR95 5 phiên"

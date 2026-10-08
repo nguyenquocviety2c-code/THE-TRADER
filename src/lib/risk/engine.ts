@@ -51,6 +51,7 @@ import {
   computeCorrelation,
   type ConcentrationResult,
   type CorrelationResult,
+  type DatedReturn,
 } from "@/lib/risk/concentration";
 import {
   trainBreachLogit,
@@ -149,6 +150,22 @@ export async function resetRiskQuantLimits(): Promise<void> {
       after: JSON.stringify(DEFAULT_LIMITS),
     },
   });
+}
+
+/**
+ * Fixbug #52-F5 — trạng thái 4 giới hạn CRB-7 cho UI Cài đặt (GET
+ * /api/settings): posterior Beta + hệ số siết một chiều từng giới hạn.
+ */
+export async function getRiskQuantLimitsStatus(): Promise<
+  Record<"sector" | "position" | "dd" | "dailyLoss", LimitStatus>
+> {
+  const limits = await getRiskQuantLimits();
+  return {
+    sector: { ...limits.sector, posteriorMean: posteriorMean(limits.sector), mult: tighteningMult(limits.sector) },
+    position: { ...limits.position, posteriorMean: posteriorMean(limits.position), mult: tighteningMult(limits.position) },
+    dd: { ...limits.dd, posteriorMean: posteriorMean(limits.dd), mult: tighteningMult(limits.dd) },
+    dailyLoss: { ...limits.dailyLoss, posteriorMean: posteriorMean(limits.dailyLoss), mult: tighteningMult(limits.dailyLoss) },
+  };
 }
 
 /** posteriorMean = (α+1)/(α+β+2) — cùng pattern bandit.ts. */
@@ -297,10 +314,17 @@ function basketFeatureAt(
   rsi: (number | null)[]
 ): number[] | null {
   if (t < 60 || t >= basketCloses.length) return null;
+  // Fixbug #52-F7: hệ đánh dấu lệch 1 — sigmaSeries[i] là σ sau return
+  // closes[i]→closes[i+1] (biết tới close i+1). Tính năng tại close t phải
+  // dùng sigmaSeries[t−1] (biết tới close t): (a) không lookahead return
+  // t→t+1 vốn nằm TRONG cửa sổ nhãn; (b) serving t = lastIndex tránh
+  // sigmaSeries[t] = undefined → NaN → pBreach null dù AUC đạt cổng (bug
+  // ngủ chỉ tỉnh khi F6 làm rổ ổn định đưa AUC 62,6% ≥ 55% lần đầu).
+  const sigIdx = t - 1; // hợp lệ vì t ≥ 60
   // x1 volZ = (σ20 − volRef250)/volRef250 — volRef = median σ 250 phiên đến t
-  const refWin = sigmaSeries.subarray(Math.max(0, t - 249), t + 1);
+  const refWin = sigmaSeries.subarray(Math.max(0, sigIdx - 249), sigIdx + 1);
   const volRef = median(refWin);
-  const sigmaNow = sigmaSeries[t];
+  const sigmaNow = sigmaSeries[sigIdx];
   const x1 = volRef > 1e-12 ? (sigmaNow - volRef) / volRef : 0;
   // x2 rsiBucket (0..3)/3
   const r = rsi[t];
@@ -317,8 +341,8 @@ function basketFeatureAt(
   const x5 = dd / 0.15;
   // x8 volRatio20/60 = σ EWMA hiện tại / σ trung bình 60 phiên
   const mean60 =
-    sigmaSeries.subarray(Math.max(0, t - 59), t + 1).reduce((s, v) => s + v, 0) /
-    Math.min(60, t + 1);
+    sigmaSeries.subarray(Math.max(0, sigIdx - 59), sigIdx + 1).reduce((s, v) => s + v, 0) /
+    Math.min(60, sigIdx + 1);
   const x8 = mean60 > 1e-12 ? sigmaNow / mean60 - 1 : 0;
   return [x1, x2, x3, 0, x5, 0, 0, x8]; // x4/x6/x7 = trạng thái hiện tại (điền khi serving)
 }
@@ -436,72 +460,102 @@ export async function runRiskQuantEngine(): Promise<RiskQuantResult> {
           .findMany({
             where: { instrumentId: { in: instrumentIds }, date: { gte: posBarCutoff } },
             orderBy: { date: "asc" },
-            select: { instrumentId: true, close: true },
+            select: { instrumentId: true, date: true, close: true },
           })
           .catch(() => [])
       : [];
-  const closesById = new Map<string, number[]>();
-  for (const b of barRows) {
-    if (!(b.close > 0)) continue;
-    const list = closesById.get(b.instrumentId) ?? [];
-    list.push(b.close);
-    closesById.set(b.instrumentId, list);
+  // Return theo NGÀY từng mã (fixbug #52-F2 — căn mép theo NGÀY thay vì
+  // index trailing: mã đình quyền/thiếu bar không làm lệch chuỗi hợp nhất;
+  // return = close/prevClose − 1 của CHÍNH mã đó, date ISO từ bar EOD)
+  const retsById = new Map<string, DatedReturn[]>();
+  {
+    const prevCloseById = new Map<string, number>();
+    for (const b of barRows) {
+      if (!(b.close > 0)) continue;
+      const prev = prevCloseById.get(b.instrumentId);
+      if (prev != null && prev > 0) {
+        const list = retsById.get(b.instrumentId) ?? [];
+        list.push({ date: b.date.toISOString().slice(0, 10), ret: b.close / prev - 1 });
+        retsById.set(b.instrumentId, list);
+      }
+      prevCloseById.set(b.instrumentId, b.close);
+    }
   }
 
-  const usable = positions.filter((p) => (closesById.get(p.instrumentId)?.length ?? 0) >= MIN_REAL_SESSIONS);
+  // Mã đủ lịch sử: ≥ 59 return (≈ 60 close như chuẩn cũ MIN_REAL_SESSIONS)
+  const usable = positions.filter(
+    (p) => (retsById.get(p.instrumentId)?.length ?? 0) >= MIN_REAL_SESSIONS - 1
+  );
   const realOk = usable.length >= 1 && nav > 0;
 
   if (realOk) {
-    // Return từng vị thế (chuỗi thật hoặc thay proxy cùng ngành — §3 CRB-2)
-    const sectorRets = new Map<string, Float64Array[]>();
-    const rets: { symbol: string; weight: number; rets: Float64Array; proxied: boolean }[] = [];
+    // Tra cứu return theo ngày của từng mã usable + nhóm ngành cho proxy §3
+    const retLookup = new Map<string, Map<string, number>>();
     for (const p of usable) {
-      const closes = closesById.get(p.instrumentId)!;
-      const r = closeToReturns(closes);
-      sectorRets.set(p.sector, [...(sectorRets.get(p.sector) ?? []), r]);
-      rets.push({ symbol: p.symbol, weight: nav > 0 ? p.mv / nav : 0, rets: r, proxied: false });
+      const m = new Map<string, number>();
+      for (const dr of retsById.get(p.instrumentId) ?? []) m.set(dr.date, dr.ret);
+      retLookup.set(p.instrumentId, m);
     }
+    const sectorMembers = new Map<string, string[]>();
+    for (const p of usable) {
+      sectorMembers.set(p.sector, [...(sectorMembers.get(p.sector) ?? []), p.instrumentId]);
+    }
+    // Union NGÀY của mọi mã usable (tăng dần)
+    const allDates = new Set<string>();
+    for (const m of retLookup.values()) for (const d of m.keys()) allDates.add(d);
+    const dates = [...allDates].sort();
+    // Hợp nhất theo NGÀY (fixbug #52-F2): r_p(d) = Σᵢ wᵢ·rᵢ(d) / Σᵢ wᵢ —
+    // mã usable thiếu return tại d (đình quyền — giá giữ phiên trước) → ret 0;
+    // mã KHÔNG usable (thiếu lịch sử) → return rổ CÙNG NGÀNH tại d (§3 CRB-2)
+    const proxiedSymbols = new Set<string>();
+    const datedSeries: DatedReturn[] = [];
+    for (const d of dates) {
+      let wSum = 0;
+      let rSum = 0;
+      for (const p of positions) {
+        const w = nav > 0 ? p.mv / nav : 0;
+        if (w <= 0) continue;
+        const own = retLookup.get(p.instrumentId);
+        let ret: number | null;
+        if (own) {
+          ret = own.get(d) ?? 0; // đình quyền 1 phiên → giá giữ → ret 0
+        } else {
+          // Mã thiếu lịch sử → proxy ngành TẠI NGÀY d (trung bình mã cùng ngành)
+          const members = sectorMembers.get(p.sector) ?? [];
+          let s = 0;
+          let c = 0;
+          for (const mid of members) {
+            const r = retLookup.get(mid)?.get(d);
+            if (r != null) {
+              s += r;
+              c++;
+            }
+          }
+          ret = c > 0 ? s / c : null; // ngành trống tại d → bỏ mã khỏi ngày này
+          if (ret != null) proxiedSymbols.add(p.symbol);
+        }
+        if (ret == null) continue;
+        wSum += w;
+        rSum += w * ret;
+      }
+      if (wSum > 0) datedSeries.push({ date: d, ret: rSum / wSum });
+    }
+    symbolProxies = proxiedSymbols.size;
     for (const p of positions) {
       if (usable.includes(p)) continue;
-      // Mã thiếu lịch sử → return trung bình rổ CÙNG NGÀNH có dữ liệu (§3)
-      const sameSector = (sectorRets.get(p.sector) ?? []).filter((r) => r.length >= MIN_REAL_SESSIONS - 1);
-      if (sameSector.length > 0) {
-        const n = Math.min(...sameSector.map((r) => r.length));
-        const merged = new Float64Array(n);
-        for (let t = 0; t < n; t++) {
-          let s = 0;
-          for (const r of sameSector) s += r[r.length - n + t];
-          merged[t] = s / sameSector.length;
-        }
-        rets.push({ symbol: p.symbol, weight: nav > 0 ? p.mv / nav : 0, rets: merged, proxied: true });
-        symbolProxies++;
-      } else if (usable.length > 0) {
-        // Không có cùng ngành → thay bằng return danh mục còn lại (khiêm tốn)
-        rets.push({ symbol: p.symbol, weight: 0, rets: new Float64Array(0), proxied: true });
-        notes.push(`${p.symbol} thiếu lịch sử ≥ ${MIN_REAL_SESSIONS} phiên và không có ngành thay thế — bỏ khỏi chuỗi return (đã đếm proxy).`);
+      if (nav > 0 && p.mv / nav > 0 && !proxiedSymbols.has(p.symbol)) {
+        notes.push(
+          `${p.symbol} thiếu lịch sử ≥ ${MIN_REAL_SESSIONS} phiên và không có ngành thay thế — bỏ khỏi chuỗi return (đã đếm proxy).`
+        );
         symbolProxies++;
       }
     }
-    // Căn mép trailing + hợp nhất trọng số: r_p,t = Σ wᵢrᵢ,t / Σ wᵢ (hiện diện)
-    const lens = rets.filter((r) => r.rets.length > 0).map((r) => r.rets.length);
-    const jointN = lens.length > 0 ? Math.min(...lens) : 0;
-    if (jointN >= MIN_REAL_SESSIONS - 1) {
-      portReturns = new Float64Array(jointN);
-      for (let t = 0; t < jointN; t++) {
-        let wSum = 0;
-        let rSum = 0;
-        for (const r of rets) {
-          if (r.rets.length === 0 || r.weight <= 0) continue;
-          const v = r.rets[r.rets.length - jointN + t];
-          wSum += r.weight;
-          rSum += r.weight * v;
-        }
-        portReturns[t] = wSum > 0 ? rSum / wSum : 0;
-      }
+    if (datedSeries.length >= MIN_REAL_SESSIONS - 1) {
+      portReturns = Float64Array.from(datedSeries.map((x) => x.ret));
       if (symbolProxies > 0) notes.push(`${symbolProxies} mã dùng return proxy ngành (thiếu lịch sử — §3 CRB-2).`);
     } else {
       proxyMode = true;
-      notes.push(`Chuỗi chung chỉ ${jointN} phiên < ${MIN_REAL_SESSIONS} — chuyển rổ proxy top-10.`);
+      notes.push(`Chuỗi ngày hợp nhất chỉ ${datedSeries.length} phiên < ${MIN_REAL_SESSIONS} — chuyển rổ proxy top-10.`);
     }
   } else {
     proxyMode = true;
@@ -512,6 +566,7 @@ export async function runRiskQuantEngine(): Promise<RiskQuantResult> {
 
   // Rổ proxy (dùng cho proxy mode + CRB-6 train + CRB-8 fallback) —
   // sinceDays 800 ≈ 500 phiên (BASKET_WINDOW), không kéo full-history
+  // (đỡ 30k dòng bar full-history)
   const topSeries = await loadTopSeries(10, { sinceDays: 800 }).catch(() => []);
   const basketCloses = buildBasket(
     topSeries.map((s) => s.closes),
@@ -609,13 +664,13 @@ export async function runRiskQuantEngine(): Promise<RiskQuantResult> {
     for (const pct of bySector.values()) sectorPcts.push((pct / nav) * 100);
     for (const p of positions) positionPcts.push((p.mv / nav) * 100);
     conc = computeConcentration(sectorPcts, positionPcts);
-    // Tương quan: top-15 vị thế theo MV có ≥ 60 phiên lịch sử
+    // Tương quan: top-15 vị thế theo MV có ≥ 59 return theo ngày — mỗi cặp
+    // ghép PHIÊN CHUNG theo NGÀY trong concentration.ts (fixbug #52-F1)
     const top15 = [...positions]
       .sort((a, b) => b.mv - a.mv)
       .slice(0, 15)
-      .map((p) => closesById.get(p.instrumentId))
-      .filter((c): c is number[] => (c?.length ?? 0) >= 60)
-      .map((c) => closeToReturns(c));
+      .map((p) => retsById.get(p.instrumentId))
+      .filter((r): r is DatedReturn[] => (r?.length ?? 0) >= MIN_REAL_SESSIONS - 1);
     if (top15.length >= 2) corr = computeCorrelation(top15);
   }
 
@@ -661,7 +716,11 @@ export async function runRiskQuantEngine(): Promise<RiskQuantResult> {
         xHist[3] = Math.min(1, investedFraction); // x4 exposure
         xHist[5] = conc ? Math.min(1, conc.hhiSector) : 0; // x6 hhiSector
         xHist[6] = corr ? Math.max(-1, Math.min(1, corr.avgCorr)) : 0; // x7 avgCorr
-        pBreach = predictBreach(logit, xHist);
+        const p = predictBreach(logit, xHist);
+        // Phòng thủ NaN (fixbug #52-F7): giá trị không hữu hạn → null
+        // (trung thực "không biết") thay vì để JSON.stringify biến NaN thành
+        // null lặng lẽ ở mọi tầng snapshot/alert/evidence.
+        pBreach = Number.isFinite(p) ? p : null;
       }
     }
     if (!logit.served) {
@@ -1062,7 +1121,10 @@ export function toRiskQuantView(r: RiskQuantResult): RiskQuantViewData {
     proxyMode: r.proxyMode,
     volEwmaAnnPct: r.vol.sigmaAnnPct,
     volRatio: r.vol.volRatio,
-    mult: r.vol.mult,
+    // Fixbug #52-F4: hệ số hiển thị = hệ số HỢP NHẤT áp dụng cho vị thế
+    // (dyn/static = clamp(vol.mult × mult_ℓ)) — tile "Hệ số hạn mức" + hint
+    // "Nới" phản ánh đúng hạn động đã áp; chuyện biến động kể ở tile volRatio.
+    mult: r.staticMaxPositionPct > 0 ? r.dynMaxPositionPct / r.staticMaxPositionPct : r.vol.mult,
     dynMaxPositionPct: r.dynMaxPositionPct,
     dynMaxSectorPct: r.dynMaxSectorPct,
     staticMaxPositionPct: r.staticMaxPositionPct,

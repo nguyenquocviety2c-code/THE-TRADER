@@ -13,7 +13,9 @@ import {
   Loader2,
   Plug,
   RefreshCw,
+  RotateCcw,
   Save,
+  ShieldAlert,
   Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -83,6 +85,14 @@ function pctFmt(n: number | null | undefined): string {
   if (n == null || Number.isNaN(n)) return "—";
   return `${n.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%`;
 }
+
+/** Nhãn tiếng Việt cho 4 giới hạn CRB-7 (fixbug #52-F5). */
+const LIMIT_LABELS: Record<"sector" | "position" | "dd" | "dailyLoss", string> = {
+  sector: "P(vi phạm hạn ngành)",
+  position: "P(vi phạm hạn vị thế)",
+  dd: "P(vi phạm hạn drawdown)",
+  dailyLoss: "P(vi phạm hạn lỗ ngày)",
+};
 
 /* ─────────────────── Workspace ─────────────────── */
 
@@ -590,6 +600,37 @@ function MarketDataCard({ settings }: { settings: SettingsResponse }) {
 function LlmCard({ settings }: { settings: SettingsResponse }) {
   const llm = settings.llm;
   const risk = settings.risk;
+  const update = useUpdateSettings();
+  // Fixbug #52-F5 — nút reset CRB-7.4: xác nhận 2 bước nội tuyến (không cần
+  // AlertDialog) — bấm lần 1 đổi nhãn, lần 2 mới gọi PUT riskQuantReset.
+  const [confirmReset, setConfirmReset] = React.useState(false);
+  React.useEffect(() => {
+    if (!confirmReset) return;
+    const t = setTimeout(() => setConfirmReset(false), 6_000);
+    return () => clearTimeout(t);
+  }, [confirmReset]);
+
+  function handleResetLimits() {
+    if (!confirmReset) {
+      setConfirmReset(true);
+      return;
+    }
+    setConfirmReset(false);
+    update.mutate(
+      { riskQuantReset: true },
+      {
+        onSuccess: () => {
+          toast.success("Đã đặt lại học giới hạn CRB-7", {
+            description:
+              "Posterior quay về prior Beta(1,99) — thao tác ghi AuditLog RISK_QUANT_LIMITS_RESET.",
+          });
+        },
+        onError: (err: Error) => {
+          toast.error(err.message || "Không đặt lại được học giới hạn CRB-7.");
+        },
+      }
+    );
+  }
 
   return (
     <Card className="gap-4">
@@ -634,6 +675,54 @@ function LlmCard({ settings }: { settings: SettingsResponse }) {
           <div className="rounded-lg border bg-muted/30 p-3">
             <p className="text-[11px] text-muted-foreground">Drawdown tối đa</p>
             <p className="tabular-nums text-lg font-semibold">{pctFmt(risk.maxDrawdownPct)}</p>
+          </div>
+        </div>
+
+        {/* Fixbug #52-F5 — CRB-7 học giới hạn + nút reset (nghiệm thu CRB-7.4) */}
+        <div className="flex flex-col gap-3">
+          <div>
+            <p className="flex items-center gap-2 text-sm font-medium">
+              <ShieldAlert className="size-4 text-muted-foreground" aria-hidden="true" />
+              Ủy ban Kiểm soát Định lượng — học giới hạn (CRB-7)
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Beta-Bernoulli học P(vi phạm) từng giới hạn từ chu kỳ thật —
+              posterior cao → siết hạn mức động một chiều (sàn 0,75×). Việc nới
+              hạn mức chỉ đến từ biến động thấp (CRB-1), learning không bao giờ nới.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {(risk.riskQuantLimits ?? []).map((l) => (
+              <div key={l.key} className="rounded-lg border bg-muted/30 p-3">
+                <p className="text-[11px] text-muted-foreground">{LIMIT_LABELS[l.key]}</p>
+                <p className="tabular-nums text-lg font-semibold">
+                  {pctFmt(l.posteriorMean * 100)}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  siết ×{l.mult.toFixed(2).replace(".", ",")} ·{" "}
+                  {Math.max(0, l.alpha + l.beta - 100)} chu kỳ quan sát
+                </p>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant={confirmReset ? "destructive" : "outline"}
+              size="sm"
+              className="min-h-9 gap-2"
+              onClick={handleResetLimits}
+              disabled={update.isPending}
+            >
+              {update.isPending ? (
+                <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <RotateCcw className="size-4" aria-hidden="true" />
+              )}
+              {confirmReset ? "Xác nhận đặt lại?" : "Đặt lại về prior Beta(1,99)"}
+            </Button>
+            <span className="text-[11px] text-muted-foreground">
+              Xoá toàn bộ lịch sử quan sát vi phạm — ghi AuditLog minh bạch.
+            </span>
           </div>
         </div>
 

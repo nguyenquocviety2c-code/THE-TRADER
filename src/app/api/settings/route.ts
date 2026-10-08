@@ -12,7 +12,7 @@ import {
   saveVndirectSettings,
   setMarketDataMode,
 } from "@/lib/settings";
-import { resetRiskQuantLimits } from "@/lib/risk/engine";
+import { getRiskQuantLimitsStatus, resetRiskQuantLimits } from "@/lib/risk/engine";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -31,12 +31,14 @@ export const maxDuration = 30;
  */
 
 async function buildSettingsResponse(): Promise<SettingsResponse> {
-  const [vndirect, eff, lastAssessment] = await Promise.all([
+  const [vndirect, eff, lastAssessment, riskQuantLimits] = await Promise.all([
     getVndirectSettings(),
     getEffectiveMode(),
     db.marketAssessment
       .findFirst({ orderBy: { createdAt: "desc" }, select: { createdAt: true } })
       .catch(() => null),
+    // Fixbug #52-F5 — trạng thái Beta CRB-7 cho nút reset ở UI Cài đặt
+    getRiskQuantLimitsStatus().catch(() => null),
   ]);
 
   // Risk limits — config của risk-manager (A6, có đủ 3 hạn mức), exposure (A7)
@@ -73,6 +75,20 @@ async function buildSettingsResponse(): Promise<SettingsResponse> {
       ),
       maxPositionPct: num(riskManager.maxPositionPct ?? exposure.maxPositionPct, 25),
       maxDrawdownPct: num(riskManager.maxDrawdownPct, 15),
+      riskQuantLimits: (
+        [
+          ["sector", riskQuantLimits?.sector],
+          ["position", riskQuantLimits?.position],
+          ["dd", riskQuantLimits?.dd],
+          ["dailyLoss", riskQuantLimits?.dailyLoss],
+        ] as const
+      ).map(([key, s]) => ({
+        key,
+        alpha: s?.alpha ?? 1,
+        beta: s?.beta ?? 99,
+        posteriorMean: s?.posteriorMean ?? 0.01,
+        mult: s?.mult ?? 1,
+      })),
     },
     bayes: {
       enabled: true,

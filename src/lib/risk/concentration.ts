@@ -11,8 +11,10 @@
  *   HHI là tín hiệu SIÊT SỚM, VETO A7 giữ nguyên ranh giới hạn mức.
  *
  * CRB-5:
- *   corr(i,j) = Pearson(rᵢ, rⱼ) cửa sổ 60 phiên, chỉ top-15 vị thế theo MV
- *   (cap ma trận 15×15); cặp < 40 phiên chung → bỏ (đếm pairsProxy)
+ *   corr(i,j) = Pearson(rᵢ, rⱼ) trên ≤ 60 PHIÊN CHUNG theo NGÀY, chỉ top-15
+ *   vị thế theo MV (cap ma trận 15×15); cặp < 40 phiên chung → bỏ (đếm
+ *   pairsDropped) — "phiên chung" = NGÀY có return ở CẢ HAI mã (fixbug #52:
+ *   ghép theo index đầu sẽ lệch ngày khi mã đình quyền/thiếu phiên)
  *   avgCorr  = trung bình corr các cặp i<j
  *   N_eff_bets = N / (1 + (N−1)·avgCorr)
  *
@@ -96,15 +98,21 @@ export interface CorrelationResult {
   effBets: number;
   /** Số vị thế vào ma trận. */
   n: number;
-  /** Số cặp bị bỏ vì < 40 phiên chung. */
+  /** Số cặp bị bỏ vì < 40 phiên chung THEO NGÀY. */
   pairsDropped: number;
   /** true khi avgCorr > 0,7 HOẶC N_eff_bets < N/2. */
   breach: boolean;
   note: string;
 }
 
+/** Một điểm return gắn ngày ISO ("2026-10-07") — căn mép theo NGÀY. */
+export interface DatedReturn {
+  date: string;
+  ret: number;
+}
+
 /**
- * Pearson tương quan 2 chuỗi (cùng độ dài — đã căn theo phiên chung).
+ * Pearson tương quan 2 chuỗi CÙNG ĐỘ DÀI (đã căn theo phiên chung).
  */
 export function pearson(a: Float64Array, b: Float64Array): number {
   const n = Math.min(a.length, b.length);
@@ -132,33 +140,65 @@ export function pearson(a: Float64Array, b: Float64Array): number {
 }
 
 /**
- * CRB-5 — ma trận tương quan top-15 vị thế theo MV (cửa sổ 60 phiên).
- * returnsByPosition: chuỗi return theo THỜI GIAN TĂNG DẦN, cùng thứ tự phiên
- * thị trường (đã căn mép ở engine qua ngày bar). < 2 vị thế → skip (không
- * chia 0 — nghiệm thu CRB-5.4).
+ * Ghép ≤ maxN phiên CHUNG theo NGÀY của 2 chuỗi (đều tăng dần theo ngày)
+ * — hai con trỏ từ CUỐI, bỏ phiên lệch (mã đình quyền/thiếu bar), giữ thứ
+ * tự thời gian tăng dần ở output (Pearson bất biến với thứ tự nên giữ cho
+ * rõ nghĩa). Fixbug #52-F1: ghép theo index đầu sẽ ghép return các NGÀY
+ * KHÁC nhau khi 2 chuỗi dài khác nhau → tương quan sai định nghĩa.
+ */
+function commonSessions(
+  a: DatedReturn[],
+  b: DatedReturn[],
+  maxN: number
+): { ra: Float64Array; rb: Float64Array } {
+  let i = a.length - 1;
+  let j = b.length - 1;
+  const pa: number[] = [];
+  const pb: number[] = [];
+  while (i >= 0 && j >= 0 && pa.length < maxN) {
+    const da = a[i].date;
+    const db = b[j].date;
+    if (da === db) {
+      pa.push(a[i].ret);
+      pb.push(b[j].ret);
+      i--;
+      j--;
+    } else if (da > db) {
+      i--;
+    } else {
+      j--;
+    }
+  }
+  return {
+    ra: Float64Array.from(pa.reverse()),
+    rb: Float64Array.from(pb.reverse()),
+  };
+}
+
+/**
+ * CRB-5 — ma trận tương quan top-15 vị thế theo MV, cửa sổ ≤ 60 PHIÊN CHUNG
+ * THEO NGÀY của từng cặp (mỗi chuỗi {date, ret} tăng dần — engine xây từ
+ * bar EOD). Cặp < 40 phiên chung → bỏ (nghiệm thu CRB-5.4 — không chia 0,
+ * không bịa số trên phiên lệch ngày).
  */
 export function computeCorrelation(
-  returnsByPosition: Float64Array[]
+  returnsByPosition: DatedReturn[][]
 ): CorrelationResult {
   const n = returnsByPosition.length;
   if (n < 2) {
     return { avgCorr: 0, effBets: n, n, pairsDropped: 0, breach: false, note: "< 2 vị thế — bỏ qua đo tương quan" };
   }
-  // Cắt cửa sổ 60 phiên gần nhất mỗi chuỗi
-  const windowed = returnsByPosition.map((r) =>
-    r.subarray(Math.max(0, r.length - CORR_WINDOW))
-  );
   let sumCorr = 0;
   let pairCount = 0;
   let pairsDropped = 0;
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      const overlap = Math.min(windowed[i].length, windowed[j].length);
-      if (overlap < CORR_MIN_OVERLAP) {
+      const { ra, rb } = commonSessions(returnsByPosition[i], returnsByPosition[j], CORR_WINDOW);
+      if (ra.length < CORR_MIN_OVERLAP) {
         pairsDropped++;
         continue;
       }
-      sumCorr += pearson(windowed[i], windowed[j]);
+      sumCorr += pearson(ra, rb);
       pairCount++;
     }
   }
