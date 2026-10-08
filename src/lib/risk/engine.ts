@@ -450,7 +450,10 @@ export async function runRiskQuantEngine(): Promise<RiskQuantResult> {
   const navReturns = closeToReturns(navDaily);
 
   /* ── 2. Chuỗi return danh mục: THẬT hoặc PROXY ─────────────────────── */
-  let portReturns: Float64Array;
+  // Fixbug #59: khởi tạo rỗng — TS strict không suy luận được mọi nhánh gán
+  // (realOk∧đủ phiên → gán · proxyMode → gán rổ) đều chạy trước khi đọc;
+  // runtime an toàn nhưng compile-error che mất lỗi mới của phiên sau.
+  let portReturns: Float64Array = new Float64Array(0);
   let proxyMode = false;
   let symbolProxies = 0;
 

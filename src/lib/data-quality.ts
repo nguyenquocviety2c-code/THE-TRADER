@@ -94,6 +94,10 @@ export interface DqSummary {
   readinessReady: number;
   readinessTotal: number;
   readinessMissing: string[];
+  /** F-591-02: các query DB lỗi trong lần kiểm định này (rỗng = đọc đủ) —
+   *  khi không rỗng, mọi số liệu tổng hợp khác CHẠY TRÊN DỮ LIỆU RỖNG và
+   *  prompt phải nói rõ thay vì mô tả như "thị trường sạch". */
+  dbFail: string[];
 }
 
 /** JSON chuẩn lưu AgentRun.output của A9 mỗi chu kỳ (hợp đồng §3.2). */
@@ -268,27 +272,47 @@ function ictNow(): { date: string; minutes: number; tradingDay: boolean } {
 /**
  * Chạy toàn bộ 6 phép kiểm → DataQualityVerdict. Deterministic, đọc DB,
  * không ném lỗi ra ngoài (thiếu dữ liệu → kiểm đó PASS với ghi chú trung thực).
+ *
+ * Fixbug #59 F-591-02: TRƯỚC ĐÂY mọi query lỗi bị `.catch(() => [])` nuốt
+ * im lặng → DB chết hoàn toàn cũng cho verdict PASS (kiểm định viên mù khi
+ * chính mắt bị bịt). Giờ query lỗi được ghi vào `dbFail` → verdict SEVERE
+ * kèm phép kiểm nguồn mô tả rõ — prompt Wave B + Chủ tịch + RiskAlert đều
+ * nhận cờ đúng sự thật.
  */
 export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
   const asOf = new Date();
   const ict = ictNow();
   const thresholds = await getThresholds();
   const checks: DqCheck[] = [];
+  const dbFail: string[] = [];
+  /** Đánh dấu query lỗi (phân biệt "DB không đọc được" với "chưa có dữ liệu
+   *  hợp lệ") — fallback như cũ nhưng verdict sẽ lên SEVERE. */
+  const guard = <T>(p: Promise<T>, label: string, fallback: T): Promise<T> =>
+    p.catch((err) => {
+      dbFail.push(`${label} (${err instanceof Error ? err.message.slice(0, 60) : String(err).slice(0, 60)})`);
+      return fallback;
+    });
 
   /* ── Nạp dữ liệu nền (3 query song song) ─────────────────────────── */
   const [instruments, quoteRows, barMaxGroup] = await Promise.all([
-    db.instrument
-      .findMany({
+    guard(
+      db.instrument.findMany({
         where: { isActive: true },
         select: { id: true, symbol: true, market: true, type: true },
-      })
-      .catch(() => []),
-    db.quote
-      .findMany({ select: { instrumentId: true, tradedAt: true } })
-      .catch(() => []), // Quote update-in-place: 1 dòng/mã
-    db.bar
-      .groupBy({ by: ["instrumentId"], _max: { date: true } })
-      .catch(() => [] as { instrumentId: string; _max: { date: Date | null } }[]),
+      }),
+      "instrument",
+      [] as { id: string; symbol: string; market: string; type: string }[]
+    ),
+    guard(
+      db.quote.findMany({ select: { instrumentId: true, tradedAt: true } }),
+      "quote",
+      [] as { instrumentId: string; tradedAt: Date }[] // Quote update-in-place: 1 dòng/mã
+    ),
+    guard(
+      db.bar.groupBy({ by: ["instrumentId"], _max: { date: true } }),
+      "bar-max",
+      [] as { instrumentId: string; _max: { date: Date | null } }[]
+    ),
   ]);
 
   const byId = new Map(instruments.map((i) => [i.id, i]));
@@ -372,9 +396,19 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
   /* ── Nạp cửa sổ bar VN cho gap + outlier + split (1 query) ───────── */
   const vnIds = vnSymbols.map((i) => i.id);
   const outlierCutoff = new Date(Date.now() - OUTLIER_CALENDAR_DAYS * 86_400_000);
-  const windowBars = vnIds.length
-    ? await db.bar
-        .findMany({
+  type WindowBarRow = {
+    instrumentId: string;
+    date: Date;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+    value: bigint | null;
+  };
+  const windowBars: WindowBarRow[] = vnIds.length
+    ? await guard(
+        db.bar.findMany({
           where: { instrumentId: { in: vnIds }, date: { gte: outlierCutoff } },
           orderBy: [{ instrumentId: "asc" }, { date: "asc" }],
           select: {
@@ -387,8 +421,10 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
             volume: true,
             value: true,
           },
-        })
-        .catch(() => [])
+        }),
+        "bar-window",
+        [] as WindowBarRow[]
+      )
     : [];
   const barsByInstrument = new Map<string, typeof windowBars>();
   for (const b of windowBars) {
@@ -568,7 +604,11 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
       fundamentals: ["real"],
       trading: ["paper"],
     };
-    const rows = await db.dataSourceStatus.findMany().catch(() => []);
+    const rows = await guard(
+      db.dataSourceStatus.findMany(),
+      "dataSourceStatus",
+      [] as { key: string; mode: string; lastError: string | null }[]
+    );
     const byKey = new Map(rows.map((r) => [r.key, r]));
     const mismatched: string[] = [];
     let eodFail = false;
@@ -606,13 +646,17 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
   {
     const basket = await topByAdtv(10, { market: "HOSE", type: "STOCK" }).catch(() => []);
     readinessTotal = basket.length;
+    // Fixbug #59 F-591-03: take 65 → 70 — cùng độ sâu nạp với S2
+    // (runFeatureStore) để "cùng thư viện → CÙNG SỐ" là đúng từng chữ: chuỗi
+    // 65 bar và 70 bar cho RSI14/MACD khác nhau ở chữ số cuối (Wilder/EMA
+    // đệ quy chưa hội tụ tuyệt đối) → A9 và S2 có thể khác nhau ở biên ready.
     const barLists = await Promise.all(
       basket.map((t) =>
         db.bar
           .findMany({
             where: { instrumentId: t.id },
             orderBy: { date: "desc" },
-            take: 65,
+            take: 70,
             select: { close: true, volume: true },
           })
           .then((rows) => rows.filter((b) => b.close > 0).reverse())
@@ -642,6 +686,15 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
     });
   }
 
+  /* ── F-591-02: DB lỗi → verdict SEVERE (không bao giờ PASS khi mắt mù) ── */
+  if (dbFail.length > 0) {
+    checks.unshift({
+      kind: "source",
+      level: "SEVERE",
+      detail: `A9 KHÔNG đọc được DB — ${dbFail.length} query lỗi (${dbFail.slice(0, 3).join(" · ")}) — các phép kiểm còn lại chạy trên dữ liệu rỗng KHÔNG đáng tin; cần chạy lại chu kỳ khi DB hồi phục.`,
+    });
+  }
+
   /* ── Tổng hợp verdict ───────────────────────────────────────────── */
   const level: DqLevel = checks.some((c) => c.level === "SEVERE")
     ? "SEVERE"
@@ -668,6 +721,7 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
       readinessReady,
       readinessTotal,
       readinessMissing,
+      dbFail,
     },
   };
 }
@@ -688,6 +742,17 @@ export function dataQualityPromptBlock(v: DataQualityVerdict): string {
   const s = v.summary;
   const levelVi =
     v.level === "SEVERE" ? "SEVERE — chất lượng dữ liệu xấu nghiêm trọng" : "DEGRADED — có giới hạn cần khai báo";
+  // F-591-02 (hoàn chỉnh): khi DB đọc lỗi, summary chạy trên dữ liệu RỖNG —
+  // các dòng mô tả chuẩn sẽ nói sai ("mọi mã đều có dữ liệu · tươi đúng lịch
+  // phiên") → thay bằng khối ngắn nói thẳng A9 đang mù.
+  if (s.dbFail && s.dbFail.length > 0) {
+    return [
+      `TÍNH TRẠNG DỮ LIỆU (A9 kiểm định ${new Date(v.asOf).toISOString().slice(0, 16).replace("T", " ")} UTC — ${levelVi}):`,
+      `- A9 KHÔNG đọc được DB — ${s.dbFail.length} query lỗi (${s.dbFail.slice(0, 3).join(" · ")}).`,
+      `- Số liệu tổng hợp chu kỳ này CHẠY TRÊN DỮ LIỆU RỖNG do lỗi đọc — "0 mã thiếu" KHÔNG có nghĩa thị trường sạch.`,
+      "→ KHÔNG trích dẫn bất kỳ số liệu định lượng nào của chu kỳ này trong luận cứ; khai báo confound nghiêm trọng (kiểm định viên mù).",
+    ].join("\n");
+  }
   const lines = [
     `TÍNH TRẠNG DỮ LIỆU (A9 kiểm định ${new Date(v.asOf).toISOString().slice(0, 16).replace("T", " ")} UTC — ${levelVi}):`,
     `- Báo giá: ${s.vnQuoted}/${s.vnActive} mã VN có dòng quote${s.missingQuote > 0 ? ` · ${s.missingQuote} mã thiếu quote (US/HK)` : ""}${s.vnStaleInSession > 0 ? ` · ${s.vnStaleInSession} mã cũ bất thường trong phiên` : " · tươi đúng lịch phiên"}`,

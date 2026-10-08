@@ -616,9 +616,12 @@ export async function POST() {
         ? (waveBServiceResults[mlForecastIdx]?.output as { ensemble?: { direction?: unknown } })
             ?.ensemble?.direction
         : undefined;
-    const mlForecastDirection =
+    // Fixbug #59: annotate union tường minh — TS không tự narrow `unknown`
+    // qua chuỗi ===  (để suy luận rộng thành string làm kellyVotes sai kiểu
+    // CouncilVote; runtime đã validate đủ — cast sau kiểm tra là an toàn).
+    const mlForecastDirection: "UP" | "DOWN" | "FLAT" | null =
       mlForecastDirRaw === "UP" || mlForecastDirRaw === "DOWN" || mlForecastDirRaw === "FLAT"
-        ? mlForecastDirRaw
+        ? (mlForecastDirRaw as "UP" | "DOWN" | "FLAT")
         : null;
     let riskQuant: RiskQuantResult | null = null;
     try {

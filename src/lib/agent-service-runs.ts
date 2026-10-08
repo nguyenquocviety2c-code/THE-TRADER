@@ -296,9 +296,15 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
     }),
     db.riskAlert.count({ where: { acknowledgedAt: null } }),
     db.agentRun.count({ where: { taskStatus: "FAILED", startedAt: { gte: since24h } } }),
+    // Fixbug #59 (P0-7 trung thực): chu kỳ truyền ctx nhưng verdict NULL
+    // nghĩa là A9 chu kỳ này LỖI CHẠY — KHÔNG được fallback đọc verdict cũ
+    // (≤30') mà gán nhãn "chu kỳ này" (nói sai sự thật); chỉ single-run
+    // (không ctx) mới đọc verdict A9 gần nhất làm đầu vào.
     ctx?.dataQuality != null
       ? Promise.resolve(ctx.dataQuality)
-      : latestA9Verdict(),
+      : ctx != null
+        ? Promise.resolve(null)
+        : latestA9Verdict(),
   ]);
   const signalLines = activeSignals.map(
     (s) => `${s.instrument.symbol} ${s.direction} (${s.score}/100)`
@@ -318,6 +324,10 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
     dqParts.push(
       `Chất lượng dữ liệu (A9 chu kỳ này): ${dqVerdict.level}${top2.length > 0 ? ` — ${top2.join(" · ")}` : " — 6 phép kiểm đều đạt"}`
     );
+  } else if (ctx != null) {
+    dqParts.push(
+      "Chất lượng dữ liệu: A9 chu kỳ này KHÔNG hoàn tất (agent lỗi) — coi chu kỳ này là CHƯA KIỂM ĐỊNH"
+    );
   }
 
   const parts = [
@@ -331,7 +341,7 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
   return {
     content: parts.join(" · ") + (needAttention ? " Cần trader xem xét." : " Không có mục cần xử lý gấp."),
     reasoning:
-      "Đếm Signal ACTIVE + RiskAlert chưa ack + AgentRun FAILED 24h + đọc verdict A9 cùng chu kỳ (P0-7 — ctx hoặc AgentRun ≤ 30').",
+      "Đếm Signal ACTIVE + RiskAlert chưa ack + AgentRun FAILED 24h + verdict A9 cùng chu kỳ (P0-7 — ctx chu kỳ: NULL nghĩa là A9 lỗi chạy, khai báo thẳng; single-run: AgentRun A9 ≤ 30').",
     sentiment: dqVerdict?.level === "SEVERE" || needAttention ? "neutral" : "bullish",
     output: {
       activeSignals: activeSignals.length,

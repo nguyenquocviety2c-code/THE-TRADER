@@ -8,7 +8,11 @@
 // LƯU Ý env: shell sandbox có thể nhiễm DATABASE_URL cũ (sqlite) — file này
 // tự đọc .env của project lúc nạp và TRUYỀN XUỐNG đè biến nhiễm, đảm bảo app
 // luôn dùng đúng database (Supabase postgres) bất kể môi trường shell.
+//
+// File CJS theo mặc định PM2 (package.json không khai báo "type": "module")
+// — tắt rule require của eslint cho đúng ngữ cảnh công cụ.
 
+/* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require("fs");
 
 function parseEnv(path) {

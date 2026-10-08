@@ -175,7 +175,9 @@ export interface TopAdtvOptions {
   type?: InstrumentType;
 }
 
-/** Hệ số chuyển ngày lịch → phiên (45 phiên ≈ 75 ngày lịch, +biên độ lễ). */
+/** Hệ số chuyển ngày lịch → phiên — cửa sổ NẠP (đảm bảo chứa ≥ 45 phiên
+ *  kể cả lễ/T7-CN: 45 phiên ≈ 63 ngày lịch + biên độ ≈ 77 ngày); xếp hạng
+ *  chỉ dùng 45 bar CUỐI của từng mã. */
 const ADTV_CALENDAR_DAYS = Math.ceil(ADTV_SESSIONS * 1.7);
 
 /**
@@ -205,29 +207,33 @@ export async function topByAdtv(
       select: { instrumentId: true, close: true, volume: true, value: true },
     })
     .catch(() => []);
-  const windowById = new Map<string, { sum: number; count: number }>();
+  // Fixbug #59 F-591-01: đúng hợp đồng "ADTV 45 PHIẦN" — mean của 45 bar
+  // CUỐI mỗi mã (trước đây mean toàn cửa sổ 77 ngày ≈ 53 phiên — đo thực
+  // 08-10 làm rổ lệch vị trí 10: PNJ thay VCB, và mâu thuẫn tail-45 của
+  // phép kiểm split trong data-quality.ts).
+  const windowById = new Map<string, number[]>();
   for (const b of bars) {
     if (!(b.close > 0)) continue;
     // value = close × volume (VND); fallback tính lại khi cột null — cùng đơn vị
     const value = b.value != null ? Number(b.value) : b.close * b.volume;
     if (!(value > 0)) continue;
-    const entry = windowById.get(b.instrumentId) ?? { sum: 0, count: 0 };
-    entry.sum += value;
-    entry.count++;
-    windowById.set(b.instrumentId, entry);
+    const arr = windowById.get(b.instrumentId) ?? [];
+    arr.push(value);
+    windowById.set(b.instrumentId, arr);
   }
   return instruments
     .map((i) => {
-      const w = windowById.get(i.id);
-      if (!w || w.count < ADTV_MIN_BARS) return null;
+      const vals = windowById.get(i.id);
+      if (!vals || vals.length < ADTV_MIN_BARS) return null;
+      const tail = vals.slice(-ADTV_SESSIONS); // 45 phiên EOD gần nhất
       return {
         id: i.id,
         symbol: i.symbol,
         market: i.market,
         type: i.type,
         sector: i.sector,
-        adtv: w.sum / w.count,
-        sessions: w.count,
+        adtv: tail.reduce((s, v) => s + v, 0) / tail.length,
+        sessions: tail.length,
       };
     })
     .filter((r): r is TopAdtvSymbol => r !== null)
