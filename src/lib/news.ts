@@ -77,24 +77,29 @@ function emptyReliability(): FeedReliability {
   };
 }
 
-/** Đọc reliability tích luỹ hiện tại từ meta nguồn "news". */
+/** Đọc reliability tích luỹ hiện tại từ meta nguồn "news".
+ * F-63C-06/#63 — lỗi DB NÉM lên (không trả {} câm): đường ghi phía sau
+ * merge từ zero rồi markSource thay meta wholesale → mất trắng cumulative
+ * chỉ vì một lần đọc timeout. Caller (ingestNews) cũng đang ném — route/con
+ * engine tự xử lý trung thực; JSON hỏng mới coi như "chưa có" ({}). */
 async function readReliability(): Promise<FeedReliabilityMap> {
+  const row = await db.dataSourceStatus.findUnique({
+    where: { key: "news" },
+    select: { meta: true },
+  });
+  if (!row?.meta) return {};
+  let parsed: { reliability?: FeedReliabilityMap };
   try {
-    const row = await db.dataSourceStatus.findUnique({
-      where: { key: "news" },
-      select: { meta: true },
-    });
-    if (!row?.meta) return {};
-    const parsed = JSON.parse(row.meta) as { reliability?: FeedReliabilityMap };
-    if (!parsed.reliability || typeof parsed.reliability !== "object") return {};
-    const out: FeedReliabilityMap = {};
-    for (const [k, v] of Object.entries(parsed.reliability)) {
-      if (v && typeof v === "object") out[k] = { ...emptyReliability(), ...v };
-    }
-    return out;
+    parsed = JSON.parse(row.meta) as { reliability?: FeedReliabilityMap };
   } catch {
-    return {};
+    return {}; // meta hỏng JSON — bắt đầu lại (không phải lỗi DB)
   }
+  if (!parsed.reliability || typeof parsed.reliability !== "object") return {};
+  const out: FeedReliabilityMap = {};
+  for (const [k, v] of Object.entries(parsed.reliability)) {
+    if (v && typeof v === "object") out[k] = { ...emptyReliability(), ...v };
+  }
+  return out;
 }
 
 export interface NewsIngestResult {
@@ -327,14 +332,17 @@ export async function ingestNews(): Promise<NewsIngestResult> {
         updated: feedUpdated,
       });
     } catch (err) {
+      // F-63C-07/#63 — feed lỗi giữa chừng: đếm cục bộ chưa hoàn chỉnh →
+      // reset skipped/duplicates = 0 giữ bất biến per-run parsed+skipped===items
+      // (items:0 + skipped:N cũ làm vỡ C1.1 và cumulative duplicates > itemsSeen)
       feeds.push({
         name: feed.name,
         ok: false,
         items: 0,
         error: err instanceof Error ? err.message : "Lỗi không xác định",
         parsed: 0,
-        skipped,
-        duplicates,
+        skipped: 0,
+        duplicates: 0,
         added: 0,
         updated: 0,
       });

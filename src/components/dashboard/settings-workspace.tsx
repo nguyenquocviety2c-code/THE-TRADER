@@ -974,24 +974,24 @@ function NotifyCard({ settings }: { settings: SettingsResponse }) {
         </div>
 
         {outbox.length > 0 && (
-          <div className="max-h-40 overflow-y-auto custom-scrollbar rounded-lg border border-border/60">
+          <div className="max-h-40 overflow-y-auto overflow-x-auto custom-scrollbar rounded-lg border border-border/60">
             <table className="w-full text-left text-xs">
               <thead className="sticky top-0 bg-muted/60 text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-2 font-medium">Kênh</th>
-                  <th className="px-3 py-2 font-medium">Đích</th>
-                  <th className="px-3 py-2 font-medium">Trạng thái</th>
-                  <th className="px-3 py-2 font-medium">Thử</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">Kênh</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">Đích</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">Trạng thái</th>
+                  <th className="whitespace-nowrap px-3 py-2 font-medium">Thử</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50">
                 {outbox.slice(0, 12).map((row) => (
                   <tr key={row.id} className="items-center">
-                    <td className="px-3 py-1.5 font-medium">{row.channel}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 font-medium">{row.channel}</td>
                     <td className="max-w-40 truncate px-3 py-1.5 text-muted-foreground" title={row.target}>
                       {row.target}
                     </td>
-                    <td className="px-3 py-1.5">
+                    <td className="whitespace-nowrap px-3 py-1.5">
                       {row.status === "SENT" ? (
                         <Badge variant="outline" className="border-up/40 px-1.5 py-0 text-[10px] text-up">
                           SENT
@@ -1010,7 +1010,7 @@ function NotifyCard({ settings }: { settings: SettingsResponse }) {
                         </Badge>
                       )}
                     </td>
-                    <td className="px-3 py-1.5 text-muted-foreground">{row.attempts}×</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-muted-foreground">{row.attempts}×</td>
                   </tr>
                 ))}
               </tbody>

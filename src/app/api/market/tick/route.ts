@@ -449,6 +449,7 @@ async function runTick(): Promise<NextResponse> {
     const todayIso = vnDateIso(now);
     let ticked = 0;
     let rolled = 0;
+    let barsWritten = 0; // F-63A-04/#63 — đếm bar THẬT được ghi (chỉ mode simulated)
     let realtimeUsed = 0; // số mã lấy giá THẬT từ finfo trong tick này
     const lastByInstrument = new Map<string, number>();
 
@@ -527,6 +528,7 @@ async function runTick(): Promise<NextResponse> {
               value: BigInt(Math.max(0, q.volume)) * BigInt(q.last),
             },
           });
+          barsWritten++;
         }
         // Phiên mới: refPrice = close phiên trước, dải ±7% mới, volume về 0
         ref = q.last;
@@ -534,9 +536,6 @@ async function runTick(): Promise<NextResponse> {
         floor = round100(ref * 0.93);
         volumeBase = 0;
         rolled++;
-        // P2-3/#62 — mode simulated vừa ghi Bar EOD → ADTV có thể đổi: xoá
-        // cache rổ thanh khoản (mode real: bar do eod-sync lo — đã invalidate)
-        invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
       } else {
         ref = q.refPrice ?? q.last;
         floor = q.floorPrice ?? round100(ref * 0.93);
@@ -612,6 +611,15 @@ async function runTick(): Promise<NextResponse> {
       });
       lastByInstrument.set(inst.id, next);
       ticked++;
+    }
+
+    // P2-3/#62 + F-63A-04/#63 — dồn MỘT invalidation duy nhất sau vòng lặp:
+    // chỉ khi tick THẬT SỰ ghi Bar EOD (mode simulated + ngày giao dịch).
+    // Trước fix: invalidate nằm trong vòng lặp mỗi mã (bắn ~76 lệnh
+    // deleteMany WAN fire-and-forget kể cả mode real không ghi bar nào —
+    // mở cửa sổ race F-63A-01 vì response về trước khi L2 sạch).
+    if (barsWritten > 0) {
+      await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
     }
 
     // ── F-105: sang phiên mới → chốt lại equity của mọi tài khoản còn hoạt động ──

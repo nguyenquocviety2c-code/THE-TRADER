@@ -97,9 +97,13 @@ const WEBHOOK_TIMEOUT_MS = 6_000;
 const PENDING_NOTE =
   "pending-egress — sandbox/mạng chặn đầu ra, giữ hàng đợi tự retry (mỗi chu kỳ S1 + POST /api/notify)";
 
-/** Ghi nhận 1 lần thử gửi vào row outbox (tạo mới hoặc cập nhật). */
+/** Ghi nhận 1 lần thử gửi vào row outbox (tạo mới hoặc cập nhật).
+ * F-63B-04/#63: attempts tăng NGUYÊN TỐ ({increment: 1} — không đọc-trước-ghi
+ * dễ mất đếm khi dispatch + retry chồng nhau) + optimistic-guard
+ * `status: "PENDING_EGRESS"` (sender khác đã ghi SENT thì không ghi đè
+ * xuống — chống gửi kép/downgrade). */
 async function recordAttempt(
-  row: { id: string; attempts: number } | null,
+  row: { id: string } | null,
   channel: "WEBHOOK" | "EMAIL",
   target: string,
   subject: string,
@@ -109,11 +113,11 @@ async function recordAttempt(
 ): Promise<void> {
   const now = new Date();
   if (row) {
-    await db.notificationOutbox.update({
-      where: { id: row.id },
+    await db.notificationOutbox.updateMany({
+      where: { id: row.id, status: "PENDING_EGRESS" },
       data: {
         status,
-        attempts: row.attempts + 1,
+        attempts: { increment: 1 },
         lastAttemptAt: now,
         lastError: error,
         sentAt: status === "SENT" ? now : null,
@@ -182,6 +186,12 @@ export async function dispatchDigest(input: DigestInput): Promise<{
       results: [
         {
           channel: "WEBHOOK",
+          status: "SKIPPED",
+          note: "kênh thông báo ĐANG TẮT (AppSetting notify.enabled=false)",
+        },
+        // F-63B-10/#63 — đối xứng 2 kênh (trước fix chỉ có dòng WEBHOOK)
+        {
+          channel: "EMAIL",
           status: "SKIPPED",
           note: "kênh thông báo ĐANG TẮT (AppSetting notify.enabled=false)",
         },
@@ -280,25 +290,42 @@ export interface RetryOutcome {
 }
 
 /**
- * Quét tối đa `limit` row PENDING_EGRESS cũ nhất, thử gửi lại WEBHOOK
- * (EMAIL giữ pending — chờ egress/SMTP). Piggyback mỗi chu kỳ S1 và
+ * Quét tối đa `limit` row PENDING_EGRESS WEBHOOK cũ nhất, thử gửi lại
+ * (EMAIL giữ pending — sandbox/máy chủ chưa có SMTP; số phận backlog EMAIL
+ * chờ quyết định user, xem fixbug #63 F-63B-01). Piggyback mỗi chu kỳ S1 và
  * POST /api/notify (nút "Thử gửi lại" trong UI Cài đặt).
+ *
+ * F-63B-01/#63: filter `channel: "WEBHOOK"` đặt TRONG where — trước fix
+ * take-N-oldest-toàn-cục rồi mới skip EMAIL, nên backlog EMAIL dead-letter
+ * (không có đường gửi nào) dần chiếm hết slot oldest → webhook starve,
+ * mâu thuẫn lời hứa blueprint "máy chủ có egress → tự phát hết backlog".
+ *
+ * F-63B-11/#63: prune piggyback SENT/FAILED cũ hơn 30 ngày (best-effort —
+ * PENDING_EGRESS KHÔNG prune: backlog chờ egress phải sống qua restart).
+ *
+ * F-63B-09/#63: DB lỗi ở đây NÉM lên (POST route → 500 trung thực; S1
+ * piggyback đã .catch(() => null) tại call-site — không chặn chu kỳ).
  */
 export async function retryPendingOutbox(limit = 5): Promise<RetryOutcome> {
-  const rows = await db.notificationOutbox
-    .findMany({
-      where: { status: "PENDING_EGRESS" },
-      orderBy: { createdAt: "asc" },
-      take: Math.max(1, Math.min(50, limit)),
+  await db.notificationOutbox
+    .deleteMany({
+      where: {
+        status: { in: ["SENT", "FAILED"] },
+        createdAt: { lt: new Date(Date.now() - 30 * 86_400_000) },
+      },
     })
-    .catch(() => []);
+    .catch((err) => console.error("[notify] prune outbox (không chặn retry):", err));
+  const rows = await db.notificationOutbox.findMany({
+    where: { status: "PENDING_EGRESS", channel: "WEBHOOK" },
+    orderBy: { createdAt: "asc" },
+    take: Math.max(1, Math.min(50, limit)),
+  });
   let sent = 0;
   const errors: string[] = [];
   for (const row of rows) {
-    if (row.channel !== "WEBHOOK") continue; // EMAIL chờ egress/SMTP
     const r = await attemptWebhook(row.target, row.payload);
     await recordAttempt(
-      { id: row.id, attempts: row.attempts },
+      { id: row.id },
       "WEBHOOK",
       row.target,
       row.subject ?? "",
@@ -310,9 +337,9 @@ export async function retryPendingOutbox(limit = 5): Promise<RetryOutcome> {
     else if (r.error) errors.push(`${row.target.slice(0, 40)}: ${r.error.slice(0, 80)}`);
   }
   return {
-    retried: rows.filter((r) => r.channel === "WEBHOOK").length,
+    retried: rows.length,
     sent,
-    stillPending: await countPending().catch(() => 0),
+    stillPending: await countPending(),
     errors: errors.slice(0, 3),
   };
 }
@@ -333,9 +360,12 @@ export interface OutboxRowView {
 }
 
 export async function listOutbox(limit = 20): Promise<OutboxRowView[]> {
-  const rows = await db.notificationOutbox
-    .findMany({ orderBy: { createdAt: "desc" }, take: Math.max(1, Math.min(100, limit)) })
-    .catch(() => []);
+  // F-63B-09/#63 — KHÔNG nuốt lỗi DB: GET /api/notify phải 500 trung thực
+  // thay vì trả [] + pendingCount 0 giả vờ "không có bản tin" khi DB chết.
+  const rows = await db.notificationOutbox.findMany({
+    orderBy: { createdAt: "desc" },
+    take: Math.max(1, Math.min(100, limit)),
+  });
   return rows.map((r) => ({
     id: r.id,
     channel: r.channel,
@@ -350,18 +380,21 @@ export async function listOutbox(limit = 20): Promise<OutboxRowView[]> {
   }));
 }
 
-/** Trạng thái tóm tắt cho UI Cài đặt (kèm bản tin SENT cuối). */
+/** Trạng thái tóm tắt cho UI Cài đặt (kèm bản tin SENT cuối).
+ * F-63B-09/#63 — lỗi DB NÉM lên (route catch → 500) thay vì báo 0 giả. */
 export async function notifyStatus(): Promise<{
   pendingCount: number;
   sentCount: number;
   lastSentAt: string | null;
 }> {
   const [pendingCount, sentCount, lastSent] = await Promise.all([
-    db.notificationOutbox.count({ where: { status: "PENDING_EGRESS" } }).catch(() => 0),
-    db.notificationOutbox.count({ where: { status: "SENT" } }).catch(() => 0),
-    db.notificationOutbox
-      .findFirst({ where: { status: "SENT" }, orderBy: { sentAt: "desc" }, select: { sentAt: true } })
-      .catch(() => null),
+    db.notificationOutbox.count({ where: { status: "PENDING_EGRESS" } }),
+    db.notificationOutbox.count({ where: { status: "SENT" } }),
+    db.notificationOutbox.findFirst({
+      where: { status: "SENT" },
+      orderBy: { sentAt: "desc" },
+      select: { sentAt: true },
+    }),
   ]);
   return {
     pendingCount,

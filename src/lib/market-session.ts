@@ -33,31 +33,34 @@ export interface VnHoliday {
  * cập nhật khi Nhà nước/Sở công bố chính thức.
  */
 export const VN_HOLIDAYS_OFFICIAL: VnHoliday[] = [
-  // 2026
+  // 2026 (fixbug #63 F-63C-01/F-63C-02 — đối chiếu công bố HOSE/HNX: Tết nghỉ
+  // 5 phiên 16-20/02 (29 Tết → mùng 4); Quốc khánh nghỉ 31/8→2/9 do 2/9 rơi
+  // thứ Tư, sở hoán đổi ngày làm việc T2 31/8, KHÔNG có phiên bù T7 22/8)
   { date: "2026-01-01", name: "Tết Dương lịch" },
-  { date: "2026-02-16", name: "Tết Bính Ngọ (mùng 1)" },
-  { date: "2026-02-17", name: "Tết Bính Ngọ (mùng 2)" },
-  { date: "2026-02-18", name: "Tết Bính Ngọ (mùng 3)" },
-  { date: "2026-02-19", name: "Tết Bính Ngọ (mùng 4)" },
-  { date: "2026-02-20", name: "Tết Bính Ngọ (nghỉ bù)" },
+  { date: "2026-02-16", name: "Tết Bính Ngọ (29 Tết)" },
+  { date: "2026-02-17", name: "Tết Bính Ngọ (mùng 1)" },
+  { date: "2026-02-18", name: "Tết Bính Ngọ (mùng 2)" },
+  { date: "2026-02-19", name: "Tết Bính Ngọ (mùng 3)" },
+  { date: "2026-02-20", name: "Tết Bính Ngọ (mùng 4)" },
   // F-110 (audit): Giỗ Tổ 10/3 âm = CN 26/04/2026 → thị trường nghỉ bù thứ Hai 27/04
   { date: "2026-04-27", name: "Giỗ Tổ Hùng Vương (nghỉ bù)" },
   { date: "2026-04-30", name: "Ngày Giải phóng miền Nam" },
   { date: "2026-05-01", name: "Ngày Quốc tế Lao động" },
+  { date: "2026-08-31", name: "Quốc khánh (nghỉ hoán đổi)" },
+  { date: "2026-09-01", name: "Quốc khánh (nghỉ liền)" },
   { date: "2026-09-02", name: "Quốc khánh" },
-  { date: "2026-09-03", name: "Quốc khánh (nghỉ bù)" },
-  // 2027 — ƯỚC LƯỢNG (Tết Đinh Mùi mùng 1 = 06/02/2027 Thứ Bảy)
+  // 2027 — ƯỚC LƯỢNG (Tết Đinh Mùi mùng 1 = 06/02/2027 Thứ Bảy; 02/09/2027
+  // thứ Năm → KHÔNG nghỉ bù 03/09 — fixbug #63 F-63C-05)
   { date: "2027-01-01", name: "Tết Dương lịch", note: "ước lượng 2027" },
-  { date: "2027-02-05", name: "Tết Đinh Mùi (nghỉ bù T6)", note: "ước lượng 2027" },
-  { date: "2027-02-08", name: "Tết Đinh Mùi (mùng 2)", note: "ước lượng 2027" },
-  { date: "2027-02-09", name: "Tết Đinh Mùi (mùng 3)", note: "ước lượng 2027" },
-  { date: "2027-02-10", name: "Tết Đinh Mùi (mùng 4)", note: "ước lượng 2027" },
-  { date: "2027-02-11", name: "Tết Đinh Mùi (mùng 5)", note: "ước lượng 2027" },
+  { date: "2027-02-05", name: "Tết Đinh Mùi (30 Tết)", note: "ước lượng 2027" },
+  { date: "2027-02-08", name: "Tết Đinh Mùi (mùng 3)", note: "ước lượng 2027" },
+  { date: "2027-02-09", name: "Tết Đinh Mùi (mùng 4)", note: "ước lượng 2027" },
+  { date: "2027-02-10", name: "Tết Đinh Mùi (mùng 5)", note: "ước lượng 2027" },
+  { date: "2027-02-11", name: "Tết Đinh Mùi (mùng 6)", note: "ước lượng 2027" },
   { date: "2027-04-16", name: "Giỗ Tổ Hùng Vương (10/3 âm)", note: "ước lượng 2027" },
   { date: "2027-04-30", name: "Ngày Giải phóng miền Nam" },
   { date: "2027-05-03", name: "Ngày Quốc tế Lao động (nghỉ bù)", note: "ước lượng 2027" },
   { date: "2027-09-02", name: "Quốc khánh" },
-  { date: "2027-09-03", name: "Quốc khánh (nghỉ bù T6)", note: "ước lượng 2027" },
 ];
 
 /** Set tra cứu nhanh (sync — nội bộ module + isTradingDay). */

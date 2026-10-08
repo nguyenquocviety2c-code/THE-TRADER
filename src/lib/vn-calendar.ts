@@ -36,11 +36,11 @@ export interface VnHolidayOverlay {
 const EMPTY_OVERLAY: VnHolidayOverlay = { extra: [], remove: [] };
 
 function isValidIsoDate(s: unknown): s is string {
-  return (
-    typeof s === "string" &&
-    /^\d{4}-\d{2}-\d{2}$/.test(s) &&
-    !Number.isNaN(new Date(`${s}T00:00:00Z`).getTime())
-  );
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  // F-63C-09/#63 — round-trip: "2027-02-31" lọt NaN-check vì Date roll-over
+  // sang 03-03; so sánh toISOString bắt ngày không tồn tại thật.
+  const t = new Date(`${s}T00:00:00Z`).getTime();
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
 }
 
 /** Chuẩn hoá payload overlay (bỏ ngày sai định dạng, dedupe, sort). */

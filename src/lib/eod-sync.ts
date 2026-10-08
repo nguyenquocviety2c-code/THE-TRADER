@@ -677,8 +677,8 @@ export async function syncEodFromDchart(opts?: {
   }
 
   // P2-3/#62 — Bar vừa đổi (nến mới/tái ghi) → ADTV 45 phiên đổi theo:
-  // xoá cache rổ thanh khoản để chu kỳ sau tính lại từ dữ liệu mới (TTL 90s
-  // chỉ là lưới an toàn phía sau điểm invalidation chủ động này).
+  // xoá cache rổ thanh khoản để chu kỳ sau tính lại từ dữ liệu mới (TTL L2
+  // 10 phút chỉ là lưới an toàn phía sau điểm invalidation chủ động này).
   if (barsUpserted > 0) {
     await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
   }

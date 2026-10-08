@@ -15,10 +15,16 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const sp = req.nextUrl.searchParams;
-    const isoRe = /^\d{4}-\d{2}-\d{2}$/;
+    // F-63C-09/#63 — round-trip bắt ngày roll-over ("2026-02-31" → 03-03):
+    // trước fix route trả 200 kèm days bắt đầu lệch 2 ngày (echo sai dữ liệu)
+    const isoOk = (s: string): boolean => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+      const t = new Date(`${s}T00:00:00Z`).getTime();
+      return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s;
+    };
     const todayIso = new Date(Date.now() + 7 * 3_600_000).toISOString().slice(0, 10);
     const from = sp.get("from") ?? todayIso;
-    if (!isoRe.test(from) || Number.isNaN(new Date(`${from}T00:00:00Z`).getTime())) {
+    if (!isoOk(from)) {
       return NextResponse.json(
         { error: "Tham số from phải là ngày ISO YYYY-MM-DD hợp lệ." },
         { status: 400 }
@@ -29,7 +35,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const to = sp.get("to");
     let toIso: string;
     if (to != null) {
-      if (!isoRe.test(to) || Number.isNaN(new Date(`${to}T00:00:00Z`).getTime())) {
+      if (!isoOk(to)) {
         return NextResponse.json(
           { error: "Tham số to phải là ngày ISO YYYY-MM-DD hợp lệ." },
           { status: 400 }

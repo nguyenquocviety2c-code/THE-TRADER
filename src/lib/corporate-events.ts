@@ -585,7 +585,7 @@ async function applyAutoAdjust(
     });
 
   // P2-3/#62 — value của toàn chuỗi trước event vừa ×f → ADTV/rổ đổi: xoá
-  // cache rổ thanh khoản (best-effort, TTL 90s là lưới sau).
+  // cache rổ thanh khoản (best-effort, TTL L2 10 phút là lưới sau).
   await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
 
   return {

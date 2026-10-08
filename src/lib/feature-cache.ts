@@ -83,8 +83,14 @@ export async function cacheGetJson(key: string): Promise<string | null> {
     const row = await db.featureValue.findUnique({ where: { key } });
     if (!row) return null;
     if (row.expiresAt.getTime() <= now) return null; // L2 hết hạn
-    // Nạp lại L1 với TTL còn lại của L2 (không kéo dài tuổi thọ)
-    l1.set(key, { json: row.value, expiresAt: row.expiresAt.getTime() });
+    // Nạp lại L1 với TTL còn lại của L2 — nhưng KHÔNG quá TTL L1 (fixbug #63
+    // F-63A-01): race đọc-vào-giữa-cửa-sổ deleteMany WAN của invalidation có
+    // thể trả row CŨ; cap 90s bảo đảm stale sau invalidation tự chết nhanh
+    // thay vì sống thêm tới 10 phút theo expiresAt của row cũ.
+    l1.set(key, {
+      json: row.value,
+      expiresAt: Math.min(row.expiresAt.getTime(), Date.now() + FEATURE_CACHE_TTL_MS),
+    });
     return row.value;
   } catch (err) {
     // Fail-open: cache không đọc được → caller recompute như chưa có cache

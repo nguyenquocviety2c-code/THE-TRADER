@@ -169,6 +169,9 @@ export async function PUT(req: Request): Promise<NextResponse> {
       );
     }
     // P2-1/#62 — validate kênh thông báo: webhookUrl phải http(s) khi khác rỗng
+    // F-63B-06/07/#63 — kiểu sai → 400 (trước fix nuốt câm); URL phải parse
+    // được THẬT (new URL + hostname) — "https://" host rỗng từng lọt qua
+    // regex prefix rồi fetch() TypeError → PENDING_EGRESS retry vĩnh viễn.
     const notify = body.notify;
     if (notify !== undefined) {
       if (typeof notify !== "object" || Array.isArray(notify)) {
@@ -178,20 +181,44 @@ export async function PUT(req: Request): Promise<NextResponse> {
         );
       }
       const url = notify.webhookUrl;
-      if (typeof url === "string" && url !== "" && !/^https?:\/\//.test(url.trim())) {
+      if (url !== undefined && typeof url !== "string") {
         return NextResponse.json(
-          { error: "webhookUrl phải bắt đầu bằng http:// hoặc https:// (hoặc để trống để xoá)." },
+          { error: "notify.webhookUrl phải là chuỗi (hoặc để trống để xoá)." },
           { status: 400 }
         );
+      }
+      if (typeof url === "string" && url !== "") {
+        let parsed: URL | null = null;
+        try {
+          parsed = new URL(url.trim());
+        } catch {
+          parsed = null;
+        }
+        if (
+          !parsed ||
+          (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+          !parsed.hostname
+        ) {
+          return NextResponse.json(
+            { error: "webhookUrl phải là URL http(s) hợp lệ đầy đủ hostname (hoặc để trống để xoá)." },
+            { status: 400 }
+          );
+        }
       }
       if (notify.enabled !== undefined && typeof notify.enabled !== "boolean") {
         return NextResponse.json({ error: "notify.enabled phải là boolean." }, { status: 400 });
       }
+      const emailTo = notify.emailTo;
+      if (emailTo !== undefined && typeof emailTo !== "string") {
+        return NextResponse.json(
+          { error: "notify.emailTo phải là chuỗi (hoặc để trống để xoá)." },
+          { status: 400 }
+        );
+      }
       if (
-        notify.emailTo !== undefined &&
-        typeof notify.emailTo === "string" &&
-        notify.emailTo !== "" &&
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(notify.emailTo.trim())
+        typeof emailTo === "string" &&
+        emailTo !== "" &&
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailTo.trim())
       ) {
         return NextResponse.json(
           { error: "emailTo không đúng định dạng địa chỉ email (hoặc để trống để xoá)." },
@@ -199,7 +226,9 @@ export async function PUT(req: Request): Promise<NextResponse> {
         );
       }
     }
-    // P2-4/#62 — validate overlay lịch lễ: mảng ISO date
+    // P2-4/#62 — validate overlay lịch lễ: mảng ISO date TỒN TẠI THẬT
+    // (F-63C-09/#63 — "2027-02-31" lọt regex + NaN-check vì Date roll-over;
+    // round-trip toISOString bắt ngày không có thật)
     const holidays = body.vnHolidays;
     if (holidays !== undefined) {
       if (typeof holidays !== "object" || Array.isArray(holidays)) {
@@ -208,13 +237,17 @@ export async function PUT(req: Request): Promise<NextResponse> {
           { status: 400 }
         );
       }
-      const isoRe = /^\d{4}-\d{2}-\d{2}$/;
+      const isoOk = (d: string): boolean => {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+        const t = new Date(`${d}T00:00:00Z`).getTime();
+        return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === d;
+      };
       for (const key of ["extra", "remove"] as const) {
         const list = holidays[key];
         if (list === undefined) continue;
-        if (!Array.isArray(list) || list.some((d) => typeof d !== "string" || !isoRe.test(d))) {
+        if (!Array.isArray(list) || list.some((d) => typeof d !== "string" || !isoOk(d))) {
           return NextResponse.json(
-            { error: `vnHolidays.${key} phải là mảng ngày ISO YYYY-MM-DD (vd ["2026-10-20"]).` },
+            { error: `vnHolidays.${key} phải là mảng ngày ISO YYYY-MM-DD thật (vd ["2026-10-20"]).` },
             { status: 400 }
           );
         }

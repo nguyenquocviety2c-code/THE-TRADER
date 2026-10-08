@@ -181,6 +181,15 @@ async function verifyFeatureCache() {
       reprobeSrc.includes("invalidateFeatureCache") &&
       intlSrc.includes("invalidateFeatureCache")
   );
+
+  // A8 — dọn row FeatureValue cuối cùng (fixbug #63 F-63A-05): nguyên tắc
+  // header hứa "dọn sạch … FeatureValue rows" nhưng trước fix A6.2 tái tạo
+  // row rồi kết thúc — để lại row kiểm định trong bảng thật.
+  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
+  const finalRows = await db.featureValue.count({
+    where: { key: { startsWith: TOPBYADTV_CACHE_PREFIX } },
+  });
+  check("A8 dọn sạch row FeatureValue sau kiểm định (F-63A-05)", finalRows === 0, `count=${finalRows}`);
 }
 
 /* ═══════════════ B · P2-1 — Notify pending-egress ═══════════════ */
@@ -232,14 +241,34 @@ async function verifyNotify() {
     rows.every((r) => r.attempts >= 1 && (r.lastError ?? "") !== "")
   );
 
-  // B3 — retry sweep: attempts tăng thêm 1 lần thử
-  await retryPendingOutbox(5);
+  // B3 — retry sweep HERMETIC (fixbug #63 F-63B-02/F-63A-07): trước fix gọi
+  // retryPendingOutbox(5) chọn 5 row PENDING_EGRESS cũ NHẤT TOÀN CỤC — khi
+  // backlog demo ≥ 5, 2 row test (mới nhất) không thuộc top-5 → attempts
+  // không tăng → false-negative 60/61 không tái lập được 61/61 của #62.
+  // Sau fix F-63B-01 where đã filter WEBHOOK (EMAIL không còn chiếm slot);
+  // ở đây đếm backlog webhook thật để chọn limit BAO TRÙM mọi row pending —
+  // row test luôn nằm trong sweep bất kể trạng thái outbox toàn cục.
+  const pendingWebhook = await db.notificationOutbox.count({
+    where: { status: "PENDING_EGRESS", channel: "WEBHOOK" },
+  });
+  const retryLimit = Math.min(50, Math.max(5, pendingWebhook + 2));
+  const retryOut = await retryPendingOutbox(retryLimit);
   const afterRetry = await db.notificationOutbox.findMany({
     where: { target: { in: [TEST_HOOK, TEST_EMAIL] } },
   });
   check(
-    "B3 retryPendingOutbox thử lại (attempts tăng, webhook vẫn pending vì DNS)",
-    afterRetry.some((r) => r.channel === "WEBHOOK" && r.attempts >= 2)
+    "B3 retryPendingOutbox thử lại (hermetic — limit bao trùm backlog, attempts tăng trên row test)",
+    afterRetry.some((r) => r.channel === "WEBHOOK" && r.attempts >= 2),
+    `pendingWebhook=${pendingWebhook} → limit=${retryLimit} · retried=${retryOut.retried}`
+  );
+  check(
+    "B3.1 retry CHỈ quét WEBHOOK (F-63B-01) — row EMAIL test không được retry, không starve slot webhook",
+    afterRetry.every((r) => r.channel !== "EMAIL" || r.attempts === 1),
+    "EMAIL attempts giữ 1 (chờ SMTP — dead-letter không lấn slot)"
+  );
+  check(
+    "B3.2 webhook DNS-lỗi vẫn PENDING_EGRESS — prune #63 (F-63B-11) chỉ xoá SENT/FAILED, backlog sống qua restart",
+    afterRetry.some((r) => r.channel === "WEBHOOK" && r.status === "PENDING_EGRESS")
   );
 
   // B4 — listOutbox shape
@@ -285,7 +314,10 @@ async function verifyNewsReliability() {
     }
   }
 
-  // C1 — chạy ingest thật (5 feed RSS đã kiểm chứng từ môi trường này)
+  // C1 — chạy ingest thật (5 feed RSS đã kiểm chứng từ môi trường này).
+  // Ghi chú fixbug #63 F-63C-08: guard 60s là biến module PER-PROCESS — ingest
+  // từ tiến trình script này không serialize với POST /api/news của engine;
+  // nếu crawl chồng lấn, C2.1 bắt được runs≠baseline+1 một cách trung thực.
   const result = await ingestNews();
   check(
     "C1 ingestNews chạy đủ 5 feed, mỗi feed có đủ trường thống kê P2-2",
@@ -358,6 +390,15 @@ async function verifyCalendar() {
   check("D0 Quốc khánh 02/09/2026 → KHÔNG phiên (lớp tĩnh)", !(await isOfficialTradingDay(dQK)));
   check("D0.1 thứ 5 thường 08/10/2026 → CÓ phiên", await isOfficialTradingDay(dThu));
   check("D0.2 thứ 7 10/10/2026 → KHÔNG phiên", !(await isOfficialTradingDay(dSat)));
+  // D0.3-D0.5 — regression fixbug #63 F-63C-01 (P1): trước fix lớp tĩnh
+  // THIẾU 31/08 + 01/09 (HOSE/HNX nghỉ thật 31/8→2/9 do hoán đổi T2) và
+  // THỪA 03/09 "nghỉ bù" (02/9 thứ Tư — không có bù; 03/9 giao dịch thật).
+  const dQK0 = new Date("2026-08-31T03:00:00Z"); // 10:00 ICT thứ 2 — nghỉ hoán đổi
+  const dQK1 = new Date("2026-09-01T03:00:00Z"); // 10:00 ICT thứ 3 — nghỉ liền
+  const dQK3 = new Date("2026-09-03T03:00:00Z"); // 10:00 ICT thứ 4 — giao dịch trở lại
+  check("D0.3 31/08/2026 nghỉ hoán đổi QK → KHÔNG phiên (F-63C-01)", !(await isOfficialTradingDay(dQK0)));
+  check("D0.4 01/09/2026 nghỉ liền QK → KHÔNG phiên (F-63C-01)", !(await isOfficialTradingDay(dQK1)));
+  check("D0.5 03/09/2026 → CÓ phiên (xoá 'nghỉ bù' sai — F-63C-01)", await isOfficialTradingDay(dQK3));
 
   // D1 — overlay runtime: thêm ngày nghỉ đột xuất
   await saveVnHolidayOverlay({ extra: ["2026-10-15"], remove: [] });
@@ -439,7 +480,7 @@ async function verifyCalendar() {
 /* ═══════════════ Chạy toàn bộ ═══════════════ */
 
 async function main() {
-  console.log("════ KIỂM ĐỊNH GÓI P2 — DATA_PLATFORM_BLUEPRINT v1.6 §5 (phiên #62) ════");
+  console.log("════ KIỂM ĐỊNH GÓI P2 — DATA_PLATFORM_BLUEPRINT v1.7 §5 (phiên #62 + fixbug #63) ════");
   await verifyFeatureCache();
   await verifyNotify();
   await verifyNewsReliability();

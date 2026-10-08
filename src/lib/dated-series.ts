@@ -194,11 +194,13 @@ const ADTV_CALENDAR_DAYS = Math.ceil(ADTV_SESSIONS * 1.7);
  * buildMarketBlock/buildValuationBlock/buildLiquidityBlock · latestFeatures
  * · readiness A9. ≥ 10 bar mới vào bảng xếp hạng.
  *
- * P2-3 (phiên #62): kết quả cache 2 lớp (L1 process + L2 bảng Postgres
- * FeatureValue) TTL 90s — giảm ~7-8 lần gọi/chu kỳ × ~106ms ≈ 750-850ms
- * xuống < 200ms; eod-sync/corporate-events đổi Bar → invalidateFeatureCache
- * ("topByAdtv:") chủ động. `opts.force` tính thẳng (kiểm định). Cache hit
- * trả JSON parse — sai số 0 với tính tay (Number roundtrip JSON an toàn).
+ * P2-3 (phiên #62): kết quả cache 2 lớp (L1 process TTL 90s + L2 bảng
+ * Postgres FeatureValue TTL 10 phút) — giảm ~7-8 lần gọi/chu kỳ × ~106ms ≈
+ * 750-850ms xuống < 200ms; eod-sync/corporate-events đổi Bar →
+ * invalidateFeatureCache ("topByAdtv:") chủ động. `opts.force` tính thẳng
+ * (kiểm định) và KHÔNG ghi lại cache (fixbug #63 F-63A-03 — đường đối chiếu
+ * không tự vá/che khác biệt cache vs DB). Cache hit trả JSON parse — sai số 0
+ * với tính tay (Number roundtrip JSON an toàn).
  */
 export async function topByAdtv(
   n: number,
@@ -267,8 +269,13 @@ export async function topByAdtv(
     .filter((r): r is TopAdtvSymbol => r !== null)
     .sort((a, b) => b.adtv - a.adtv)
     .slice(0, n);
-  // P2-3 — cache kết quả (payload thuần primitive, JSON an toàn)
-  await cacheSetJson(cacheKey, JSON.stringify(ranked));
+  // P2-3 — cache kết quả (payload thuần primitive, JSON an toàn).
+  // F-63A-03/#63: force KHÔNG ghi lại cache — giữ ngữ nghĩa "tính thẳng để
+  // ĐỐI CHIẾU": nếu force ghi đè, lần đọc sau nhận kết quả đối chiếu (che mất
+  // khác biệt cache-vs-DB mà đường kiểm định sinh ra để bắt).
+  if (!opts.force) {
+    await cacheSetJson(cacheKey, JSON.stringify(ranked));
+  }
   return ranked;
 }
 

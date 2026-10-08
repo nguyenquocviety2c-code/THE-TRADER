@@ -794,13 +794,13 @@ model DataQualityReport {
 // P2-3 (phiên #62) — CACHE GIÁ TRỊ ĐẶC TRƯNG bằng bảng Postgres (kỷ luật §6
 // blueprint: KHÔNG Redis — "nếu chậm → P2-3 dùng bảng Postgres"). Điều kiện
 // đo #61: ~7-8 chỗ gọi topByAdtv/chu kỳ × ~106ms ≈ 750-850ms > ngưỡng 200ms.
-// key dạng "topByAdtv:HOSE:STOCK:10"; value JSON-hoá payload; TTL 90s +
-// invalidation chủ động khi eod-sync/corporate-events đổi Bar.
+// key dạng "topByAdtv:HOSE:STOCK:10"; value JSON-hoá payload; TTL L2 10 phút
+// (L1 in-process 90s) + invalidation chủ động khi eod-sync/corporate-events đổi Bar.
 model FeatureValue {
   key        String   @unique
   value      String // JSON-hoá payload (vd TopAdtvSymbol[])
   computedAt DateTime @default(now())
-  expiresAt  DateTime // hết hạn đọc được (TTL 90s mặc định)
+  expiresAt  DateTime // hết hạn đọc được — TTL L2 10 phút (FEATURE_CACHE_L2_TTL_MS; L1 in-process 90s — fixbug #63 F-63A-02)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
