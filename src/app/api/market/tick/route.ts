@@ -10,6 +10,7 @@ import {
   vnDateIso,
   isTradingDay,
 } from "@/lib/market-session";
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "@/lib/feature-cache";
 import { getRealtimeRuntime, markRealtimeAttempt } from "@/lib/settings";
 import { fetchFinfoLastPrices, type FinfoQuote } from "@/lib/vndirect";
 
@@ -533,6 +534,9 @@ async function runTick(): Promise<NextResponse> {
         floor = round100(ref * 0.93);
         volumeBase = 0;
         rolled++;
+        // P2-3/#62 — mode simulated vừa ghi Bar EOD → ADTV có thể đổi: xoá
+        // cache rổ thanh khoản (mode real: bar do eod-sync lo — đã invalidate)
+        invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
       } else {
         ref = q.refPrice ?? q.last;
         floor = q.floorPrice ?? round100(ref * 0.93);

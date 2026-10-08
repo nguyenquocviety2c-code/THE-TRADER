@@ -58,6 +58,7 @@
 
 import { db } from "@/lib/db";
 import { priceBand, beyondBand } from "@/lib/data-quality";
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "@/lib/feature-cache";
 
 /** AppSetting kill-switch key (8-3b — default BẬT). */
 export const CE_SETTING_KEY = "corporate-event-autoadjust";
@@ -583,6 +584,10 @@ async function applyAutoAdjust(
       console.error(`[corporate-events] gắn auditLogId ${inst.symbol} lỗi (không chặn):`, err);
     });
 
+  // P2-3/#62 — value của toàn chuỗi trước event vừa ×f → ADTV/rổ đổi: xoá
+  // cache rổ thanh khoản (best-effort, TTL 90s là lưới sau).
+  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
+
   return {
     symbol: inst.symbol,
     eventDate: eventBar.date.toISOString().slice(0, 10),
@@ -741,6 +746,10 @@ export async function reapplyAutoAdjustments(instrumentId: string): Promise<numb
       // detail cũ hỏng JSON — không chặn tái áp giá
     }
   }
+  // P2-3/#62 — chuỗi vừa tái áp ×f → xoá cache rổ (nếu có điều chỉnh)
+  if (barsAdjusted > 0) {
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
+  }
   return barsAdjusted;
 }
 
@@ -873,6 +882,8 @@ export async function reverseCorporateEvent(eventId: string): Promise<ReverseRes
       },
       { timeout: 30_000 }
     );
+    // P2-3/#62 — pre-values gốc vừa được restore → xoá cache rổ
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
     return {
       ok: true,
       symbol,

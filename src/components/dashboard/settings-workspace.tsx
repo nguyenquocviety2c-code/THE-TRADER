@@ -1,11 +1,14 @@
 "use client";
 
 import * as React from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   CircleCheck,
   CircleX,
   Cpu,
+  CalendarClock,
+  Bell,
   Database,
   Eye,
   EyeOff,
@@ -32,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   useApplyMarketDataMode,
   useSettings,
@@ -39,6 +43,7 @@ import {
   useUpdateSettings,
 } from "@/hooks/use-settings";
 import { cn } from "@/lib/utils";
+import { apiGet, apiPost } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import type { MarketDataMode, SettingsResponse } from "@/lib/types";
 
@@ -130,6 +135,8 @@ export function SettingsWorkspace() {
         <>
           <VndirectCard settings={data} />
           <MarketDataCard settings={data} />
+          <NotifyCard settings={data} />
+          <CalendarCard settings={data} />
           <LlmCard settings={data} />
         </>
       )}
@@ -783,5 +790,371 @@ function SettingsSkeleton() {
         </Card>
       ))}
     </div>
+  );
+}
+
+/* ─────────────────── P2-1 · Kênh thông báo S1 (webhook/email) ─────────────────── */
+
+interface NotifyOutboxRow {
+  id: string;
+  channel: string;
+  target: string;
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  createdAt: string;
+}
+
+/** Trạng thái hộp thư đi trả về GET /api/notify. */
+interface NotifyStatusResponse {
+  settings: { enabled: boolean; webhookUrl: string; emailTo: string };
+  status: { pendingCount: number; sentCount: number; lastSentAt: string | null };
+  outbox: NotifyOutboxRow[];
+}
+
+/**
+ * P2-1 (phiên #62 — blueprint §5): S1 NotificationOfficer phát bản tin chu kỳ
+ * qua webhook/email theo pattern PENDING-EGRESS (sandbox chặn egress → bản
+ * tin vào hàng đợi NotificationOutbox, tự retry mỗi chu kỳ S1 + nút dưới đây).
+ */
+function NotifyCard({ settings }: { settings: SettingsResponse }) {
+  const update = useUpdateSettings();
+  const queryClient = useQueryClient();
+  const [webhookUrl, setWebhookUrl] = React.useState(settings.notify.webhookUrl);
+  const [emailTo, setEmailTo] = React.useState(settings.notify.emailTo);
+  const [enabled, setEnabled] = React.useState(settings.notify.enabled);
+  const [retrying, setRetrying] = React.useState(false);
+
+  const outboxQuery = useOutboxQuery(settings.notify);
+
+  function handleSave() {
+    update.mutate(
+      { notify: { enabled, webhookUrl: webhookUrl.trim(), emailTo: emailTo.trim() } },
+      {
+        onSuccess: () => {
+          toast.success("Đã lưu cấu hình kênh thông báo");
+          void queryClient.invalidateQueries({ queryKey: ["settings"] });
+          void outboxQuery.refetch();
+        },
+        onError: (err: Error) => {
+          toast.error("Lưu kênh thông báo thất bại", { description: err.message });
+        },
+      }
+    );
+  }
+
+  async function handleRetry() {
+    setRetrying(true);
+    try {
+      const res = await apiPost<{ ok: boolean; result: { sent: number; stillPending: number } }>(
+        "/api/notify"
+      );
+      toast.success(
+        `Đã thử gửi lại: ${res.result.sent} gửi thành công · ${res.result.stillPending} còn chờ egress`,
+        { description: "Sandbox chặn egress — hàng đợi tự phát khi lên máy chủ có egress." }
+      );
+      void outboxQuery.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+    } catch (err) {
+      toast.error("Quét thử gửi lại thất bại", {
+        description: err instanceof Error ? err.message : "Lỗi không xác định",
+      });
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  const pending = outboxQuery.data?.status.pendingCount ?? settings.notify.pendingCount;
+  const sent = outboxQuery.data?.status.sentCount ?? settings.notify.sentCount;
+  const outbox = outboxQuery.data?.outbox ?? [];
+
+  return (
+    <Card className="gap-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Bell className="size-4 text-primary" aria-hidden="true" />
+          Kênh thông báo S1 (webhook / email)
+        </CardTitle>
+        <CardDescription>
+          Bản tin chu kỳ của NotificationOfficer gửi ra ngoài — pattern pending-egress:
+          sandbox chặn đầu ra thì bản tin vào hàng đợi, tự phát khi có egress
+        </CardDescription>
+        <CardAction>
+          <div className="flex items-center gap-2">
+            <Label htmlFor="notify-enabled" className="text-xs text-muted-foreground">
+              {enabled ? "Bật" : "Tắt"}
+            </Label>
+            <Switch
+              id="notify-enabled"
+              checked={enabled}
+              onCheckedChange={setEnabled}
+              aria-label="Bật/tắt kênh thông báo S1"
+            />
+          </div>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="notify-webhook">Webhook URL (POST JSON)</Label>
+            <Input
+              id="notify-webhook"
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              placeholder="https://hooks.example.com/trader"
+              autoComplete="url"
+              inputMode="url"
+              className="h-11"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="notify-email">Email người nhận</Label>
+            <Input
+              id="notify-email"
+              value={emailTo}
+              onChange={(e) => setEmailTo(e.target.value)}
+              placeholder="trader@example.com"
+              autoComplete="email"
+              inputMode="email"
+              className="h-11"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-9 gap-2"
+            onClick={handleSave}
+            disabled={update.isPending}
+          >
+            {update.isPending ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Save className="size-3.5" aria-hidden="true" />
+            )}
+            Lưu kênh
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-9 gap-2"
+            onClick={() => void handleRetry()}
+            disabled={retrying || pending === 0}
+          >
+            {retrying ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <RefreshCw className="size-3.5" aria-hidden="true" />
+            )}
+            Thử gửi lại ({pending})
+          </Button>
+          <Badge
+            variant="outline"
+            className={cn(
+              "gap-1.5 px-2 py-0.5 text-[10px]",
+              pending > 0
+                ? "border-amber-500/40 text-amber-600 dark:text-amber-400"
+                : "border-up/40 text-up"
+            )}
+            title="pending-egress: sandbox chặn đầu ra — hàng đợi tự phát mỗi chu kỳ S1 khi lên máy chủ có egress"
+          >
+            {pending > 0
+              ? `${pending} bản tin chờ egress`
+              : sent > 0
+                ? `${sent} bản tin đã gửi`
+                : "chưa có bản tin nào"}
+          </Badge>
+          {settings.notify.lastSentAt && (
+            <span className="text-[11px] text-muted-foreground">
+              gửi cuối {formatDateTime(settings.notify.lastSentAt)}
+            </span>
+          )}
+        </div>
+
+        {outbox.length > 0 && (
+          <div className="max-h-40 overflow-y-auto custom-scrollbar rounded-lg border border-border/60">
+            <table className="w-full text-left text-xs">
+              <thead className="sticky top-0 bg-muted/60 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Kênh</th>
+                  <th className="px-3 py-2 font-medium">Đích</th>
+                  <th className="px-3 py-2 font-medium">Trạng thái</th>
+                  <th className="px-3 py-2 font-medium">Thử</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50">
+                {outbox.slice(0, 12).map((row) => (
+                  <tr key={row.id} className="items-center">
+                    <td className="px-3 py-1.5 font-medium">{row.channel}</td>
+                    <td className="max-w-40 truncate px-3 py-1.5 text-muted-foreground" title={row.target}>
+                      {row.target}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      {row.status === "SENT" ? (
+                        <Badge variant="outline" className="border-up/40 px-1.5 py-0 text-[10px] text-up">
+                          SENT
+                        </Badge>
+                      ) : row.status === "PENDING_EGRESS" ? (
+                        <Badge
+                          variant="outline"
+                          className="border-amber-500/40 px-1.5 py-0 text-[10px] text-amber-600 dark:text-amber-400"
+                          title={row.lastError ?? "chờ egress"}
+                        >
+                          CHỜ EGRESS
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="border-red-500/40 px-1.5 py-0 text-[10px] text-red-600 dark:text-red-400" title={row.lastError ?? undefined}>
+                          FAILED
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground">{row.attempts}×</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Đọc outbox P2-1 (GET /api/notify) — refetch khi cấu hình đổi. */
+function useOutboxQuery(notify: SettingsResponse["notify"]) {
+  return useQuery({
+    queryKey: ["notify-outbox", notify.webhookUrl, notify.emailTo, notify.enabled],
+    queryFn: () => apiGet<NotifyStatusResponse>("/api/notify"),
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+/* ─────────────────── P2-4 · Lịch nghỉ lễ VN (overlay runtime) ─────────────────── */
+
+/**
+ * P2-4 (phiên #62 — blueprint §5): lịch giao dịch VN chính thức — lớp tĩnh
+ * 2026 (chính thức) + 2027 (ước lượng) trong market-session.ts, overlay
+ * runtime AppSetting "vn-holidays" cho ngày lễ đột xuất (quốc tang, nghỉ bù
+ * muộn) — A9 dùng đúng lịch này khi kiểm freshness/EOD (hết báo "outage
+ * tổng?" giả khi cả sàn nghỉ hợp lệ).
+ */
+function CalendarCard({ settings }: { settings: SettingsResponse }) {
+  const update = useUpdateSettings();
+  const queryClient = useQueryClient();
+  const [extraText, setExtraText] = React.useState(settings.vnHolidays.extra.join(", "));
+  const [removeText, setRemoveText] = React.useState(settings.vnHolidays.remove.join(", "));
+
+  function parseDates(raw: string): string[] {
+    return [
+      ...new Set(
+        raw
+          .split(/[,;\s]+/)
+          .map((s) => s.trim())
+          .filter((s) => /^\d{4}-\d{2}-\d{2}$/.test(s))
+      ),
+    ].sort();
+  }
+
+  function handleSave() {
+    const extra = parseDates(extraText);
+    const remove = parseDates(removeText);
+    update.mutate(
+      { vnHolidays: { extra, remove } },
+      {
+        onSuccess: () => {
+          toast.success("Đã lưu lịch nghỉ lễ tuỳ chỉnh", {
+            description: `thêm ${extra.length} ngày · bỏ ${remove.length} ngày — A9 dùng lịch này từ chu kỳ sau`,
+          });
+          void queryClient.invalidateQueries({ queryKey: ["settings"] });
+        },
+        onError: (err: Error) => {
+          toast.error("Lưu lịch nghỉ lễ thất bại", { description: err.message });
+        },
+      }
+    );
+  }
+
+  return (
+    <Card className="gap-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <CalendarClock className="size-4 text-primary" aria-hidden="true" />
+          Lịch giao dịch VN — ngày lễ chính thức
+        </CardTitle>
+        <CardDescription>
+          Lớp tĩnh 2026 chính thức + 2027 ước lượng (market-session.ts); khai báo
+          runtime ngày nghỉ đột xuất dưới đây — không cần deploy
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {settings.vnHolidays.upcoming.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-muted-foreground">Sắp tới:</span>
+            {settings.vnHolidays.upcoming.map((h) => (
+              <Badge
+                key={h.date}
+                variant="outline"
+                title={h.source === "overlay-extra" ? "khai báo runtime" : "lịch tĩnh chính thức"}
+                className={cn(
+                  "gap-1 px-2 py-0.5 text-[10px]",
+                  h.source === "overlay-extra"
+                    ? "border-amber-500/40 text-amber-600 dark:text-amber-400"
+                    : "border-border/60 text-muted-foreground"
+                )}
+              >
+                {h.date} · {h.name}
+              </Badge>
+            ))}
+          </div>
+        )}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="vn-holidays-extra">Ngày nghỉ THÊM (cách nhau bởi dấu phẩy)</Label>
+            <Input
+              id="vn-holidays-extra"
+              value={extraText}
+              onChange={(e) => setExtraText(e.target.value)}
+              placeholder="2026-10-20, 2026-10-21"
+              className="h-11"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Vd quốc tang / nghỉ bù thông báo muộn — A9 ngừng kiểm EOD những ngày này
+            </p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="vn-holidays-remove">Ngày lớp tĩnh coi là lễ nhưng VẪN giao dịch</Label>
+            <Input
+              id="vn-holidays-remove"
+              value={removeText}
+              onChange={(e) => setRemoveText(e.target.value)}
+              placeholder="2027-02-05"
+              className="h-11"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Bỏ ngày ước lượng sai khi có công bố chính thức
+            </p>
+          </div>
+        </div>
+        <div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="min-h-9 gap-2"
+            onClick={handleSave}
+            disabled={update.isPending}
+          >
+            {update.isPending ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Save className="size-3.5" aria-hidden="true" />
+            )}
+            Lưu lịch tuỳ chỉnh
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

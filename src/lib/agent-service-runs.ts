@@ -27,6 +27,7 @@ import {
   type DataQualityVerdict,
 } from "@/lib/data-quality";
 import { liveIngestRegistry } from "@/lib/ingest-pipeline";
+import { dispatchDigest, retryPendingOutbox } from "@/lib/notify";
 import { MLP } from "@/lib/ml/nn";
 import { mlForecastEnsemble } from "@/lib/ml/ensemble";
 import { buildBasket, parseQTable, policyStance } from "@/lib/ml/rl";
@@ -356,10 +357,36 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
     ...dqParts,
   ].filter(Boolean);
 
+  const digestText =
+    parts.join(" · ") +
+    (needAttention ? " Cần trader xem xét." : " Không có mục cần xử lý gấp.");
+
+  // P2-1 (phiên #62) — phát bản tin qua kênh webhook/email (pattern
+  // pending-egress như finfo: sandbox chặn egress → row NotificationOutbox
+  // PENDING_EGRESS, tự retry mỗi chu kỳ). KHÔNG bao giờ làm hỏng S1 — mọi
+  // lỗi nằm trong delivery results.
+  let delivery: {
+    results: { channel: string; status: string; note: string }[];
+    pendingCount: number;
+    retried?: { sent: number; stillPending: number };
+  } | null = null;
+  try {
+    delivery = await dispatchDigest({
+      subject: `The Trader — bản tin chu kỳ ${new Date().toISOString()}`,
+      body: digestText,
+      level: dqVerdict?.level ?? null,
+    });
+    // Piggyback: quét lại backlog PENDING_EGRESS cũ (webhook) mỗi chu kỳ
+    const retry = await retryPendingOutbox(3).catch(() => null);
+    if (retry) delivery.retried = { sent: retry.sent, stillPending: retry.stillPending };
+  } catch (err) {
+    console.error("[S1 notify] dispatchDigest lỗi (không chặn S1):", err);
+  }
+
   return {
-    content: parts.join(" · ") + (needAttention ? " Cần trader xem xét." : " Không có mục cần xử lý gấp."),
+    content: digestText,
     reasoning:
-      "Đếm Signal ACTIVE + RiskAlert chưa ack + AgentRun FAILED 24h + verdict A9 cùng chu kỳ (P0-7 — ctx chu kỳ: NULL nghĩa là A9 lỗi chạy, khai báo thẳng; single-run: AgentRun A9 ≤ 30').",
+      "Đếm Signal ACTIVE + RiskAlert chưa ack + AgentRun FAILED 24h + verdict A9 cùng chu kỳ (P0-7 — ctx chu kỳ: NULL nghĩa là A9 lỗi chạy, khai báo thẳng; single-run: AgentRun A9 ≤ 30'). P2-1: phát qua kênh webhook/email pending-egress + retry backlog.",
     sentiment: dqVerdict?.level === "SEVERE" || needAttention ? "neutral" : "bullish",
     output: {
       activeSignals: activeSignals.length,
@@ -368,6 +395,7 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
       dataQuality: dqVerdict
         ? { level: dqVerdict.level, asOf: dqVerdict.asOf, checkCount: dqVerdict.checks.length }
         : null,
+      delivery,
     },
   };
 }

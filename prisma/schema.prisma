@@ -790,3 +790,40 @@ model DataQualityReport {
 
   @@index([asOf(sort: Desc)])
 }
+
+// P2-3 (phiên #62) — CACHE GIÁ TRỊ ĐẶC TRƯNG bằng bảng Postgres (kỷ luật §6
+// blueprint: KHÔNG Redis — "nếu chậm → P2-3 dùng bảng Postgres"). Điều kiện
+// đo #61: ~7-8 chỗ gọi topByAdtv/chu kỳ × ~106ms ≈ 750-850ms > ngưỡng 200ms.
+// key dạng "topByAdtv:HOSE:STOCK:10"; value JSON-hoá payload; TTL 90s +
+// invalidation chủ động khi eod-sync/corporate-events đổi Bar.
+model FeatureValue {
+  key        String   @unique
+  value      String // JSON-hoá payload (vd TopAdtvSymbol[])
+  computedAt DateTime @default(now())
+  expiresAt  DateTime // hết hạn đọc được (TTL 90s mặc định)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+// P2-1 (phiên #62) — HỘP THƯ ĐI S1 NotificationOfficer (webhook/email).
+// Pattern pending-egress như finfo: sandbox chặn egress → row giữ trạng thái
+// PENDING_EGRESS (trung thực, tự retry mỗi chu kỳ S1 / POST /api/notify);
+// máy chủ có egress → sweep gửi hết backlog.
+model NotificationOutbox {
+  id            String    @id @default(cuid())
+  channel       String // WEBHOOK | EMAIL
+  target        String // webhook URL hoặc địa chỉ email người nhận
+  subject       String? // tiêu đề ngắn của bản tin
+  payload       String // JSON-hoá nội dung bản tin S1
+  status        String // PENDING_EGRESS | SENT | FAILED
+  attempts      Int       @default(0)
+  lastAttemptAt DateTime?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sentAt        DateTime?
+
+  @@index([status, createdAt(sort: Desc)])
+}

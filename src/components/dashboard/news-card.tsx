@@ -4,7 +4,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { vi } from "date-fns/locale";
-import { ExternalLink, Loader2, Newspaper, RefreshCw, Rss } from "lucide-react";
+import { ExternalLink, Loader2, Newspaper, RefreshCw, Rss, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,11 @@ export function NewsCard() {
 
   const meta = newsQuery.data?.meta;
   const items = newsQuery.data?.items ?? [];
+
+  // P2-2/#62 — độ tin cậy per-feed: tỉ lệ parse lỗi + tỉ lệ tin trùng tích luỹ
+  const reliabilityEntries = Object.entries(meta?.reliability ?? {}).filter(
+    ([, r]) => r.itemsSeen > 0
+  );
 
   return (
     <Card className="gap-4">
@@ -159,6 +164,41 @@ export function NewsCard() {
                 </li>
               ))}
             </ul>
+            {reliabilityEntries.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-6 pt-3">
+                <ShieldCheck
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                {reliabilityEntries.map(([name, r]) => {
+                  const parseErrPct =
+                    r.parsed + r.parseSkipped > 0
+                      ? (r.parseSkipped / (r.parsed + r.parseSkipped)) * 100
+                      : 0;
+                  const dupPct =
+                    r.itemsSeen > 0 ? (r.duplicates / r.itemsSeen) * 100 : 0;
+                  const warn = parseErrPct > 20 || r.okRuns === 0;
+                  return (
+                    <Badge
+                      key={name}
+                      variant="outline"
+                      title={`${name}: ${r.okRuns}/${r.runs} lần crawl OK · bỏ ${r.parseSkipped}/${r.parsed + r.parseSkipped} item parse lỗi (${parseErrPct.toFixed(0)}%) · ${r.duplicates}/${r.itemsSeen} tin trùng URL (${dupPct.toFixed(0)}%)${r.lastError ? ` · lỗi cuối: ${r.lastError}` : ""}`}
+                      className={cn(
+                        "gap-1 px-1.5 py-0 text-[10px] font-medium",
+                        warn
+                          ? "border-amber-500/40 text-amber-600 dark:text-amber-400"
+                          : "border-border/60 text-muted-foreground"
+                      )}
+                    >
+                      {name}
+                      <span className="text-muted-foreground/70">
+                        {parseErrPct.toFixed(0)}% lỗi · {dupPct.toFixed(0)}% trùng
+                      </span>
+                    </Badge>
+                  );
+                })}
+              </div>
+            )}
             <p className="px-6 py-3 text-[11px] text-muted-foreground">
               {items.length}/{meta?.total ?? items.length} tin · cập nhật bởi
               market-engine mỗi 15 phút

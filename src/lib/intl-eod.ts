@@ -36,6 +36,7 @@
 
 import { db } from "@/lib/db";
 import { markSource } from "@/lib/sources";
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "@/lib/feature-cache";
 import {
   resolveUnitSpec,
   toRealBars,
@@ -594,6 +595,13 @@ export async function syncIntlEod(opts?: {
       });
       failStreak++;
     }
+  }
+
+  // P2-3/#62 — bar US/HK vừa upsert (key cache có chứa market nên xoá cả
+  // tiền tố — rẻ, 1 query deleteMany duy nhất) để rổ US/HK nếu được gọi
+  // không phục vụ bản cũ 10 phút
+  if (barsUpserted > 0) {
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
   }
 
   const outcome: IntlSyncOutcome = {

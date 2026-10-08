@@ -1,7 +1,7 @@
 # The Trader — Data Dictionary & Database Schema
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (Multi-Agent Trading System) cho VNDIRECT
-> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.7.1 · **Updated:** 2026-10-08
+> **Document:** `docs/DB_SCHEMA.md` · **Version:** 0.7.2 · **Updated:** 2026-10-08
 > **Source of truth:** [`prisma/schema.prisma`](../prisma/schema.prisma) — tài liệu này mô tả đúng schema đã implement. Mọi thay đổi schema phải được phản ánh lại đây.
 > **Cross-refs:** [TECHNICAL_BLUEPRINT.md](./TECHNICAL_BLUEPRINT.md) (API surface) · [DATA_SOURCES.md](./DATA_SOURCES.md) (field mapping theo nguồn dữ liệu)
 
@@ -9,7 +9,7 @@
 
 ## 1. Overview
 
-The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Phiên #34 thêm cấu hình runtime (`AppSetting`) + nhận định Bayes (`MarketAssessment`); phiên #35 thêm 3 bảng học máy (`MlModel` · `BanditArm` · `BanditEvent`); **phiên #38 (MARKET_EXPANSION_BLUEPRINT) thêm dữ liệu tài chính cơ bản (`FinancialFundamental`) + mở rộng `Market` (US · HK) + `Instrument.currency` + `Signal.consensusGate/consensusRatio`**. Tổng cộng **29 model** (phiên #51 thêm `RiskQuantSnapshot` — đồng bộ số đếm theo cam kết §9.1 lúc triển khai P0 #57; **phiên #60 — DATA_PLATFORM_BLUEPRINT P1** thêm 3 bảng: `CorporateEvent` (§6.26 — sự kiện doanh nghiệp + auto-adjust split) · `ForeignFlow` (§6.27 — dòng khối ngoại persist mode simulated) · `DataQualityReport` (§6.28 — verdict A9 theo asOf); kèm cột additive `Bar.firstSeenAt/lastSyncedAt` (PIT) + `MlModel.meta` (window-hash SHA-256) — backup trước push ở `db/backup-pre-p1/`).
+The Trader lưu trữ toàn bộ trạng thái của một hệ thống giao dịch chứng khoán giấy (paper trading) điều khiển bởi **23 AI agent chia 5 nhóm** (research · control · executive · platform · ml — xem [TECHNICAL_BLUEPRINT.md §5.1](./TECHNICAL_BLUEPRINT.md)): dữ liệu thị trường (instrument / quote / bar), trạng thái đa agent (run / task / message), luồng tín hiệu → lệnh → khớp lệnh → vị thế, tầng rủi ro – tuân thủ (risk alert / audit log), và từ v0.3 thêm tầng dữ liệu ngoài: tin tức RSS (`NewsItem`) + trạng thái nguồn dữ liệu để stale marking (`DataSourceStatus`). Phiên #34 thêm cấu hình runtime (`AppSetting`) + nhận định Bayes (`MarketAssessment`); phiên #35 thêm 3 bảng học máy (`MlModel` · `BanditArm` · `BanditEvent`); **phiên #38 (MARKET_EXPANSION_BLUEPRINT) thêm dữ liệu tài chính cơ bản (`FinancialFundamental`) + mở rộng `Market` (US · HK) + `Instrument.currency` + `Signal.consensusGate/consensusRatio`**. Tổng cộng **31 model** (phiên #51 thêm `RiskQuantSnapshot` — đồng bộ số đếm theo cam kết §9.1 lúc triển khai P0 #57; **phiên #60 — DATA_PLATFORM_BLUEPRINT P1** thêm 3 bảng: `CorporateEvent` (§6.26 — sự kiện doanh nghiệp + auto-adjust split) · `ForeignFlow` (§6.27 — dòng khối ngoại persist mode simulated) · `DataQualityReport` (§6.28 — verdict A9 theo asOf); kèm cột additive `Bar.firstSeenAt/lastSyncedAt` (PIT) + `MlModel.meta` (window-hash SHA-256) — backup trước push ở `db/backup-pre-p1/`; **phiên #62 — DATA_PLATFORM_BLUEPRINT P2** thêm 2 bảng: `FeatureValue` (§6.29 — cache giá trị đặc trưng 2 lớp L1/L2) · `NotificationOutbox` (§6.30 — hộp thư đi S1 webhook/email pending-egress)).
 
 Schema được thiết kế theo chuẩn **financial-grade**:
 
@@ -19,7 +19,7 @@ Schema được thiết kế theo chuẩn **financial-grade**:
 - **Integer money** — toàn bộ giá trị tiền tệ VND là số nguyên (xem §3), tránh sai số dấu chấm động vốn là yêu cầu bắt buộc trong hệ thống tài chính.
 - **Unique + composite indexes** phục vụ đúng truy vấn của dashboard và ràng buộc toàn vẹn dữ liệu thị trường (dedup OHLCV theo `(instrumentId, date)`).
 
-**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 29 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
+**Engine:** **Supabase Postgres** qua Prisma 6.19.3 (`DATABASE_URL=postgresql://...pooler.supabase.com:5432/postgres?schema=trader` trong `.env`) — **kho dữ liệu chính trên đám mây**, bền vững qua reset sandbox. 31 model đặt trong schema riêng `trader` trên cùng project Supabase còn giữ schema `public` Gen-1 (36 bảng + 95.259 bar EOD thật 2013→2026 — nguồn dự phòng cho dữ liệu thật VNDIRECT). Ops SQL trực tiếp qua `tools/db-console.mjs` (Management API, HTTPS).
 
 ---
 
@@ -924,6 +924,51 @@ model DataQualityReport {
 
 - Route đọc: `GET /api/data-quality?limit&from&to` → `{latest, history[], trend {PASS,DEGRADED,SEVERE,total}, queryMs}`.
 
+### 6.29 `FeatureValue` — Cache giá trị đặc trưng 2 lớp (phiên #62 — P2-3)
+
+Cache kết quả tính toán đặc trưng đắt đỏ (hiện: rổ thanh khoản `topByAdtv:{market}:{type}:{n}`) theo kỷ luật §6 blueprint (KHÔNG Redis — bảng Postgres). **L1** Map in-process (hit ~0ms) + **L2** bảng này TTL mặc định **10 phút**; invalidation CHỦ ĐỘNG tại mọi đường ghi Bar (eod-sync · corporate-events · tick-sim rollover · reprobe · intl-eod) — TTL chỉ là lưới an toàn. Thực đo #62: chu kỳ ổn định 0-45ms thay vì 750-850ms trước cache.
+
+```prisma
+model FeatureValue {
+  key        String   @unique // "topByAdtv:HOSE:STOCK:10"
+  value      String   // JSON-hoá payload (TopAdtvSymbol[])
+  computedAt DateTime @default(now())
+  expiresAt  DateTime // hết hạn đọc được (TTL 10 phút mặc định)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+```
+
+- Dùng bởi: `src/lib/feature-cache.ts` (cacheGetJson/cacheSetJson/invalidateFeatureCache) · `topByAdtv` (`opts.force` bypass cho kiểm định).
+
+### 6.30 `NotificationOutbox` — Hộp thư đi S1 webhook/email (phiên #62 — P2-1)
+
+Hàng đợi gửi bản tin chu kỳ của S1 NotificationOfficer theo **pattern pending-egress như finfo**: sandbox chặn egress → row `PENDING_EGRESS` (tự retry mỗi chu kỳ S1 + POST /api/notify), máy chủ có egress → backlog tự cạn. Phân biệt lỗi trung thực: MẠNG (fetch failed/DNS/timeout) → PENDING_EGRESS · HTTP từ chối (4xx/5xx từ endpoint đã đạt được) → FAILED · 2xx → SENT.
+
+```prisma
+model NotificationOutbox {
+  id            String    @id @default(cuid())
+  channel       String    // WEBHOOK | EMAIL
+  target        String    // webhook URL hoặc địa chỉ email người nhận
+  subject       String?   // tiêu đề ngắn của bản tin
+  payload       String    // JSON-hoá nội dung bản tin S1
+  status        String    // PENDING_EGRESS | SENT | FAILED
+  attempts      Int       @default(0)
+  lastAttemptAt DateTime?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sentAt        DateTime?
+
+  @@index([status, createdAt(sort: Desc)])
+}
+```
+
+- Dùng bởi: `src/lib/notify.ts` (dispatchDigest/retryPendingOutbox/listOutbox) gắn trong `runNotificationOfficer` (mỗi chu kỳ) · route `GET/POST /api/notify` · UI Settings "Kênh thông báo S1".
+- Cấu hình kênh: AppSetting `notify` `{enabled, webhookUrl, emailTo}` (PUT /api/settings `{notify}` — validate http(s)/email).
+
 ---
 
 ## 7. Enum Dictionary
@@ -1020,6 +1065,7 @@ Seed **delete toàn bộ dữ liệu cũ trước khi ghi** (clean slate) — ch
 
 | Ngày | Thay đổi |
 |---|---|
+| 2026-10-08 | **v0.7.2 — DATA_PLATFORM_BLUEPRINT P2 (phiên #62, 29 → 31 model):** (1) **§6.29 `FeatureValue`** `{key unique, value String JSON, computedAt, expiresAt}` + index expiresAt — cache đặc trưng 2 lớp L1 process + L2 bảng (kỷ luật §6: KHÔNG Redis); topByAdtv wrap cache TTL 10' + invalidation chủ động tại MỌI đường ghi Bar; đo: chu kỳ ổn định 0-45ms (trước 750-850ms); (2) **§6.30 `NotificationOutbox`** `{channel WEBHOOK/EMAIL, target, subject, payload, status PENDING_EGRESS/SENT/FAILED, attempts, lastAttemptAt, lastError, sentAt}` + index (status, createdAt DESC) — hộp thư đi S1 pattern pending-egress như finfo, tự retry mỗi chu kỳ + POST /api/notify; cấu hình AppSetting `notify`; kèm P2-2 (news reliability trong DataSourceStatus meta.reliability — 0 bảng mới) + P2-4 (overlay AppSetting `vn-holidays` — 0 bảng mới); chi tiết xem DATA_PLATFORM_BLUEPRINT Changelog v1.6 |
 | 2026-10-08 | **v0.7.1 — fixbug #61 (F-612R-03/04, 0 đổi schema):** (1) §7 Enum Dictionary sửa **12 → 13 enum** + bổ sung dòng `CorporateEventKind` thiếu (SPLIT/BONUS/DIVIDEND/RESTATE — làm rõ `CorporateEvent.status`/`ForeignFlow.mode` là String validate tầng code, không phải enum); (2) đồng bộ 2 chỗ blueprint §5 P1 ghi "detail Json / checks Json" → "String (JSON-hoá)" đúng schema thật — chi tiết vòng rà + findings xem DATA_PLATFORM_BLUEPRINT Changelog v1.5 |
 | 2026-10-05 | Tái tạo tài liệu sau reset workspace; đồng bộ 1-1 với `prisma/schema.prisma` (17 model, 12 enum) |
 | 2026-10-06 | **v0.2 — Giai đoạn 2:** thêm 2 model `NewsItem` (S5 RSS, dedupe theo `url`) + `DataSourceStatus` (S4 stale marking, singleton-theo-`key`) → tổng **19 model**; cập nhật ERD + dictionary §6.18/§6.19; ghi nhận quote được cập nhật bởi tick engine `POST /api/market/tick`; bổ sung action audit mới |

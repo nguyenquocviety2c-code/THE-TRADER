@@ -1787,3 +1787,40 @@ Stage Summary:
 - **Còn treo (P2/P3 — không chặn, đã ghi blueprint v1.5):** latestFeatures take:60 + train/serve skew (cần quyết user) · F-611A-09 beyondBand +1 tick (thiết kế chốt #56/#59) · F-611R-05 eod-sync 3 chỗ catch còn console.error · S1 digest 2 chi tiết đầu (P3) · registry #9 statusKey null · VN_TICK ETF · risk/engine loadTopSeries catch (ngoài scope P1) · skills/ 2 lỗi tsc pre-existing (ngoài app).
 - **P2 (trả lời user):** theo thiết kế blueprint P2 = "MỞ RỘNG khi có nhu cầu đo được" — KHÔNG phải phần bắt buộc hoàn thành (definition-of-done nhóm ① = P0+P1); nhưng đo vòng này cho thấy điều kiện P2-3 đã dương tính (750-850ms > 200ms) — chờ user quyết có triển khai cache không; P2-1 bị sandbox egress chặn; P2-2/P2-4 chưa có nhu cầu đo.
 - Commit: fixbug #61 + push origin/main.
+
+---
+Task ID: 62-P2-plan
+Agent: Z.ai Code (kỹ sư AI chính — main conversation)
+Task: User chỉ thị "triển khai P2 tiếp luôn" — triển khai gói P2 DATA_PLATFORM_BLUEPRINT v1.5 §5 (P2-1→P2-4) cho nhóm nền tảng dữ liệu.
+
+Work Log:
+- Khảo sát: đọc blueprint §5 P2 (4 gói) + Changelog v1.5 (điều kiện P2-3 dương tính ~750-850ms/chu kỳ > 200ms) + worklog #61 + git log (8340162 = fixbug #61 đã push) + PM2 (2 process online) + dev.log sạch.
+- Đọc code trọng tâm: news.ts (5 feed RSS, meta per-feed ok/items hiện có) · market-session.ts (VN_HOLIDAYS tĩnh 2026, isTradingDay sync client-safe) · dated-series.ts (topByAdtv — 8 call-site/chu kỳ) · agent-service-runs.ts (S1 runNotificationOfficer — digest chưa có kênh gửi) · sources.ts (markSource thay meta wholesale) · settings.ts/route/types (AppSetting pattern) · data-quality.ts (ictNow dùng isTradingDay tĩnh; eodCheckDue gate) · schema.prisma.
+
+Stage Summary (thiết kế chốt):
+- P2-3 FeatureValue cache: model mới key unique + L1 in-process 90s + L2 bảng Postgres; topByAdtv wrap cache (opts.force bypass); invalidation tại eod-sync + corporate-events (bar đổi). Mục tiêu < 200ms/chu kỳ.
+- P2-1 S1 webhook/email: model NotificationOutbox (PENDING_EGRESS/SENT/FAILED) + lib notify.ts (AppSetting "notify": enabled/webhookUrl/emailTo) + dispatchDigest trong runNotificationOfficer (pattern pending-egress như finfo) + retry piggyback mỗi chu kỳ + GET/POST /api/notify + UI NotifyCard.
+- P2-2 News reliability: đếm per-feed parsed/skipped(parse lỗi)/duplicates/trùng URL + tích luỹ cumulative trong DataSourceStatus meta.reliability (read-merge-write) + GET /api/news lộ reliability + UI chips news-card.
+- P2-4 Lịch lễ VN chính thức: market-session.ts tĩnh 2026(+2027 ước lượng) giữ sync/client-safe + lib vn-calendar.ts (AppSetting "vn-holidays" overlay extra/remove, cache 60s) + A9 ictNow chuyển sang isOfficialTradingDay (async) + GET /api/market/calendar + UI CalendarCard.
+
+---
+Task ID: 62-P2
+Agent: Z.ai Code (kỹ sư AI chính — main conversation)
+Task: Triển khai trọn gói P2 DATA_PLATFORM_BLUEPRINT §5 (P2-1→P2-4) theo chỉ thị user "triển khai P2 tiếp luôn" — sau khi #61 trả lời P2 không bắt buộc nhưng điều kiện P2-3 đo dương tính.
+
+Work Log:
+- Schema additive: FeatureValue + NotificationOutbox → db:push (chú ý: shell DATABASE_URL sqlite nhiễm — export đúng URL từ .env như bài #58); PM2 restart QUA ecosystem.config.js (--update-env từng làm nhiễm env sqlite → 500 toàn route).
+- P2-3: lib feature-cache.ts 2 lớp (L1 Map + L2 Postgres TTL 10'); topByAdtv wrap cache (opts.force); invalidation chủ động 6 điểm ghi Bar: eod-sync syncEodFromDchart + deepBackfillEod · corporate-events applyAutoAdjust/reapplyAutoAdjustments/reverseCorporateEvent · tick simulated rollover · reprobe · intl-eod.
+- P2-1: lib notify.ts (AppSetting notify · dispatchDigest · retryPendingOutbox · listOutbox/notifyStatus) + model NotificationOutbox; S1 runNotificationOfficer gắn dispatch + retry piggyback (output.delivery); route GET/POST /api/notify; settings route/types mở rộng {notify, vnHolidays} + validate 400; UI NotifyCard (switch/inputs/badge/bảng outbox/nút thử lại).
+- P2-2: news.ts đếm per-feed parsed/skipped/duplicates/added/updated + tích luỹ DataSourceStatus meta.reliability (read-merge-write); GET /api/news lộ reliability + feeds; UI news-card chips % lỗi/% trùng (tooltip chi tiết).
+- P2-4: market-session VN_HOLIDAYS_OFFICIAL 2026 chính thức + 2027 ước-lượng (có tên, giữ sync client-safe); lib vn-calendar.ts (overlay AppSetting vn-holidays cache 60s · isOfficialTradingDay · officialCalendarView · upcomingHolidays); A9 ictNow → async isOfficialTradingDay; route GET /api/market/calendar (400 ISO sai); UI CalendarCard.
+- Kiểm định: scripts/p2-verify.ts 61 check — 61/61 PASS (A: steady-state 8 call < 200ms = 0ms · L2 path 45ms · cold 193ms · ổn định rổ 8/8 · force cùng rổ · invalidation xoá/tái tạo · 5 file wiring; B: pending-egress 2 kênh + retry + dọn; C: 5 feed tích luỹ baseline+1; D: overlay extra/remove + E2E A9 lật "ngoài ngày giao dịch" + dọn).
+- E2E: calendar 200/400 · notify GET · news reliability · settings PUT notify (400 ftp://, 200 https) · S1 single-run delivery PENDING_EGRESS · CHU KỲ 23 AGENTS ĐẦY ĐỦ qua nút UI 55s 0 LỖI với delivery trung thực (pendingCount 6) · tsc 0 lỗi src/ · lint PASS · browser desktop 1440 + mobile 390 (390=390) 0 console error · UI overlay save→API khép kín (thêm 2026-10-15 → overlay-extra → xoá → trading=true).
+- Docs: blueprint v1.5→v1.6 (header + status + bảng P2 ghi chú triển khai + Changelog v1.6) · DB_SCHEMA v0.7.1→v0.7.2 (§6.29/§6.30 + 29→31 model) · README 2 dòng.
+
+Stage Summary:
+- P2-1→P2-4 TOÀN BỘ ĐÃ LÊN CODE — gói P0-P2 của DATA_PLATFORM_BLUEPRINT hoàn tất.
+- P2-3 đạt mục tiêu: 750-850ms/chu kỳ → 0ms (L1) / 45ms (L2 sau restart) / 193ms cold 1 lần/10' — RTT Supabase ~95-105ms/query là sàn chi phí cứng, cache loại 7/8 call-site mỗi chu kỳ.
+- P2-1 pattern pending-egress chạy đúng trong sandbox (WEBHOOK fetch failed → PENDING_EGRESS tự retry mỗi chu kỳ; EMAIL không SMTP → PENDING_EGRESS) — lên máy chủ có egress backlog tự cạn.
+- Notify config demo đang BẬT (webhook hook.example.invalid + email ops@example.com) để UI có dữ liệu hiện — user xoá được qua Settings.
+- Còn treo P3 mới: NotificationOutbox sandbox tích luỹ ~2 row/chu kỳ (chưa prune) · 2027 lịch ước lượng · kế thừa #61: latestFeatures take:60/70 (cần quyết user), VN_TICK ETF, F-611R-05, registry #9.

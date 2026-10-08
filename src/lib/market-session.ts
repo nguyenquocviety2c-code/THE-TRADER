@@ -1,6 +1,12 @@
 /**
  * Lịch & phiên giao dịch VN (Q7/Q8 — DATA_SOURCES.md §5).
  * Timezone tính toán: Asia/Ho_Chi_Minh (UTC+7).
+ *
+ * P2-4 (phiên #62 — DATA_PLATFORM_BLUEPRINT §5): lịch nghỉ lễ Việt Nam
+ * CHÍNH THỨC làm nguồn sự thật tĩnh (client-safe, sync — dùng cho UI + tick
+ * + A9 fallback); phần overlay runtime (AppSetting "vn-holidays" — ngày lễ
+ * đột xuất/tuỳ chỉnh không cần deploy) nằm ở src/lib/vn-calendar.ts phía
+ * server và MERGE với danh sách này qua isOfficialTradingDay().
  */
 
 /** Ngày VN "thật" của một thời điểm UTC (dịch +7h rồi lấy phần UTC). */
@@ -13,16 +19,54 @@ export function vnDateIso(date: Date = new Date()): string {
   return vnShift(date).toISOString().slice(0, 10);
 }
 
-/** Lịch nghỉ lễ Việt Nam (ước lượng, cập nhật hàng năm). */
-const VN_HOLIDAYS = new Set<string>([
+export interface VnHoliday {
+  date: string; // YYYY-MM-DD
+  name: string;
+  /** Ghi chú nguồn — "chính thức" = công bố đủ; "ước lượng" = chốt khi có công bố. */
+  note?: string;
+}
+
+/**
+ * Lịch nghỉ lễ Việt Nam CHÍNH THỨC (thị trường chứng khoán ngừng phiên —
+ * khác ngày nghỉ cơ quan nhà nước khi có nghỉ bù cuối tuần).
+ * Cập nhật hàng năm; 2027 là ƯỚC LƯỢNG theo quy luật công bố thường niên —
+ * cập nhật khi Nhà nước/Sở công bố chính thức.
+ */
+export const VN_HOLIDAYS_OFFICIAL: VnHoliday[] = [
   // 2026
-  "2026-01-01", // Tết Dương lịch
-  "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", // Tết Bính Ngọ
+  { date: "2026-01-01", name: "Tết Dương lịch" },
+  { date: "2026-02-16", name: "Tết Bính Ngọ (mùng 1)" },
+  { date: "2026-02-17", name: "Tết Bính Ngọ (mùng 2)" },
+  { date: "2026-02-18", name: "Tết Bính Ngọ (mùng 3)" },
+  { date: "2026-02-19", name: "Tết Bính Ngọ (mùng 4)" },
+  { date: "2026-02-20", name: "Tết Bính Ngọ (nghỉ bù)" },
   // F-110 (audit): Giỗ Tổ 10/3 âm = CN 26/04/2026 → thị trường nghỉ bù thứ Hai 27/04
-  "2026-04-27",
-  "2026-04-30", "2026-05-01", // 30/4 & 1/5
-  "2026-09-02", "2026-09-03", // Quốc khánh
-]);
+  { date: "2026-04-27", name: "Giỗ Tổ Hùng Vương (nghỉ bù)" },
+  { date: "2026-04-30", name: "Ngày Giải phóng miền Nam" },
+  { date: "2026-05-01", name: "Ngày Quốc tế Lao động" },
+  { date: "2026-09-02", name: "Quốc khánh" },
+  { date: "2026-09-03", name: "Quốc khánh (nghỉ bù)" },
+  // 2027 — ƯỚC LƯỢNG (Tết Đinh Mùi mùng 1 = 06/02/2027 Thứ Bảy)
+  { date: "2027-01-01", name: "Tết Dương lịch", note: "ước lượng 2027" },
+  { date: "2027-02-05", name: "Tết Đinh Mùi (nghỉ bù T6)", note: "ước lượng 2027" },
+  { date: "2027-02-08", name: "Tết Đinh Mùi (mùng 2)", note: "ước lượng 2027" },
+  { date: "2027-02-09", name: "Tết Đinh Mùi (mùng 3)", note: "ước lượng 2027" },
+  { date: "2027-02-10", name: "Tết Đinh Mùi (mùng 4)", note: "ước lượng 2027" },
+  { date: "2027-02-11", name: "Tết Đinh Mùi (mùng 5)", note: "ước lượng 2027" },
+  { date: "2027-04-16", name: "Giỗ Tổ Hùng Vương (10/3 âm)", note: "ước lượng 2027" },
+  { date: "2027-04-30", name: "Ngày Giải phóng miền Nam" },
+  { date: "2027-05-03", name: "Ngày Quốc tế Lao động (nghỉ bù)", note: "ước lượng 2027" },
+  { date: "2027-09-02", name: "Quốc khánh" },
+  { date: "2027-09-03", name: "Quốc khánh (nghỉ bù T6)", note: "ước lượng 2027" },
+];
+
+/** Set tra cứu nhanh (sync — nội bộ module + isTradingDay). */
+const VN_HOLIDAYS = new Set<string>(VN_HOLIDAYS_OFFICIAL.map((h) => h.date));
+
+/** Tìm thông tin ngày lễ theo ISO date (tra cứu hiển thị). */
+export function vnHolidayOf(iso: string): VnHoliday | undefined {
+  return VN_HOLIDAYS_OFFICIAL.find((h) => h.date === iso);
+}
 
 // Biên phiên tính bằng GIÂY kể từ 00:00 ICT (F-111 — chính xác tới từng giây):
 // 09:15:00=33300 · 11:30:00=41400 · 13:00:00=46800 · 14:45:00=53100 · 15:00:00=54000

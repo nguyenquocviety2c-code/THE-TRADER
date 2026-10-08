@@ -12,6 +12,8 @@ import {
   saveVndirectSettings,
   setMarketDataMode,
 } from "@/lib/settings";
+import { getNotifySettings, saveNotifySettings, notifyStatus } from "@/lib/notify";
+import { getVnHolidayOverlay, saveVnHolidayOverlay, upcomingHolidays } from "@/lib/vn-calendar";
 import { getRiskQuantLimitsStatus, resetRiskQuantLimits } from "@/lib/risk/engine";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +33,16 @@ export const maxDuration = 30;
  */
 
 async function buildSettingsResponse(): Promise<SettingsResponse> {
-  const [vndirect, eff, lastAssessment, riskQuantLimits] = await Promise.all([
+  const [
+    vndirect,
+    eff,
+    lastAssessment,
+    riskQuantLimits,
+    notifyCfg,
+    notifyStat,
+    vnOverlay,
+    vnUpcoming,
+  ] = await Promise.all([
     getVndirectSettings(),
     getEffectiveMode(),
     db.marketAssessment
@@ -39,6 +50,12 @@ async function buildSettingsResponse(): Promise<SettingsResponse> {
       .catch(() => null),
     // Fixbug #52-F5 — trạng thái Beta CRB-7 cho nút reset ở UI Cài đặt
     getRiskQuantLimitsStatus().catch(() => null),
+    // P2-1/#62 — kênh thông báo S1 + trạng thái outbox
+    getNotifySettings(),
+    notifyStatus(),
+    // P2-4/#62 — overlay lịch nghỉ lễ VN
+    getVnHolidayOverlay(),
+    upcomingHolidays(6),
   ]);
 
   // Risk limits — config của risk-manager (A6, có đủ 3 hạn mức), exposure (A7)
@@ -66,6 +83,19 @@ async function buildSettingsResponse(): Promise<SettingsResponse> {
       eodSyncAt: process.env.EOD_SYNC_AT ?? "15:45",
       realtimeOk: eff.realtimeOk,
       lastRealtimeAt: eff.lastRealtimeAt,
+    },
+    notify: {
+      enabled: notifyCfg.enabled,
+      webhookUrl: notifyCfg.webhookUrl,
+      emailTo: notifyCfg.emailTo,
+      pendingCount: notifyStat.pendingCount,
+      sentCount: notifyStat.sentCount,
+      lastSentAt: notifyStat.lastSentAt,
+    },
+    vnHolidays: {
+      extra: vnOverlay.extra,
+      remove: vnOverlay.remove,
+      upcoming: vnUpcoming,
     },
     llm: llmStatus(),
     risk: {
@@ -138,12 +168,76 @@ export async function PUT(req: Request): Promise<NextResponse> {
         { status: 400 }
       );
     }
+    // P2-1/#62 — validate kênh thông báo: webhookUrl phải http(s) khi khác rỗng
+    const notify = body.notify;
+    if (notify !== undefined) {
+      if (typeof notify !== "object" || Array.isArray(notify)) {
+        return NextResponse.json(
+          { error: "Trường notify phải là object { enabled?, webhookUrl?, emailTo? }." },
+          { status: 400 }
+        );
+      }
+      const url = notify.webhookUrl;
+      if (typeof url === "string" && url !== "" && !/^https?:\/\//.test(url.trim())) {
+        return NextResponse.json(
+          { error: "webhookUrl phải bắt đầu bằng http:// hoặc https:// (hoặc để trống để xoá)." },
+          { status: 400 }
+        );
+      }
+      if (notify.enabled !== undefined && typeof notify.enabled !== "boolean") {
+        return NextResponse.json({ error: "notify.enabled phải là boolean." }, { status: 400 });
+      }
+      if (
+        notify.emailTo !== undefined &&
+        typeof notify.emailTo === "string" &&
+        notify.emailTo !== "" &&
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(notify.emailTo.trim())
+      ) {
+        return NextResponse.json(
+          { error: "emailTo không đúng định dạng địa chỉ email (hoặc để trống để xoá)." },
+          { status: 400 }
+        );
+      }
+    }
+    // P2-4/#62 — validate overlay lịch lễ: mảng ISO date
+    const holidays = body.vnHolidays;
+    if (holidays !== undefined) {
+      if (typeof holidays !== "object" || Array.isArray(holidays)) {
+        return NextResponse.json(
+          { error: "Trường vnHolidays phải là object { extra?: string[], remove?: string[] }." },
+          { status: 400 }
+        );
+      }
+      const isoRe = /^\d{4}-\d{2}-\d{2}$/;
+      for (const key of ["extra", "remove"] as const) {
+        const list = holidays[key];
+        if (list === undefined) continue;
+        if (!Array.isArray(list) || list.some((d) => typeof d !== "string" || !isoRe.test(d))) {
+          return NextResponse.json(
+            { error: `vnHolidays.${key} phải là mảng ngày ISO YYYY-MM-DD (vd ["2026-10-20"]).` },
+            { status: 400 }
+          );
+        }
+      }
+    }
 
     if (mode !== undefined) {
       await setMarketDataMode(mode);
     }
     if (vnd) {
       await saveVndirectSettings(vnd);
+    }
+    // P2-1/#62 — lưu cấu hình kênh thông báo S1
+    if (notify) {
+      await saveNotifySettings({
+        ...(notify.enabled !== undefined ? { enabled: notify.enabled } : {}),
+        ...(notify.webhookUrl !== undefined ? { webhookUrl: notify.webhookUrl } : {}),
+        ...(notify.emailTo !== undefined ? { emailTo: notify.emailTo } : {}),
+      });
+    }
+    // P2-4/#62 — lưu overlay lịch nghỉ lễ VN
+    if (holidays) {
+      await saveVnHolidayOverlay(holidays);
     }
     // Phiên #51 — CRB-7: nút reset thủ công Beta limit-learning (nghiệm thu
     // CRB-7.4) — prior Beta(1,99), ghi AuditLog minh bạch.

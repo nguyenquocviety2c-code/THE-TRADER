@@ -31,6 +31,7 @@
 import { db } from "@/lib/db";
 import { reapplyAutoAdjustments } from "@/lib/corporate-events";
 import { markSource } from "@/lib/sources";
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "@/lib/feature-cache";
 import type { UnitSpec } from "@/lib/types";
 import { vnDateIso } from "@/lib/market-session";
 
@@ -675,6 +676,13 @@ export async function syncEodFromDchart(opts?: {
     }
   }
 
+  // P2-3/#62 — Bar vừa đổi (nến mới/tái ghi) → ADTV 45 phiên đổi theo:
+  // xoá cache rổ thanh khoản để chu kỳ sau tính lại từ dữ liệu mới (TTL 90s
+  // chỉ là lưới an toàn phía sau điểm invalidation chủ động này).
+  if (barsUpserted > 0) {
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
+  }
+
   // P1-3 — đối chiếu chéo SAU lượt upsert, dùng ẢNH QUOTE FINFO THẬT chụp
   // TRƯỚC vòng anchor (F-611B-01/#61 — trước đây hàm tự đọc Quote sau khi
   // anchor đã đè bằng close dchart → diff ≡ 0 vĩnh viễn)
@@ -837,6 +845,11 @@ export async function deepBackfillEod(opts?: { fromYear?: number }): Promise<Eod
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  // P2-3/#62 — deep backfill viết lại toàn bộ chuỗi bar → xoá cache rổ
+  if (barsUpserted > 0) {
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
   }
 
   const outcome: EodSyncOutcome = {

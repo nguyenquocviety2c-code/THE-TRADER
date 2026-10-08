@@ -27,6 +27,11 @@
 
 import { db } from "@/lib/db";
 import type { InstrumentType, Market } from "@prisma/client";
+import {
+  cacheGetJson,
+  cacheSetJson,
+  TOPBYADTV_CACHE_PREFIX,
+} from "@/lib/feature-cache";
 
 /* ═══════════════════ P0-1 · Kiểu hợp đồng chuỗi theo ngày ═══════════════════ */
 
@@ -173,6 +178,8 @@ export interface TopAdtvSymbol {
 export interface TopAdtvOptions {
   market?: Market;
   type?: InstrumentType;
+  /** P2-3: bỏ qua cache, tính thẳng từ DB (dùng bởi kiểm định/so đối chiếu). */
+  force?: boolean;
 }
 
 /** Hệ số chuyển ngày lịch → phiên — cửa sổ NẠP (đảm bảo chứa ≥ 45 phiên
@@ -186,6 +193,12 @@ const ADTV_CALENDAR_DAYS = Math.ceil(ADTV_SESSIONS * 1.7);
  * gốc bug F6), cùng định nghĩa cho loadTopSeries · topLiquid ·
  * buildMarketBlock/buildValuationBlock/buildLiquidityBlock · latestFeatures
  * · readiness A9. ≥ 10 bar mới vào bảng xếp hạng.
+ *
+ * P2-3 (phiên #62): kết quả cache 2 lớp (L1 process + L2 bảng Postgres
+ * FeatureValue) TTL 90s — giảm ~7-8 lần gọi/chu kỳ × ~106ms ≈ 750-850ms
+ * xuống < 200ms; eod-sync/corporate-events đổi Bar → invalidateFeatureCache
+ * ("topByAdtv:") chủ động. `opts.force` tính thẳng (kiểm định). Cache hit
+ * trả JSON parse — sai số 0 với tính tay (Number roundtrip JSON an toàn).
  */
 export async function topByAdtv(
   n: number,
@@ -193,6 +206,19 @@ export async function topByAdtv(
 ): Promise<TopAdtvSymbol[]> {
   const market = opts.market ?? "HOSE";
   const type = opts.type ?? "STOCK";
+
+  const cacheKey = `${TOPBYADTV_CACHE_PREFIX}${market}:${type}:${n}`;
+  if (!opts.force) {
+    const cached = await cacheGetJson(cacheKey);
+    if (cached != null) {
+      try {
+        return JSON.parse(cached) as TopAdtvSymbol[];
+      } catch {
+        // Payload hỏng (không thể xảy ra với upsert cùng tiến trình) → recompute
+      }
+    }
+  }
+
   const instruments = await db.instrument.findMany({
     where: { isActive: true, market, type },
     select: { id: true, symbol: true, market: true, type: true, sector: true },
@@ -223,7 +249,7 @@ export async function topByAdtv(
     arr.push(value);
     windowById.set(b.instrumentId, arr);
   }
-  return instruments
+  const ranked = instruments
     .map((i) => {
       const vals = windowById.get(i.id);
       if (!vals || vals.length < ADTV_MIN_BARS) return null;
@@ -241,6 +267,9 @@ export async function topByAdtv(
     .filter((r): r is TopAdtvSymbol => r !== null)
     .sort((a, b) => b.adtv - a.adtv)
     .slice(0, n);
+  // P2-3 — cache kết quả (payload thuần primitive, JSON an toàn)
+  await cacheSetJson(cacheKey, JSON.stringify(ranked));
+  return ranked;
 }
 
 /**

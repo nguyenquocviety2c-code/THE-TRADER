@@ -32,6 +32,69 @@ export interface FeedResult {
   ok: boolean;
   items: number;
   error?: string;
+  /** P2-2/#62 — thống kê parse lần chạy này: số item LẠI được ghi nhận. */
+  parsed?: number;
+  /** P2-2 — item bị bỏ vì thiếu title/url/ngày không hợp lệ (parse lỗi). */
+  skipped?: number;
+  /** P2-2 — item đã có trong DB theo URL (tin trùng — RSS nguồn hay trùng lặp). */
+  duplicates?: number;
+  /** P2-2 — tin mới thêm lần này. */
+  added?: number;
+  /** P2-2 — tin cũ cập nhật summary lần này. */
+  updated?: number;
+}
+
+/** P2-2/#62 — độ tin cậy TÍCH LUỴ per-feed (tỉ lệ parse lỗi/tin trùng theo
+ * thời gian — DATA_PLATFORM_BLUEPRINT §5 P2-2). Lưu trong DataSourceStatus
+ * meta.reliability (read-merge-write — crawl bị guard 60s serialize). */
+export interface FeedReliability {
+  runs: number;
+  okRuns: number;
+  itemsSeen: number;
+  parsed: number;
+  parseSkipped: number;
+  duplicates: number;
+  added: number;
+  updated: number;
+  lastOkAt: string | null;
+  lastError: string | null;
+}
+
+export type FeedReliabilityMap = Record<string, FeedReliability>;
+
+function emptyReliability(): FeedReliability {
+  return {
+    runs: 0,
+    okRuns: 0,
+    itemsSeen: 0,
+    parsed: 0,
+    parseSkipped: 0,
+    duplicates: 0,
+    added: 0,
+    updated: 0,
+    lastOkAt: null,
+    lastError: null,
+  };
+}
+
+/** Đọc reliability tích luỹ hiện tại từ meta nguồn "news". */
+async function readReliability(): Promise<FeedReliabilityMap> {
+  try {
+    const row = await db.dataSourceStatus.findUnique({
+      where: { key: "news" },
+      select: { meta: true },
+    });
+    if (!row?.meta) return {};
+    const parsed = JSON.parse(row.meta) as { reliability?: FeedReliabilityMap };
+    if (!parsed.reliability || typeof parsed.reliability !== "object") return {};
+    const out: FeedReliabilityMap = {};
+    for (const [k, v] of Object.entries(parsed.reliability)) {
+      if (v && typeof v === "object") out[k] = { ...emptyReliability(), ...v };
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 export interface NewsIngestResult {
@@ -43,6 +106,8 @@ export interface NewsIngestResult {
   ingestedAt: string;
   /** F-210 (audit 19-b): số giây còn chờ khi đánh 429 — cho header Retry-After. */
   retryAfterSeconds?: number;
+  /** P2-2/#62 — reliability tích luỹ per-feed sau lần chạy này. */
+  reliability?: FeedReliabilityMap;
 }
 
 /** Guard rate-limit trong bộ nhớ (một process Next.js duy nhất). */
@@ -185,6 +250,12 @@ export async function ingestNews(): Promise<NewsIngestResult> {
   let updated = 0;
 
   for (const feed of NEWS_FEEDS) {
+    // P2-2 — thống kê lần chạy này (parse lỗi + tin trùng per-feed)
+    let parsed = 0;
+    let skipped = 0;
+    let duplicates = 0;
+    let feedAdded = 0;
+    let feedUpdated = 0;
     try {
       const res = await fetch(feed.url, {
         headers: {
@@ -203,19 +274,27 @@ export async function ingestNews(): Promise<NewsIngestResult> {
       for (const item of items) {
         const title = cleanText(item.title, 200);
         const url = firstLink(item);
-        if (!title || !url) continue;
+        if (!title || !url) {
+          skipped++; // P2-2 — parse lỗi cấu trúc (thiếu tiêu đề/link)
+          continue;
+        }
         const summary = cleanText(item.description, 320);
         const publishedAt = parseDate(item);
-        if (!publishedAt) continue; // AUD-CODE #29: bỏ tin không có ngày hợp lệ
+        if (!publishedAt) {
+          skipped++; // AUD-CODE #29 + P2-2 — ngày không hợp lệ = parse lỗi có đếm
+          continue;
+        }
 
         const existing = await db.newsItem.findUnique({ where: { url } });
         if (existing) {
+          duplicates++; // P2-2 — tin trùng theo URL
           if (summary && summary !== existing.summary) {
             await db.newsItem.update({
               where: { url },
               data: { summary, fetchedAt: new Date() },
             });
             updated++;
+            feedUpdated++;
           }
           continue;
         }
@@ -231,14 +310,33 @@ export async function ingestNews(): Promise<NewsIngestResult> {
           },
         });
         added++;
+        feedAdded++;
+        parsed++;
       }
-      feeds.push({ name: feed.name, ok: true, items: items.length });
+      // Item hợp lệ đủ trường nhưng URL đã có vẫn tính "parsed" (đã hiểu
+      // đúng cấu trúc) — parseSkipped chỉ đếm item KHÔNG dùng được.
+      parsed += duplicates;
+      feeds.push({
+        name: feed.name,
+        ok: true,
+        items: items.length,
+        parsed,
+        skipped,
+        duplicates,
+        added: feedAdded,
+        updated: feedUpdated,
+      });
     } catch (err) {
       feeds.push({
         name: feed.name,
         ok: false,
         items: 0,
         error: err instanceof Error ? err.message : "Lỗi không xác định",
+        parsed: 0,
+        skipped,
+        duplicates,
+        added: 0,
+        updated: 0,
       });
     }
   }
@@ -247,14 +345,45 @@ export async function ingestNews(): Promise<NewsIngestResult> {
   const mode: SourceMode = anyOk ? "live" : "fallback";
   const okNames = feeds.filter((f) => f.ok).map((f) => f.name);
 
+  // P2-2/#62 — gộp reliability TÍCH LUỴ per-feed (read-merge-write: crawl
+  // bị guard 60s + single-process nên không có race ghi đè)
+  const prevReliability = await readReliability();
+  const nowIso = new Date().toISOString();
+  const reliability: FeedReliabilityMap = { ...prevReliability };
+  for (const f of feeds) {
+    const cur = reliability[f.name] ?? emptyReliability();
+    cur.runs += 1;
+    cur.itemsSeen += f.items;
+    cur.parsed += f.parsed ?? 0;
+    cur.parseSkipped += f.skipped ?? 0;
+    cur.duplicates += f.duplicates ?? 0;
+    cur.added += f.added ?? 0;
+    cur.updated += f.updated ?? 0;
+    if (f.ok) {
+      cur.okRuns += 1;
+      cur.lastOkAt = nowIso;
+      cur.lastError = null;
+    } else {
+      cur.lastError = f.error ?? "lỗi không xác định";
+    }
+    reliability[f.name] = cur;
+  }
+
   await markSource("news", {
     mode,
     success: anyOk,
     lastError: anyOk ? null : feeds.map((f) => `${f.name}: ${f.error}`).join("; "),
     meta: {
       providers: okNames,
-      feeds: feeds.map((f) => ({ name: f.name, ok: f.ok, items: f.items })),
+      feeds: feeds.map((f) => ({
+        name: f.name,
+        ok: f.ok,
+        items: f.items,
+        skipped: f.skipped ?? 0,
+        duplicates: f.duplicates ?? 0,
+      })),
       lastAdded: added,
+      reliability,
     },
   });
 
@@ -277,6 +406,7 @@ export async function ingestNews(): Promise<NewsIngestResult> {
     total: await db.newsItem.count(),
     mode,
     feeds,
+    reliability, // P2-2 — kèm bản chụp reliability sau lần chạy này
     ingestedAt: new Date().toISOString(),
   };
 }

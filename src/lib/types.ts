@@ -421,6 +421,20 @@ export interface NewsItemRow {
   fetchedAt: string;
 }
 
+/** P2-2/#62 — độ tin cậy tích luỹ per-feed (tỉ lệ parse lỗi/tin trùng). */
+export interface FeedReliabilityRow {
+  runs: number;
+  okRuns: number;
+  itemsSeen: number;
+  parsed: number;
+  parseSkipped: number;
+  duplicates: number;
+  added: number;
+  updated: number;
+  lastOkAt: string | null;
+  lastError: string | null;
+}
+
 export interface NewsResponse {
   items: NewsItemRow[];
   meta: {
@@ -430,6 +444,16 @@ export interface NewsResponse {
     stale: boolean;
     ageMinutes: number | null;
     providers: string[];
+    /** P2-2 — reliability tích luỹ per-feed. */
+    reliability: Record<string, FeedReliabilityRow>;
+    /** P2-2 — kết quả lần crawl cuối (per-feed items/skipped/duplicates). */
+    feeds: {
+      name: string;
+      ok: boolean;
+      items: number;
+      skipped?: number;
+      duplicates?: number;
+    }[];
   };
 }
 
@@ -438,8 +462,17 @@ export interface NewsIngestResponse {
   updated: number;
   total: number;
   mode: string;
-  feeds: { name: string; ok: boolean; items: number; error?: string }[];
+  feeds: {
+    name: string;
+    ok: boolean;
+    items: number;
+    error?: string;
+    skipped?: number;
+    duplicates?: number;
+  }[];
   ingestedAt: string;
+  /** P2-2 — reliability sau lần chạy này. */
+  reliability?: Record<string, FeedReliabilityRow>;
 }
 
 export interface FlowsItem {
@@ -518,6 +551,23 @@ export interface VndirectSettings {
   lastTestMessage: string | null;
 }
 
+/** P2-1/#62 — kênh thông báo S1 (webhook/email, pending-egress). */
+export interface NotifySettingsView {
+  enabled: boolean;
+  webhookUrl: string;
+  emailTo: string;
+  pendingCount: number;
+  sentCount: number;
+  lastSentAt: string | null;
+}
+
+/** P2-4/#62 — lịch nghỉ lễ VN: overlay runtime + ngày lễ sắp tới. */
+export interface VnHolidaysView {
+  extra: string[];
+  remove: string[];
+  upcoming: { date: string; name: string; source: "static" | "overlay-extra" }[];
+}
+
 export interface SettingsResponse {
   vndirect: VndirectSettings;
   marketData: {
@@ -530,6 +580,10 @@ export interface SettingsResponse {
     realtimeOk: boolean | null;
     lastRealtimeAt: string | null;
   };
+  /** P2-1 — kênh thông báo S1 + trạng thái outbox. */
+  notify: NotifySettingsView;
+  /** P2-4 — lịch nghỉ lễ VN (overlay + sắp tới). */
+  vnHolidays: VnHolidaysView;
   llm: LlmInfo;
   risk: {
     maxSectorWeightPct: number;
@@ -554,6 +608,17 @@ export interface UpdateSettingsPayload {
     accountNumber?: string;
   };
   marketData?: { mode?: MarketDataMode };
+  /** P2-1/#62 — cấu hình kênh thông báo S1 (webhook/email). */
+  notify?: {
+    enabled?: boolean;
+    webhookUrl?: string;
+    emailTo?: string;
+  };
+  /** P2-4/#62 — overlay lịch nghỉ lễ VN (mảng truyền thì thay, omit giữ). */
+  vnHolidays?: {
+    extra?: string[];
+    remove?: string[];
+  };
   /** Phiên #51 — CRB-7: reset Beta limit-learning về prior Beta(1,99) (ghi AuditLog). */
   riskQuantReset?: boolean;
 }

@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { ingestNews } from "@/lib/news";
+import { ingestNews, type FeedReliabilityMap } from "@/lib/news";
 import { readSources, staleOf } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET  /api/news?limit=12 — tin mới nhất (S5) + meta nguồn (stale marking).
+ * GET  /api/news?limit=12 — tin mới nhất (S5) + meta nguồn (stale marking)
+ * + P2-2/#62: reliability per-feed (tỉ lệ parse lỗi/tin trùng tích luỹ).
  * POST /api/news — chạy crawler RSS ngay (rate-limit 60s giữa 2 lần nạp).
  */
 export async function GET(req: NextRequest) {
@@ -39,6 +40,13 @@ export async function GET(req: NextRequest) {
     const stale = newsSource
       ? staleOf(newsSource)
       : { stale: false, ageMinutes: null };
+    // P2-2/#62 — độ tin cậy per-feed tích luỹ từ meta nguồn (parse lỗi + trùng)
+    const reliability =
+      (newsSource?.meta?.reliability as FeedReliabilityMap | undefined) ?? {};
+    const lastFeeds =
+      (newsSource?.meta?.feeds as
+        | { name: string; ok: boolean; items: number; skipped?: number; duplicates?: number }[]
+        | undefined) ?? [];
 
     return NextResponse.json({
       items,
@@ -49,6 +57,8 @@ export async function GET(req: NextRequest) {
         stale: stale.stale,
         ageMinutes: stale.ageMinutes,
         providers: (newsSource?.meta?.providers as string[] | undefined) ?? [],
+        reliability,
+        feeds: lastFeeds,
       },
     });
   } catch (err) {

@@ -40,7 +40,7 @@
  */
 
 import { db } from "@/lib/db";
-import { isTradingDay } from "@/lib/market-session";
+import { isOfficialTradingDay } from "@/lib/vn-calendar";
 import { topByAdtv } from "@/lib/dated-series";
 import { latestFeatureSnapshot } from "@/lib/ml/features";
 
@@ -350,13 +350,22 @@ export function scanOutlierBars(market: string, type: string, bars: ScanBarInput
 
 /* ═══════════════════════ 6 phép kiểm ═══════════════════════ */
 
-/** Thời gian ICT hiện tại (cùng quy ước market-session.ts / market-engine). */
-function ictNow(): { date: string; minutes: number; tradingDay: boolean } {
+/** Thời gian ICT hiện tại (cùng quy ước market-session.ts / market-engine).
+ * P2-4/#62 — tradingDay qua LỊCH CHÍNH THỨC (tĩnh + overlay AppSetting
+ * "vn-holidays"): ngày lễ đột xuất được khai báo runtime → A9 hết báo
+ * "outage tổng?" giả cho cả sàn nghỉ hợp lệ. */
+async function ictNow(): Promise<{
+  date: string;
+  minutes: number;
+  tradingDay: boolean;
+  calendarSource: "static+overlay";
+}> {
   const v = new Date(Date.now() + 7 * 3_600_000);
   return {
     date: v.toISOString().slice(0, 10),
     minutes: v.getUTCHours() * 60 + v.getUTCMinutes(),
-    tradingDay: isTradingDay(new Date()),
+    tradingDay: await isOfficialTradingDay(new Date()),
+    calendarSource: "static+overlay",
   };
 }
 
@@ -372,7 +381,7 @@ function ictNow(): { date: string; minutes: number; tradingDay: boolean } {
  */
 export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
   const asOf = new Date();
-  const ict = ictNow();
+  const ict = await ictNow();
   const thresholds = await getThresholds();
   const checks: DqCheck[] = [];
   const dbFail: string[] = [];
@@ -470,8 +479,8 @@ export async function runDataQualityChecks(): Promise<DataQualityVerdict> {
           : "ngoài phiên liên tục — quote đứng ở mức đóng là ĐÚNG (không báo cũ)"
         : "ngoài ngày giao dịch — không kiểm tuổi quote (hết crying wolf)",
       eodCheckDue
-        ? `EOD ${ict.date}: ${vnWithBars.length - eodMissingToday}/${vnWithBars.length} mã có nến hôm nay`
-        : "EOD hôm nay chưa đến giờ kiểm (16:15 ICT)",
+        ? `EOD ${ict.date}: ${vnWithBars.length - eodMissingToday}/${vnWithBars.length} mã có nến hôm nay (lịch chính thức + overlay)`
+        : "EOD hôm nay chưa đến giờ kiểm (16:15 ICT) hoặc ngoài lịch giao dịch chính thức",
       intlStaleBars.length > 0
         ? `${intlStaleBars.length} mã US/HK có nến cũ > ${INTL_STALE_DAYS} ngày (${intlStaleBars.slice(0, 5).join(", ")})`
         : intlSymbols.length > 0

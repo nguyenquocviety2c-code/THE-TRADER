@@ -9,6 +9,7 @@ import {
   resolveUnitSpec,
 } from "@/lib/eod-sync";
 import { runPostIngestChecks } from "@/lib/ingest-pipeline";
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "@/lib/feature-cache";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -148,6 +149,9 @@ async function backfillSingleSymbol(
     });
   }
   await anchorQuoteToRealEod(instrumentId, bars, unit);
+  // P2-3/#62 — mã mới có bar (deep backfill riêng) → bảng xếp hạng ADTV có
+  // thể đổi: xoá cache rổ thanh khoản
+  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX);
   return bars.length;
 }
 
