@@ -1418,3 +1418,23 @@ Stage Summary:
 - Lý do nhóm 3 cuối: nhất quán quyết định #51 (blueprint duyệt làm kế hoạch tương lai); L1–L5 đều đóng cổng dữ liệu thật; có E chuẩn trước làm điểm giải trình khi ML ảnh hưởng quyết định
 - Dòng thời gian tối ưu: nâng nền xong = đồng hồ sạch cho ML bắt đầu chạy song song lúc triển khai nhóm 2
 - Bước mở màn phiên sau (nếu user duyệt): chẩn đoán 4 agents platform (S0/S1/S2/A9) + đo dữ liệu thật → soạn docs/DATA_PLATFORM_BLUEPRINT.md theo quy trình 2 nhóm trước
+
+---
+Task ID: 54
+Agent: main-orchestrator (Z.ai Code)
+Task: Mở màn nhóm ① Nền tảng dữ liệu — chẩn đoán 4 agents (S0/S1/S2/A9) + đo DB thật + soạn docs/DATA_PLATFORM_BLUEPRINT.md v0.1 (nhiệm vụ chung/riêng · lĩnh vực · kiến trúc phối hợp + điều phối · thuật toán đề xuất)
+
+Work Log:
+- User duyệt thứ tự #53 (platform → executive → ML) và yêu cầu: nhiệm vụ chung/riêng từng agent, khía cạnh chạm đến, kiến trúc phối hợp + điều phối hành động lại, thuật toán/hàm/công nghệ cần bổ sung
+- Task 54-a (Explore agent): khảo sát toàn tầng dữ liệu — 4 hàm run trong agent-service-runs.ts L179–317, 10 đường nạp (eod-sync/intl-eod/fundamentals/vndirect/flows/news/tick/matching/reprobe/backfill), engine mini-service (tick 10s · news 15' · due-check 60s · eod 15:45 · intl 06:15 backoff 30'→4h · reprobe CN 04:00), tính năng triplicated (indicators.ts latest-only · ml/features.ts rolling · agent-context + evidence tự tính), 4 định nghĩa rổ khác nhau (F6 chỉ vá 1/4), A9 0-consumer
+- Tự đọc agent-service-runs.ts L176–320 xác minh từng hàm: S0 không thu thập gì (chỉ đếm + fundamentals Chủ nhật) · S1 ba query đếm · S2 tính 4/5 feature không phục vụ ai + topLiquid vẫn quote-volume · A9 3 con số toàn cục
+- Đo DB thật (env -u DATABASE_URL, bài học Fixbug §4): 90 instrument active (HOSE 40/HNX 22/UPCOM 14/US 10/HK 4) · 215.327 bar 2013→2026-10-07 (min 674/median 3411/max 3432 phiên mỗi mã) · 76 Quote (US/HK không có) · 248 NewsItem · 0 FinancialFundamental · 14 mã US/HK 0-bar (Yahoo 429, engine backoff lần sai thứ 6 thử lại 240') · DataSourceStatus 7 nguồn: real(eod,quotes) live(news) simulated(flows) fallback(intl 14/14 lỗi) pending(fundamentals) paper(trading)
+- Kiểm engine sống: news chảy đều 15 phút (07:33→08:18Z), tick lỗi chỉ thoáng qua lúc recompile; Quote max tradedAt 14:44:59 ICT trùng giờ đóng cửa HOSE → phát hiện A9 "crying wolf" mọi buổi tối (check freshness không session-aware)
+- Viết docs/DATA_PLATFORM_BLUEPRINT.md v0.1 (~230 dòng, MỞ THẢO LUẬN): §0 chẩn đoán (bảng roster-vs-code 4 agents + đo DB + bản đồ 10 đường nạp + 5 thứ đã tốt + 8 khoảng trống G1–G8) · §1 nhiệm vụ chung 5 tính chất (Đúng/Đủ/Tươi đúng ngữ cảnh/Tái lập/Minh bạch) + nhiệm vụ riêng đích từng agent · §2 bản đồ 12 lĩnh vực với traffic-light · §3 kiến trúc phối hợp hợp đồng 4 tầng (DatedSeries · topByAdtv · FeatureContract · DataQualityVerdict) + đợt A từ trang trí thành có nghĩa + ranh giới VETO giữ nguyên · §4 kiến trúc điều phối (engine giữ vai Timer + 3 cơ chế mới: schedule state vào DataSourceStatus.meta · pipeline nạp một cửa qua hậu kiểm A9 · invalidation theo (mã, ngày)) · §5 gói P0-1→5 (nền sạch, 0 schema đổi) · P1-1→5 (CorporateEvent · PIT tối thiểu · đối chiếu chéo · ForeignFlow persist · MiniBar tùy chọn) · P2 (kênh S1 · news reliability · cache · lịch lễ) · §6 bảng KHÔNG áp dụng (Kafka/Airflow/dbt/ClickHouse/Timescale/Redis/DuckDB) · §7 checklist 11 test 3 tầng · §8 5 câu hỏi mở
+- README: đăng ký DATA_PLATFORM_BLUEPRINT vào bảng Tài liệu chi tiết + bổ sung 2 dòng còn thiếu (CONTROL_RISK_QUANT · ML_LEARNING — 2 blueprint trước chưa từng đăng ký)
+
+Stage Summary:
+- Chẩn đoán trung thực: "nhóm nền tảng" hiện là lớp trình bày — 4 agents chạy độc lập 0 phối hợp, nền tảng thật sống ở market-engine + API routes ngoài roster; S0 hữu danh vô thực (config không ai đọc), S2 vẫn dùng ranking lớp-bug-F6, A9 mù 4 loại (0-bar/per-symbol/nguồn/lịch phiên) + verdict 0 consumer
+- Đề xuất kiến trúc lõi: 4 HỢP ĐỒNG (DatedSeries · topByAdtv · FeatureContract · DataQualityVerdict) thay cho "tin tưởng ngầm" — mỗi hợp đồng nhắm thẳng 1 khoảng trống G1–G4; A9 thành kiểm định viên 6 phép (freshness theo lịch phiên HOSE 09:15–14:45 · gap union-calendar · outlier Hampel 3·1,4826·MAD · nghi-vấn-split k∈{2,3,5,10} · 7 nguồn · readiness) xuất verdict cấu trúc vào prompt Wave B + Chủ tịch — không đụng VETO
+- P0 không đổi schema: hợp nhất 3 đường tính feature + 1 định nghĩa rổ + A9 thật + engine state vào DB — tất cả nhắm gốc 4/8 bug #52
+- Doc ở trạng thái MỞ THẢO LUẬN chờ 5 câu hỏi §8 (mức gate A9 · feature store bước nào · split confirm hay auto · tick phút có lưu không · phạm vi P0)
