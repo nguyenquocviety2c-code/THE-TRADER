@@ -1438,3 +1438,22 @@ Stage Summary:
 - Đề xuất kiến trúc lõi: 4 HỢP ĐỒNG (DatedSeries · topByAdtv · FeatureContract · DataQualityVerdict) thay cho "tin tưởng ngầm" — mỗi hợp đồng nhắm thẳng 1 khoảng trống G1–G4; A9 thành kiểm định viên 6 phép (freshness theo lịch phiên HOSE 09:15–14:45 · gap union-calendar · outlier Hampel 3·1,4826·MAD · nghi-vấn-split k∈{2,3,5,10} · 7 nguồn · readiness) xuất verdict cấu trúc vào prompt Wave B + Chủ tịch — không đụng VETO
 - P0 không đổi schema: hợp nhất 3 đường tính feature + 1 định nghĩa rổ + A9 thật + engine state vào DB — tất cả nhắm gốc 4/8 bug #52
 - Doc ở trạng thái MỞ THẢO LUẬN chờ 5 câu hỏi §8 (mức gate A9 · feature store bước nào · split confirm hay auto · tick phút có lưu không · phạm vi P0)
+
+---
+Task ID: 55
+Agent: main-orchestrator (Z.ai Code)
+Task: Chốt 5 câu hỏi DATA_PLATFORM_BLUEPRINT → v1.0 ĐÃ CHỐT TRIỂN KHAI + trả lời 4 câu hỏi mới về độ sẵn sàng dữ liệu cho ANN/nghiên cứu (cấu trúc DB · cơ chế cập nhật · phục vụ agents/nghiên cứu · luồng/API/backend/hook)
+
+Work Log:
+- User trả lời 5 câu §8: 1 theo đề xuất (b: cờ DEGRADED/SEVERE, không hard-stop) · 2 theo đề xuất (a: hợp nhất feature 0 schema) · 3 KHÁC đề xuất — chọn (b) TỰ ĐIỀU CHỈNH split ngay kèm AuditLog · 4 theo đề xuất (a: không lưu tick phút) · 5 theo đề xuất (a: trọn P0-1→5 một đợt)
+- User thêm 4 câu hỏi mới: DB Supabase đã đủ cho ANN/tham chiếu/so sánh/hồi quy sau này chưa · nhóm có cơ chế cập nhật lưu trữ chưa · dữ liệu đã phục vụ nghiên cứu + agents chưa · luồng/API/backend/hook đủ chưa
+- Kiểm chứng cho câu trả lời: đếm schema.prisma = 26 model + 12 enum (docs ghi 25 — lệch 1 do RiskQuantSnapshot #51, ghi drift để đồng bộ khi triển khai P0) · liệt kê 32 file route API (agents 6 · market 7 · signals 3 · assessment 2 · ml 2 · settings 2 · orders 2...) · 6 hooks (use-realtime đọc kỹ: WS 6 event → TanStack invalidation, kết nối io("/?XTransformPort=3003") chuẩn gateway, write thẳng cache quotes/watchlist)
+- Nâng blueprint v0.1 → v1.0 ĐÃ CHỐT TRIỂN KHAI: header status · §3.3 bỏ hard-stop theo 1b · P0 header chốt 5a · P1-1 THIẾT KẾ LẠI cho 3b (auto-adjust + 4 lớp an toàn: heuristic mức CAO mới调整 · AuditLog pre-values/ratio/range đảo ngược được · kill-switch AppSetting · upsert idempotent tự hội tụ) · P1-5 MiniBar LOẠI (4a) · §8 đổi thành bản đã chốt · THÊM §9 đánh giá độ sẵn sàng (9.1 bảng nhu cầu ANN × bảng hiện có — đủ cho MLP đang chạy + L1–L2, 3 lỗ hổng ForeignFlow/PIT/CorporateEvent, PIT là rủi ro duy nhất làm nghiên cứu hồi tố sai không phát hiện · 9.2 cơ chế cập nhật CÓ chạy thật với thực đo hôm nay · 9.3 agents CÓ mỗi chu kỳ / nghiên cứu có dữ liệu thô nhưng chưa kiểm định → P0-4 lấp · 9.4 bảng 4 tầng đủ đường ống thiếu hợp đồng) + Changelog
+- MultiEdit fail 1 lần (typo NỀN→NỦN trong old_str) — bài học #52 tái xác nhận: edit 1+2 đã áp một phần, phải re-read rồi áp nốt 3 edit
+- README: cập nhật dòng DATA_PLATFORM_BLUEPRINT sang v1.0 ĐÃ CHỐT + commit + push
+
+Stage Summary:
+- DATA_PLATFORM_BLUEPRINT v1.0 ĐÃ CHỐT TRIỂN KHAI — câu 3 là điểm khác biệt duy nhất so với đề xuất: user chọn TỰ ĐIỀU CHỈNH split; thiết kế bù lớp an toàn đảo ngược (AuditLog đủ pre-values + kill-switch + heuristic 2 phép + volume) để hành vi tự động an toàn như hành vi thủ công
+- Trả lời 4 câu readiness: (1) DB 26 model đủ cho ANN hiện tại + L1–L2; 3 lỗ hổng có kế hoạch (P1-1/2/4); PIT là rủi ro nghiên cứu-sai-không-biết duy nhất (2) cơ chế cập nhật CÓ chạy thật hằng ngày (10 đường, thực đo) (3) phục vụ agents CÓ; nghiên cứu có dữ liệu thô nhưng chưa qua kiểm định → đúng động cơ P0-4 (4) đường ống API/backend/WS/hooks ĐỦ — thiếu hợp đồng, P0 không cần route/hook mới
+- Phát hiện doc drift: docs ghi 25 model, thực tế 26 (RiskQuantSnapshot #51) — sẽ đồng bộ trong đợt triển khai P0
+- Sẵn sàng triển khai P0-1→5 (chốt 5a, 1–2 phiên) khi user ra lệnh

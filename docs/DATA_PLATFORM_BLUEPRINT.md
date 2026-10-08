@@ -1,8 +1,8 @@
 # DATA PLATFORM BLUEPRINT — NHÓM NỀN TẢNG DỮ LIỆU: HỢP ĐỒNG CHUỖI DỮ LIỆU, KIỂM ĐỊNH & PHỤC VỤ ĐẶC TRƯNG
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/DATA_PLATFORM_BLUEPRINT.md` · **Version:** 0.1 · **Created:** 2026-10-08 (phiên #54)
-> **Status:** **MỞ THẢO LUẬN — chờ 5 câu hỏi §8 chốt với user** (theo quy trình 2 nhóm trước: RESEARCH_COUNCIL_PLAN #36 → CONTROL_RISK_QUANT_BLUEPRINT #46)
+> **Document:** `docs/DATA_PLATFORM_BLUEPRINT.md` · **Version:** 1.0 · **Created:** 2026-10-08 (phiên #54) · **Chốt:** 2026-10-08 (phiên #55)
+> **Status:** **ĐÃ CHỐT TRIỂN KHAI (phiên #55)** — 5 câu hỏi §8 đã trả lời: 1b · 2a · **3b TỰ ĐIỀU CHỈNH split kèm AuditLog (user chọn khác đề xuất — P1-1 thiết kế lại kèm lớp an toàn đảo ngược)** · 4a · 5a. Thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu theo 4 câu hỏi mới của user
 > **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (UnitSpec B2 · universe 90 mã) · [CONTROL_RISK_QUANT_BLUEPRINT.md](./CONTROL_RISK_QUANT_BLUEPRINT.md) (σ CRB-1 · rổ ADTV §0.4 — gốc bug F6) · [ML_LEARNING_BLUEPRINT.md](./ML_LEARNING_BLUEPRINT.md) (cổng dữ liệu §6 — người tiêu thụ tương lai lớn nhất) · [DATA_SOURCES.md](./DATA_SOURCES.md) · [Fixbug.md](../Fixbug.md) (4/8 bug #52 gốc tầng này)
 > **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #54)
 
@@ -155,7 +155,7 @@ Mỗi tầng chỉ trao đổi qua **interface có tên và có kiểm chứng �
 
 Chu kỳ agent: Wave A (4 agents nền tảng) chạy → **verdict A9 + readiness S2 được lưu trước khi Wave B bắt đầu** → `agent-context.ts` thêm khối prompt `TÍNH TRẠNG DỮ LIỆU` (ví dụ: *"báo giá US/HK thiếu 14/90 mã · rổ đặc trưng sẵn 9/10 mã · nguồn intl fallback"*) cho 5 agent nghiên cứu + Chủ tịch → agent nghiên cứu tự khai độ confound trong luận cứ (đúng tinh thần câu chữ A9 hiện tại "agent nghiên cứu nên khai báo độ trễ" — nhưng giờ là dữ liệu có cấu trúc thay vì lời khuyên suông).
 
-**Ranh giới VETO giữ nguyên:** A9 **không** veto quyết định giao dịch (đó là của A6/A7/A8) — A9 chỉ phái sinh cờ chất lượng đầu vào. Hard-stop chu kỳ chỉ khi SEVERE (định nghĩa ở §8 câu 1).
+**Ranh giới VETO giữ nguyên:** A9 **không** veto quyết định giao dịch (đó là của A6/A7/A8) — A9 chỉ phái sinh cờ chất lượng đầu vào. Theo câu 8-1b đã chốt: DEGRADED → cờ vào prompt Wave B + Chủ tịch; SEVERE → RiskAlert bắt buộc ack — **KHÔNG hard-stop chu kỳ** (đã loại phương án (c)).
 
 ---
 
@@ -192,7 +192,7 @@ Retry/failover/dead-letter: **kế thừa nguyên hiện trạng đã tốt** (r
 
 ## §5. Gói nâng cấp — thuật toán / hàm / công cụ
 
-### P0 — "NỀN SẠCH" (sửa gốc 4 bug #52 + hợp đồng hóa; 0 đổi schema)
+### P0 — "NỀN SẠCH" (sửa gốc 4 bug #52 + hợp đồng hóa; 0 đổi schema) — **chốt câu 8-5a: triển khai trọn P0-1 → P0-5 một đợt 1–2 phiên**
 
 | Gói | Nội dung | Thuật toán / hàm cụ thể | Nghiệm thu |
 |---|---|---|---|
@@ -206,11 +206,11 @@ Retry/failover/dead-letter: **kế thừa nguyên hiện trạng đã tốt** (r
 
 | Gói | Nội dung | Điểm thuật toán |
 |---|---|---|
-| **P1-1 CorporateEvent** | model mới `CorporateEvent {instrumentId, date, kind: SPLIT/DIVIDEND/RESTATE, ratio, status: SUSPECTED/CONFIRMED, source}` — heuristic P0-4(iv) ghi SUSPECTED; **không tự điều chỉnh** — chờ user confirm (câu §8-3) | heuristic tỷ số nguyên + khối lượng; confirm → mới tính lại chuỗi hoặc chỉ đánh dấu |
+| **P1-1 CorporateEvent + TỰ ĐIỀU CHỈNH** (chốt câu 8-3b — user chọn tự điều chỉnh, **khác đề xuất ban đầu**) | model mới `CorporateEvent {instrumentId, date, kind: SPLIT/DIVIDEND/RESTATE, ratio, status: AUTO_ADJUSTED/SUSPECTED/REVERSED, source, detail Json}`; heuristic P0-4(iv) phát hiện → **tự nhân chuỗi lịch sử trước ngày event theo ratio trong cùng transaction** → AuditLog ghi {mã, range điều chỉnh, ratio, giá trị pre-adjust}. **Lớp an toàn vì là hành vi tự động:** (i) chỉ tự điều chỉnh khi heuristic mức CAO — tỷ số nguyên k∈{2,3,5,10} khớp ±1% ở CẢ HAI phép close[t−1]/open[t] và close[t−1]/close[t] + volume ≥ 3× ADTV; mức thấp → ghi SUSPECTED chờ quan sát; (ii) AuditLog chứa đủ pre-values + ratio + range để **ĐẢO NGƯỢC bằng 1 script**; (iii) kill-switch `AppSetting data-split-autoadjust` = false → chuyển về SUSPECTED-only; (iv) nguồn gửi lại chuỗi đã chỉnh → upsert idempotent tự hội tụ | điều chỉnh là phép nhân một chiều CÓ ghi vết đầy đủ — sai cũng dựng lại được |
 | **P1-2 PIT tối thiểu** | `Bar.firstSeenAt/lastSyncedAt` (additive) + `MlModel.meta` lưu window-hash SHA-256 + biên ngày train | tái lập được "hồi đó dữ liệu thế nào"; không làm asOf-engine đầy đủ (quá đắt ở quy mô này) |
 | **P1-3 Đối chiếu chéo nguồn** | sau EOD-sync: so close finfo realtime cuối phiên vs dchart EOD cùng ngày; lệch > 1% → RiskAlert INFO | re-validate cột `value = volume×close` |
 | **P1-4 ForeignFlow persist** | model `ForeignFlow {instrumentId, date, netValue, mode}` — persist số mô phỏng hiện có với `mode simulated` trung thực | B8 scorecard arm flows có lịch sử thật để đánh giá |
-| **P1-5 MiniBar 1 phút** (tùy chọn câu §8-4) | rollup tick → OHLC 1' trong phiên, retention 30 ngày | 90 mã × ~390 phút = ~35k dòng/ngày — Postgres chịu nổi |
+| ~~P1-5 MiniBar 1 phút~~ | **LOẠI (câu 8-4a)** — không lưu tick phút, giữ hiện trạng EOD + ảnh Quote | — |
 
 ### P2 — "MỞ RỘNG" (khi có nhu cầu đo được)
 
@@ -259,14 +259,65 @@ Nguyên tắc chung: **thuật toán viết tay TypeScript thuần** (Hampel, l�
 
 ---
 
-## §8. 5 câu hỏi mở chốt với user
+## §8. 5 câu hỏi — ĐÃ CHỐT (phiên #55)
 
-1. **A9 chặn đến mức nào?** (a) như nay — chỉ tư vấn; (b) **cờ DEGRADED vào prompt Wave B + Chủ tịch, SEVERE thì RiskAlert bắt buộc ack** *(đề xuất)*; (c) SEVERE hard-stop cả chu kỳ agent cho tới khi ack.
-2. **Feature store bước nào trước?** (a) **hợp nhất 1 nguồn tính + S2 tính thật (0 đổi schema, đúng tinh thần P0)** *(đề xuất)*; (b) kèm luôn bảng cache `FeatureValue`.
-3. **Split / sự kiện doanh nghiệp:** (a) **chỉ phát hiện + cảnh báo SUSPECTED, chờ anh confirm từng event rồi mới điều chỉnh lịch sử (kèm AuditLog)** *(đề xuất)*; (b) tự điều chỉnh lịch sử ngay kèm AuditLog.
-4. **Dữ liệu tick phút:** (a) **không lưu — giữ hiện trạng EOD + ảnh Quote** *(đề xuất hiện tại)*; (b) rollup MiniBar 1 phút có retention 30 ngày (P1-5).
-5. **Phạm vi triển khai P0:** (a) **trọn P0-1 → P0-5 trong 1–2 phiên** *(đề xuất — tất cả đều sửa gốc bug đã thấy máu)*; (b) tách P0-4 (A9) làm đợt riêng sau P0-1/2/3.
+1. **A9 chặn đến mức nào?** → **(b) theo đề xuất** — cờ DEGRADED vào prompt Wave B + Chủ tịch; SEVERE → RiskAlert bắt buộc ack. KHÔNG hard-stop chu kỳ.
+2. **Feature store bước nào trước?** → **(a) theo đề xuất** — hợp nhất 1 nguồn tính + S2 tính thật, 0 đổi schema; bảng cache `FeatureValue` để P2 khi đo chậm.
+3. **Split / sự kiện doanh nghiệp:** → **(b) TỰ ĐIỀU CHỈNH NGAY kèm AuditLog** — *user chọn khác đề xuất (a)*. P1-1 thiết kế lại kèm lớp an toàn: heuristic mức CAO mới tự điều chỉnh (tỷ số nguyên khớp ±1% ở cả 2 phép + volume ≥ 3× ADTV) · AuditLog chứa đủ pre-values/ratio/range để đảo ngược bằng 1 script · kill-switch `AppSetting` · upsert idempotent tự hội tụ khi nguồn gửi lại chuỗi đã chỉnh.
+4. **Dữ liệu tick phút:** → **(a) theo đề xuất** — không lưu, giữ EOD + ảnh Quote. P1-5 MiniBar LOẠI.
+5. **Phạm vi triển khai P0:** → **(a) theo đề xuất** — trọn P0-1 → P0-5 một đợt 1–2 phiên.
 
 ---
 
-*Đây là tài liệu thảo luận phiên #54. Mọi con số đều đo trực tiếp từ mã nguồn và DB ngày 2026-10-08 — không có số suy đoán. Sau khi 5 câu hỏi §8 được chốt, blueprint nâng v1.0 "ĐÃ CHỐT TRIỂN KHAI" theo đúng quy trình CONTROL_RISK_QUANT_BLUEPRINT.*
+## §9. Đánh giá độ sẵn sàng dữ liệu cho ANN & nghiên cứu sau này (phiên #55 — 4 câu hỏi mới của user)
+
+> Câu hỏi gốc: *"Nhóm Nền tảng dữ liệu còn là nơi cung cấp nguồn dữ liệu vào database, tạo nên nền tảng thông tin cho mạng ANN sau này. Cấu trúc Supabase hiện tại đã đầy đủ để lưu trữ — các bảng/row rõ ràng đáp ứng tham chiếu, so sánh, các thuật toán học máy, hồi quy sau này chưa? Nhóm đã có cơ chế cập nhật, lưu trữ dữ liệu chưa? Dữ liệu đã được xây dựng để đáp ứng các nghiên cứu sau này cũng như phục vụ agents chưa? Các luồng, API, Backend, Hook đã đầy đủ chưa?"*
+
+### 9.1 Cấu trúc database cho ANN / học máy / hồi quy
+
+Đếm thực tế từ `prisma/schema.prisma`: **26 model + 12 enum** (docs đang ghi 25 — lệch 1 vì `RiskQuantSnapshot` thêm ở #51 chưa cập nhật số đếm; sẽ đồng bộ khi triển khai P0). Xét theo chuỗi nhu cầu của một ANN:
+
+| Nhu cầu ANN | Bảng hiện có | Thực đo 2026-10-08 | Đánh giá |
+|---|---|---|---|
+| Chuỗi giá/khối lượng (X) | `Bar` — unique(instrumentId,date) · index date DESC | 215.327 dòng 2013→nay · median 3411 phiên/mã | ✅ Đủ cho MLP hôm nay (58.726 mẫu đã train thật #35) và đủ chiều sâu cho mạng sâu hơn |
+| Văn bản (X cho NLP/RAG) | `NewsItem` — url unique · publishedAt | 248 tin, 5 feed live +tin/15' | ✅ đủ cho L1 BM25; L3 embeddings chờ cổng §6 |
+| Ký ức lý luận agents | `AgentMessage` (reasoning/sentiment) | tích luỹ mỗi chu kỳ | ✅ corpus RAG L1 |
+| Dòng tiền (X) | — **KHÔNG có bảng** | flows re-sinh deterministic, không persist | 🔴 P1-4 lấp — đang mất 1 nhóm feature cho mọi hồi quy tương lai |
+| Cơ bản (X) | `FinancialFundamental` | 0 dòng (finfo chặn egress sandbox) | ⚠️ schema + ingest code SẴN SÀNG — chặn ở môi trường, không phải cấu trúc |
+| Nhãn (y) | realised direction tính từ `Bar` lúc đọc (deterministic); `BanditEvent` persist phiếu + confidence + reward settle 5 phiên | | ✅ |
+| Đối chiếu & đánh giá | `MarketAssessment` (posterior + drivers Δ) · `RiskQuantSnapshot` · `MlModel` versioning serving/archived | | ✅ |
+| Tái lập training | `MlModel.meta` | thiếu window-hash + biên ngày train | ⚠️ P1-2 lấp |
+| Sự kiện doanh nghiệp | — **KHÔNG có bảng** | split ẩn trong chuỗi dchart pre-adjusted | 🔴 P1-1 lấp (chốt auto-adjust) |
+
+**Verdict 9.1:** cấu trúc **đủ cho ANN đang chạy** (MLP ensemble là cử tri thứ 6 thật) **và đủ cho L1–L2 của ML_LEARNING_BLUEPRINT**. Cho nghiên cứu sâu hơn: 3 lỗ hổng cần lấp (ForeignFlow · PIT · CorporateEvent) — không lỗ hổng nào chặn vận hành ANN hôm nay, nhưng **PIT là rủi ro duy nhất có thể làm nghiên cứu hồi tố SAI mà không phát hiện** (`Bar` upsert đè lịch sử → backtest hôm nay và tháng sau khác nhau không rõ vì sao).
+
+### 9.2 Cơ chế cập nhật & lưu trữ — CÓ, đang chạy thật hằng ngày
+
+10 đường nạp §0.3 với lịch vận hành thực đo hôm 2026-10-08: tin RSS chảy đều (07:33→08:18 UTC) · EOD `real` lastSuccess 07/10 15:04 · quotes `real` 08/10 08:20 · idempotent upsert (chạy lại không nhân đôi) · 7 nguồn khai báo mode minh bạch. Điểm yếu đã có kế hoạch: engine state in-memory (P0-5 vá) · 14 mã US/HK 0 bar chờ Yahoo hồi 429 theo backoff 30'→4h (môi trường sandbox, không phải code) · fundamentals pending-egress (môi trường).
+
+### 9.3 Dữ liệu đã phục vụ agents & nghiên cứu chưa?
+
+**Phục vụ agents: CÓ, mỗi chu kỳ** — `agent-context` build context block từ Bar/Quote/News/BanditEvent; MLP là cử tri thứ 6 trong đồng thuận; bandit settle dùng return thật từ Bar. **Phục vụ nghiên cứu: dữ liệu thô ĐÃ CÓ nhưng chưa qua KIỂM ĐỊNH** (G5: outlier/gap/split/PIT chưa ai kiểm — đúng chẩn đoán §0.5). Sau P0-4: mọi dataset nghiên cứu đi kèm `DataQualityVerdict` → kết quả nghiên cứu trích dẫn được "chất lượng dữ liệu tại thời điểm chạy" — đúng vai trò "nền tảng thông tin cho ANN sau này" của nhóm.
+
+### 9.4 Luồng · API · Backend · Hook — đầy đủ đường ống, thiếu hợp đồng
+
+| Tầng | Thực đo (đếm trực tiếp) | Verdict |
+|---|---|---|
+| API | **32 file route / 34 endpoint** (một số route đa method) — market 7 (quotes/bars-đi-instruments/tick/flows/watchlist/eod-sync/intl-sync/reprobe) · news · coverage · ml 2 · research/scorecard · assessment 2 · agents 6 · signals 3 · orders 2 · portfolio · risk/alerts · settings 2 · system/status · watchlist/toggle | ✅ P0 không cần route mới — verdict A9 đi qua `agent-messages` + `AgentRun.output` có sẵn |
+| Backend lib | eod-sync · intl-eod · fundamentals · vndirect · flows · news · quant/* (OLS · Holt · regime · sentiment) · bayes/* · ml/* · risk/engine | ✅ |
+| WebSocket | engine socket.io 6 event (welcome/quotes/news/eod/intl/reprobe/cycle) → `use-realtime` invalidate TanStack Query đúng chuẩn gateway `XTransformPort=3003` | ✅ |
+| Hooks | 6 hooks (`use-realtime` · `use-assessment` · `use-ml` · `use-run-agents` · `use-agent-actions` · `use-settings`) + queries inline theo 7 workspace | ✅ |
+| **ĐIỂM THIẾU** | không phải đường ống — mà là **hợp đồng**: 4 định nghĩa rổ · 3 đường tính feature · verdict A9 0 consumer | → P0-1→4 lấp, **0 route/hook mới** |
+
+**Kết luận §9:** hạ tầng lưu trữ + đường ống **đã đủ và đang chạy thật**; điều chưa đủ nằm ở **hợp đồng dữ liệu + kiểm định** — chính xác là gói P0 đã chốt ở §8. Sau P0 + P1 (ForeignFlow · PIT · CorporateEvent), nhóm Nền tảng dữ liệu đáp ứng trọn vẹn vai trò *"nơi cung cấp nguồn dữ liệu — nền tảng thông tin của mạng ANN sau này"*.
+
+---
+
+## Changelog
+
+- **v0.1 (2026-10-08, #54):** mở thảo luận — chẩn đoán 4 agents + đo DB + 8 khoảng trống G1–G8 + kiến trúc hợp đồng + gói P0–P2 + 5 câu hỏi mở.
+- **v1.0 (2026-10-08, #55):** 5 câu trả lời chốt (1b · 2a · **3b tự điều chỉnh — khác đề xuất, P1-1 thiết kế lại kèm an toàn đảo ngược** · 4a · 5a) · P1-5 loại bỏ · thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu (26 model · 32 route · 6 hooks) · trạng thái **ĐÃ CHỐT TRIỂN KHAI**.
+
+---
+
+*Tài liệu phiên #54–#55. Mọi con số đều đo trực tiếp từ mã nguồn, DB và quy trình vận hành ngày 2026-10-08 — không có số suy đoán.*
