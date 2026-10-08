@@ -1,8 +1,8 @@
 # DATA PLATFORM BLUEPRINT — NHÓM NỀN TẢNG DỮ LIỆU: HỢP ĐỒNG CHUỖI DỮ LIỆU, KIỂM ĐỊNH & PHỤC VỤ ĐẶC TRƯNG
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/DATA_PLATFORM_BLUEPRINT.md` · **Version:** 1.0 · **Created:** 2026-10-08 (phiên #54) · **Chốt:** 2026-10-08 (phiên #55)
-> **Status:** **ĐÃ CHỐT TRIỂN KHAI (phiên #55)** — 5 câu hỏi §8 đã trả lời: 1b · 2a · **3b TỰ ĐIỀU CHỈNH split kèm AuditLog (user chọn khác đề xuất — P1-1 thiết kế lại kèm lớp an toàn đảo ngược)** · 4a · 5a. Thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu theo 4 câu hỏi mới của user
+> **Document:** `docs/DATA_PLATFORM_BLUEPRINT.md` · **Version:** 1.1 · **Created:** 2026-10-08 (phiên #54) · **Chốt:** 2026-10-08 (#55) · **Review-vá:** 2026-10-08 (#56 — 4 lỗi P0 + 5 P1 + 6 P2 tìm ra khi review đối kháng, đã vá hết vào văn bản này)
+> **Status:** **ĐÃ CHỐT TRIỂN KHAI (phiên #55) + ĐÃ REVIEW CHẶT (phiên #56)** — 5 câu hỏi §8 đã trả lời: 1b · 2a · **3b TỰ ĐIỀU CHỈNH split kèm AuditLog (user chọn khác đề xuất — P1-1 thiết kế lại kèm lớp an toàn đảo ngược)** · 4a · 5a. Thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu theo 4 câu hỏi mới của user
 > **Cross-refs:** [MARKET_EXPANSION_BLUEPRINT.md](./MARKET_EXPANSION_BLUEPRINT.md) (UnitSpec B2 · universe 90 mã) · [CONTROL_RISK_QUANT_BLUEPRINT.md](./CONTROL_RISK_QUANT_BLUEPRINT.md) (σ CRB-1 · rổ ADTV §0.4 — gốc bug F6) · [ML_LEARNING_BLUEPRINT.md](./ML_LEARNING_BLUEPRINT.md) (cổng dữ liệu §6 — người tiêu thụ tương lai lớn nhất) · [DATA_SOURCES.md](./DATA_SOURCES.md) · [Fixbug.md](../Fixbug.md) (4/8 bug #52 gốc tầng này)
 > **Người soạn:** Kỹ sư AI / Kiến trúc sư hệ thống (phiên #54)
 
@@ -83,7 +83,7 @@ Nhóm Nền tảng dữ liệu là **bộ môn duy nhất bảo đảm 5 tính c
 4. **Tái lập được** (reproducibility): cùng một câu hỏi "tại thời điểm T dữ liệu trông thế nào" → cùng một câu trả lời.
 5. **Minh bạch** (honesty): mọi nguồn khai báo mode thật/giả/fallback — số mô phỏng không bao giờ cải trang thành số thật.
 
-**Nguyên tắc phân vai:** engine là *tay đTimer* (điều khiển thời gian), 4 agents là *chủ hợp đồng* (sở hữu chuẩn và verdict). Không agents nào tự giữ scheduler riêng — tránh 2 đồng hồ.
+**Nguyên tắc phân vai:** engine là *người bấm đồng hồ* (điều khiển thời gian), 4 agents là *chủ hợp đồng* (sở hữu chuẩn và verdict). Không agents nào tự giữ scheduler riêng — tránh 2 đồng hồ.
 
 ### 1.2 Nhiệm vụ riêng từng agent — hiện tại → đích
 
@@ -153,7 +153,7 @@ Mỗi tầng chỉ trao đổi qua **interface có tên và có kiểm chứng �
 
 ### 3.3 Đợt A từ trang trí → có nghĩa
 
-Chu kỳ agent: Wave A (4 agents nền tảng) chạy → **verdict A9 + readiness S2 được lưu trước khi Wave B bắt đầu** → `agent-context.ts` thêm khối prompt `TÍNH TRẠNG DỮ LIỆU` (ví dụ: *"báo giá US/HK thiếu 14/90 mã · rổ đặc trưng sẵn 9/10 mã · nguồn intl fallback"*) cho 5 agent nghiên cứu + Chủ tịch → agent nghiên cứu tự khai độ confound trong luận cứ (đúng tinh thần câu chữ A9 hiện tại "agent nghiên cứu nên khai báo độ trễ" — nhưng giờ là dữ liệu có cấu trúc thay vì lời khuyên suông).
+Chu kỳ agent: Wave A chia **3 nhịp con** (sửa sau review #56: tránh phụ thuộc vòng trong cùng đợt song song) — nhịp 1: S0 ∥ S2 → nhịp 2: A9 (readiness do chính A9 tính qua FeatureContract — cùng thư viện với S2 nên cùng số, KHÔNG phụ thuộc output S2 cùng chu kỳ) → nhịp 3: S1 (đọc verdict A9 VỪA LƯU cùng chu kỳ) → **verdict A9 + readiness S2 được lưu trước khi Wave B bắt đầu** → `agent-context.ts` thêm khối prompt `TÍNH TRẠNG DỮ LIỆU` (ví dụ: *"báo giá US/HK thiếu 14/90 mã · rổ đặc trưng sẵn 9/10 mã · nguồn intl fallback"*) cho 5 agent nghiên cứu + Chủ tịch → agent nghiên cứu tự khai độ confound trong luận cứ (đúng tinh thần câu chữ A9 hiện tại "agent nghiên cứu nên khai báo độ trễ" — nhưng giờ là dữ liệu có cấu trúc thay vì lời khuyên suông).
 
 **Ranh giới VETO giữ nguyên:** A9 **không** veto quyết định giao dịch (đó là của A6/A7/A8) — A9 chỉ phái sinh cờ chất lượng đầu vào. Theo câu 8-1b đã chốt: DEGRADED → cờ vào prompt Wave B + Chủ tịch; SEVERE → RiskAlert bắt buộc ack — **KHÔNG hard-stop chu kỳ** (đã loại phương án (c)).
 
@@ -168,8 +168,8 @@ Engine (port 3003) là orchestrator *de facto*: tick 10s · news 15' · due-chec
 ### 4.2 Đề xuất — giữ engine làm Timer, thêm 3 cơ chế
 
 1. **Schedule state vào DB**: cờ "hôm nay đã chạy" + bộ đếm backoff chuyển vào `DataSourceStatus.meta` (cột Json đã có) — engine đọc lúc boot, không còn quên sau restart. (P0-5)
-2. **Pipeline nạp một cửa**: mọi route nạp (`eod-sync` · `intl-sync` · `reprobe` · tick) đi qua cùng một chuỗi hậu kiểm: `fetch → UnitSpec → sanity → upsert → A9-check-tăng-gem (outlier/gap) → WS broadcast` — thay vì sanity chỉ ở 2/10 đường. A9-check-tăng-gem là hàm **thuần** trong `data-quality.ts` gọi được cả từ route (runtime) lẫn từ `runDataIntegrity` (chu kỳ). (P0-4)
-3. **Invalidation theo (mã, ngày)**: khi bar của mã X đổi → hủy cache/mốc readiness của đúng X (hiện chưa có cache nên P0 chỉ cần ghi `featureReadinessAt` per mã để S2 biết tính lại; cache thật là P2 khi đo chậm).
+2. **Pipeline nạp một cửa** (dời sang **P1-6** sau review #56 — P0-4 chỉ là **hậu kiểm post-hoc**: kiểm sau khi upsert, phát hiện + verdict, KHÔNG tái cấu trúc eod-sync/intl-eod — lớp code đã ổn định qua #33→#52, đụng sớm hơn không có lợi ích tương xứng): mọi route nạp (`eod-sync` · `intl-sync` · `reprobe` · tick) đi qua cùng một chuỗi hậu kiểm: `fetch → UnitSpec → sanity → upsert → A9-check (outlier/gap) → WS broadcast`. A9-check là hàm **thuần** trong `data-quality.ts` gọi được cả từ route (runtime) lẫn từ `runDataIntegrity` (chu kỳ).
+3. **Invalidation theo (mã, ngày)**: khi bar của mã X đổi → hủy cache/mốc readiness của đúng X (hiện chưa có cache nên P0 chỉ cần ghi `featureReadinessAt` per mã vào `AgentRun.output` của S2 — 0 schema — để S2 biết tính lại; cache thật là P2 khi đo chậm).
 
 ```mermaid
 sequenceDiagram
@@ -186,7 +186,7 @@ sequenceDiagram
   W-->>UI: invalidate query tương ứng
 ```
 
-Retry/failover/dead-letter: **kế thừa nguyên hiện trạng đã tốt** (retry đúng ngữ nghĩa · circuit breaker · backoff · fail-soft + markSource); bổ sung duy nhất.dead-letter = `DataSourceStatus.lastError` đã có → chỉ cần A9 đọc nó (hiện không đọc).
+Retry/failover/dead-letter: **kế thừa nguyên hiện trạng đã tốt** (retry đúng ngữ nghĩa · circuit breaker · backoff · fail-soft + markSource); bổ sung duy nhất dead-letter = `DataSourceStatus.lastError` đã có → chỉ cần A9 đọc nó (hiện không đọc).
 
 ---
 
@@ -199,17 +199,34 @@ Retry/failover/dead-letter: **kế thừa nguyên hiện trạng đã tốt** (r
 | **P0-1 DatedSeries** | `src/lib/dated-series.ts` mới; đổi `risk/engine.ts` · `ml/features.ts` · `agent-context.ts` đọc qua hợp đồng | `loadDatedSeries(symbol)` · `alignByDate(a,b)` · `returnsDated(series)` (giữ logic F2) | Chu kỳ chạy → avgCorr/pBreach **không đổi** (regression PASS như Fixbug #52); script kiểm định giao ngày tái chạy PASS |
 | **P0-2 topByAdtv** | 1 hàm rổ duy nhất — ADTV 45 phiên từ `Bar.value`; gỡ 3 chỗ còn xếp theo quote volume (`topLiquid` · `buildMarketBlock` · `latestFeatures`) | ADTV = mean(value, 45 phiên EOD); fallback mean volume khi thiếu value | Gọi 2 lần xen 6s market tick → rổ GIỐNG HỆT (mở rộng script fixbug52-basket-test) |
 | **P0-3 FeatureContract** | `ml/features.ts` thành nơi tính duy nhất (rolling); `agent-context.ts` · `bayes/evidence.ts` · S2 gọi qua; S2 broadcast readiness thật (RSI14 tính thật, bỏ chữ "biến động" không tính) | tái dùng `buildRolling` hiện có; `indicators.ts` chỉ còn vỏ "latest" | Cùng 1 mã: RSI14 từ evidence == RSI14 từ S2 (script so bằng chứng); prompt research không phình thêm token |
-| **P0-4 A9 kiểm định thật** | `src/lib/data-quality.ts` mới — 6 phép kiểm + `DataQualityVerdict`; `runDataIntegrity` gọi hàm này; verdict lưu DB (bảng có sẵn RiskQuantSnapshot? — không: thêm model `DataQualityReport` additive-lite hoặc JSON vào AgentRun.output + RiskAlert khi SEVERE) | (i) freshness per-symbol **theo lịch phiên HOSE 09:15–14:45 ICT** — ngoài phiên = "đóng cửa", không phải "cũ"; (ii) gap: lịch giao dịch = union ngày Bar của rổ chuẩn → mã thiếu ngày mà rổ có → gap; (iii) **outlier Hampel**: rở về return chuỗi, cửa sổ 20, `|r−med| > 3·1,4826·MAD` → flag; (iv) nghi-vấn-split: `close[t−1]/open[t] ≈ k∈{2,3,5,10}` sai < 2% + volume ≥ 3× ADTV → chỉ cảnh báo; (v) đọc 7 dòng DataSourceStatus; (vi) readiness đặc trưng từ S2 | Kịch bản chủ nhật 15:00 ICT (ngoài phiên): verdict **không** còn "báo giá cũ"; cắm 1 bar giả gap/outlier → verdict bắt được + RiskAlert; prompt Wave B thấy khối TÍNH TRẠNG DỮ LIỆU (kiểm snapshot prompt) |
+| **P0-4 A9 kiểm định thật** | `src/lib/data-quality.ts` mới — 6 phép kiểm + `DataQualityVerdict`; `runDataIntegrity` gọi hàm này; verdict lưu **`AgentRun.output` JSON (P0 — giữ đúng cam kết 0 đổi schema, truy vấn qua agents/messages có sẵn)** + RiskAlert khi SEVERE; model `DataQualityReport` (index asOf) nâng cấp ở **P1-7** khi cần lịch sử dài | (i) freshness per-symbol theo **lịch phiên THEO SÀN** (HOSE ≠ HNX ≠ UPCOM giờ mở/đóng khác nhau · nghỉ trưa · US/HK theo lịch sở tại — 1 hằng số chuẩn mỗi sàn, VERIFY khi triển khai; **phát hiện mâu thuẫn:** UI footer đang ghi "Phiên HOSE 09:15–15:00" nhưng tick đo thực dừng 14:44:59 → phải thống nhất 1 nguồn sự thật) · **3 trạng thái tách bạch: THIẾU (không có dòng Quote — US/HK) / ĐÓNG CỬA / CŨ BẤT THƯỜNG** · Quote-freshness dùng TRONG phiên, **Bar-freshness** (ngày nến mới nhất so với hôm nay sau 15:45 ICT) dùng NGOÀI phiên; (ii) gap **per-market**: lịch giao dịch mỗi sàn = union ngày Bar của toàn mã active CÙNG SÀN, quorum ≥ 50% (rổ xoay làm lịch lung lay; gộp liên sàn tạo gap GIẢ ngày lễ VN khi Mỹ vẫn giao dịch) + phép kiểm riêng "cả sàn thiếu hôm nay sau 15:45" (outage tổng vô hình trong union); (iii) **outlier 2 LỚP** — cấu trúc (mức issue): OHLC chéo nhau · biến động so close hôm trước **vượt dải giá giới hạn của sàn** (7% HOSE · 10% HNX · 15% UPCOM — chuyển động THẬT không thể vượt, vượt là artefact dữ liệu) · giá ≤ 0 · volume < 0; **Hampel** `|r−med| > 3·1,4826·MAD` cửa sổ 20 chỉ mức INFO (ngày trần/sàn VN là biến động thật — Hampel cứng sẽ crying wolf mỗi ngày sôi động; chỉ tổng hợp ≥ 5 cờ/mã/quý mới lên issue); (iv) nghi-vấn-split **CHỈ áp dụng VN** (US/HK crash thật −50%/ngày có thật — nghi-vấn ở đó phải đến từ parse payload `events` Yahoo, xem P1-1): điều kiện tiên quyết là **gap VƯỢT DẢI GIÁI HẠN của sàn** (chuyển động thật không thể > 7/10/15%/ngày → gap lớn hơn chắc chắn artefact điều chỉnh) · hệ số f = open[t]/close[t−1] **bất kỳ giá trị nào** (cổ phiếu thưởng VN thường 1,2/1,3/1,5 — giới hạn số nguyên {2,3,5,10} bỏ sót ĐA SỐ động tác doanh nghiệp VN) + volume ≥ 3× ADTV corroborate → cảnh báo; (v) đọc 7 dòng DataSourceStatus; (vi) readiness đặc trưng **A9 tự tính qua FeatureContract** (cùng thư viện với S2 → cùng số, không phụ thuộc thứ tự trong đợt A) | Kịch bản chủ nhật 15:00 ICT (ngoài phiên): verdict **không** còn "báo giá cũ"; cắm 1 bar giả vi phạm cấu trúc/gap → verdict bắt được + RiskAlert · ngày trần +7% THẬT → KHÔNG issue; prompt Wave B thấy khối TÍNH TRẠNG DỮ LIỆU (kiểm snapshot prompt) |
 | **P0-5 Engine state → DB** | cờ đã-sync-ngày + backoff intl vào `DataSourceStatus.meta` | đọc/ghi trong due-check + boot | kill engine → restart → **không** refetch EOD đã xong hôm đó |
+| **P0-6 S0 IngestSummary** (thêm sau review #56 — §1.2 hứa nhiệm vụ S0 nhưng chưa gói nào dựng) | `runDataCollector` xuất `output` cấu trúc: nạp hôm nay (đếm Bar theo date + DataSourceStatus 7 nguồn) · nguồn hỏng + lastError · backlog (mã 0-bar, quote thiếu) — vẫn 0 request thu thập (registry thật đợi P1-6) | đọc DataSourceStatus + `bar.groupBy(date)` trong cửa sổ 1 ngày | AgentRun.output S0 có đủ trường IngestSummary; S1/A9 đọc được làm đầu vào |
+| **P0-7 S1 digest có verdict** (thêm sau review #56 — tương tự P0-6 cho S1) | `runNotificationOfficer` thêm 1 dòng chất lượng dữ liệu: mức + 2 chi tiết lớn nhất từ verdict A9 **cùng chu kỳ** (S1 chạy nhịp 3 sau A9 theo §3.3) | query AgentRun A9 mới nhất cùng chu kỳ | bản tin S1 chứa dòng chất lượng dữ liệu khớp verdict chu kỳ đó |
+
+**Ma trận mức độ `DataQualityVerdict` (thêm sau review #56 — trước đây không định nghĩa ngưỡng PASS/DEGRADED/SEVERE, test 4/7 treo vào chân không):**
+
+| Phép kiểm | DEGRADED | SEVERE |
+|---|---|---|
+| Freshness | ≥ 25% mã VN CŨ BẤT THƯỜNG trong phiên · 1 nguồn fallback/simulated | ≥ 60% mã VN cũ trong phiên · EOD hôm nay thiếu sau 16:15 ICT với ≥ 50% mã |
+| Gap | 1 mã thiếu ≥ 2 ngày giao dịch của sàn | ≥ 10% mã active của sàn thiếu hôm nay sau sync |
+| Outlier cấu trúc | 1–4 mã có thanh vi phạm | ≥ 5 mã cùng lúc (mẫu hình nguồn hỏng) |
+| Nguồn (7 dòng) | bất kỳ nguồn lệch mode kỳ vọng | `eod-history` chính nó fail |
+| Split-nghi-vấn | 1 nghi vấn mới (luôn kèm) | — (không bao giờ SEVERE một mình) |
+| Readiness đặc trưng | < 80% rổ đủ | < 50% rổ đủ |
+
+PASS = không phép nào DEGRADED. SEVERE ⇒ RiskAlert ack-bắt-buộc. Ngưỡng khởi tạo này điều chỉnh được qua `AppSetting` sau 2 tuần quan sát (tránh magic-number đóng băng).
 
 ### P1 — "CHUẨN HOÁ TRI THỨC DỮ LIỆU" (additive schema, chốt sau P0)
 
 | Gói | Nội dung | Điểm thuật toán |
 |---|---|---|
-| **P1-1 CorporateEvent + TỰ ĐIỀU CHỈNH** (chốt câu 8-3b — user chọn tự điều chỉnh, **khác đề xuất ban đầu**) | model mới `CorporateEvent {instrumentId, date, kind: SPLIT/DIVIDEND/RESTATE, ratio, status: AUTO_ADJUSTED/SUSPECTED/REVERSED, source, detail Json}`; heuristic P0-4(iv) phát hiện → **tự nhân chuỗi lịch sử trước ngày event theo ratio trong cùng transaction** → AuditLog ghi {mã, range điều chỉnh, ratio, giá trị pre-adjust}. **Lớp an toàn vì là hành vi tự động:** (i) chỉ tự điều chỉnh khi heuristic mức CAO — tỷ số nguyên k∈{2,3,5,10} khớp ±1% ở CẢ HAI phép close[t−1]/open[t] và close[t−1]/close[t] + volume ≥ 3× ADTV; mức thấp → ghi SUSPECTED chờ quan sát; (ii) AuditLog chứa đủ pre-values + ratio + range để **ĐẢO NGƯỢC bằng 1 script**; (iii) kill-switch `AppSetting data-split-autoadjust` = false → chuyển về SUSPECTED-only; (iv) nguồn gửi lại chuỗi đã chỉnh → upsert idempotent tự hội tụ | điều chỉnh là phép nhân một chiều CÓ ghi vết đầy đủ — sai cũng dựng lại được |
+| **P1-1 CorporateEvent + TỰ ĐIỀU CHỈNH (chốt 8-3b; thu hẹp & định nghĩa lại hướng sau review #56)** | model `CorporateEvent {instrumentId, date, kind: SPLIT/BONUS/DIVIDEND/RESTATE, ratio, status: AUTO_ADJUSTED/SUSPECTED/REVERSED, source, detail Json}` + `@@unique([instrumentId, date, kind])` chống trùng. **Phạm vi tự điều chỉnh: CHỈ thị trường VN** (US/HK không bao giờ gap-infer — crash thật −50%/ngày có thật ở Mỹ; ở đó dùng **parse payload `events` (split/div) của Yahoo đang bị bỏ đi** làm nguồn xác định chính xác). **Điều kiện tiên quyết VN: gap vượt dải giá giới hạn của sàn** (chuyển động thật không thể > 7/10/15%/ngày → gap lớn hơn chắc chắn artefact điều chỉnh — đây là đòn bẩy an toàn quan trọng nhất). **HƯỚNG ĐIỀU CHỈNH (sửa ambiguity #56): f = open[t]/close[t−1] < 1 — nhân chuỗi TRƯỚC event bằng f** (đưa giá cũ về thang mới; nhân ngược theo k sẽ làm giá cũ phình k lần). **Đồng bộ cả 3 trường: giá ×f · volume ×(1/f) · tính lại `value`** (chỉ chỉnh giá mà không chỉnh volume thì ADTV méo). Hệ số f **bất kỳ giá trị** (cổ thưởng VN 1,2/1,3/1,5 phổ biến) + volume ≥ 3× ADTV corroborate. **Lưu ý hội tụ:** upsert idempotent tự hội tụ chỉ trong cửa sổ lookback 10 ngày của eod-sync; sâu hơn hội tụ khi chạy deep backfill | sau khi AUTO_ADJUSTED: quay lại chạy 6 phép A9 — outlier/gap phải sạch ở vùng vừa điều chỉnh |
 | **P1-2 PIT tối thiểu** | `Bar.firstSeenAt/lastSyncedAt` (additive) + `MlModel.meta` lưu window-hash SHA-256 + biên ngày train | tái lập được "hồi đó dữ liệu thế nào"; không làm asOf-engine đầy đủ (quá đắt ở quy mô này) |
 | **P1-3 Đối chiếu chéo nguồn** | sau EOD-sync: so close finfo realtime cuối phiên vs dchart EOD cùng ngày; lệch > 1% → RiskAlert INFO | re-validate cột `value = volume×close` |
 | **P1-4 ForeignFlow persist** | model `ForeignFlow {instrumentId, date, netValue, mode}` — persist số mô phỏng hiện có với `mode simulated` trung thực | B8 scorecard arm flows có lịch sử thật để đánh giá |
+| **P1-6 Pipeline nạp một cửa** (dời từ P0 sau review #56) | mọi route nạp đi qua chuỗi hậu kiểm chung (fetch → UnitSpec → sanity → upsert → A9-check → WS); P0-4 đã chạy hậu kiểm post-hoc nên bước này chỉ gom đường đã kiểm chứng | S0 mới thực sự thành chủ registry 10 đường §0.3 (kết thúc "hữu danh vô thực") |
+| **P1-7 Model `DataQualityReport`** | bảng verdict chuẩn `{asOf, level, checks Json}` + index asOf — thay AgentRun.output JSON của P0 khi cần truy vấn lịch sử dài / trend chất lượng | nghiệm thu test 8 mở rộng: truy vấn asOf < 100ms |
 | ~~P1-5 MiniBar 1 phút~~ | **LOẠI (câu 8-4a)** — không lưu tick phút, giữ hiện trạng EOD + ảnh Quote | — |
 
 ### P2 — "MỞ RỘNG" (khi có nhu cầu đo được)
@@ -230,7 +247,7 @@ Retry/failover/dead-letter: **kế thừa nguyên hiện trạng đã tốt** (r
 | Kafka / Redis Stream / message broker | ❌ | 1 engine + 1 app + Postgres: hàng đợi = bảng DB + socket.io đã có; broker = ops + egress mới |
 | Airflow / Prefect / Dagster | ❌ | 5 lịch chạy tĩnh + due-check 60s của engine là đủ; DAG thực tế chỉ 2 cạnh (nạp → kiểm) |
 | dbt | ❌ | transform là TS thuần trong `src/lib` — một ngôn ngữ một stack |
-| ClickHouse / TimescaleDB hypertable | ❌ | 215k bar + vài trămk dòng — Postgres + index `@@unique(instrumentId,date)` thừa sức |
+| ClickHouse / TimescaleDB hypertable | ❌ | 215k bar + vài trăm nghìn dòng — Postgres + index `@@unique(instrumentId,date)` thừa sức |
 | DuckDB / Parquet lake | ❌ | chưa có nhu cầu phân tích offline nặng |
 | Redis cache | ❌ | tái tính đặc trưng ~ms ở quy mô này; nếu chậm → P2-3 dùng bảng Postgres |
 
@@ -243,9 +260,9 @@ Nguyên tắc chung: **thuật toán viết tay TypeScript thuần** (Hampel, l�
 **Tầng lib:**
 1. DatedSeries: 2 chuỗi lệch ngày → align đúng (tái dùng script fixbug52-corr-test, sai số < 1e-12)
 2. topByAdtv ổn định qua market tick (tái dùng fixbug52-basket-test, 3 caller mới cũng giống hệt)
-3. Hampel: cắm outlier ±30% vào chuỗi thật → flag đúng vị trí, chuỗi sạch 0 flag
-4. Lịch phiên: 15:30 ICT thứ 7 → freshness "đóng cửa", 10:30 ICT thứ 2 mà quote 90' tuổi → "stale"
-5. Split-heuristic: chuỗi thật + cắm tỷ giá 1:5 nhân tạo → SUSPECTED, không tự sửa giá
+3. Outlier: cắm bar vi phạm cấu trúc (low > high · giá âm) + bar vượt dải ±7% so close hôm trước → flag đúng mức issue; ngày trần +7% THẬT → **KHÔNG** issue (chỉ INFO Hampel)
+4. Lịch phiên theo sàn: 15:30 ICT thứ 7 → "đóng cửa"; 10:30 ICT thứ 2 quote 90' tuổi → "cũ bất thường"; 12:00 ICT (nghỉ trưa) → "đóng cửa"; mã US không có dòng Quote → "thiếu" (không phải "cũ")
+5. Split-heuristic (P0): chuỗi thật + cắm gap −20% (cổ thưởng 1,25) + volume 5× → cảnh báo nghi-vấn, P0 KHÔNG sửa giá · (P1): auto-adjust nhân f = 0,8 cho chuỗi trước event + volume ×1,25 + tính lại value + AuditLog đảo ngược được bằng script; gap −50% (1:5) cũng bắt được
 
 **Tầng API/chu kỳ:**
 6. Chu kỳ đầy đủ 23 agents sau P0: thời lượng ≤ ngân sách 180s (P0-4 thêm ~6 phép nhưng đều là query đã index)
@@ -256,6 +273,10 @@ Nguyên tắc chung: **thuật toán viết tay TypeScript thuần** (Hampel, l�
 **Tầng UI/browser:**
 10. Tab Đội Agent: nhóm nền tảng 4 agents hiển thị verdict mới (không còn câu "TOÀN VẸN" suông)
 11. Mobile 390px không tràn; 0 console error
+12. (P0-6) AgentRun.output của S0 có IngestSummary đầy đủ trường — đọc được từ agents/messages
+13. (P0-7) Bản tin S1 có dòng chất lượng dữ liệu khớp verdict A9 cùng chu kỳ
+14. (§3.3) Thứ tự 3 nhịp đợt A đúng: S0∥S2 → A9 → S1 (nhật ký AgentRun.startedAt chứng minh)
+15. (P0-2) Top-10 trong context LLM đổi thành phần sau khi chuyển ADTV — HÀNH VI DỰ KIẾN của việc vá F6, ghi nhận để không đánh nhầm là regression
 
 ---
 
@@ -317,7 +338,8 @@ Nguyên tắc chung: **thuật toán viết tay TypeScript thuần** (Hampel, l�
 
 - **v0.1 (2026-10-08, #54):** mở thảo luận — chẩn đoán 4 agents + đo DB + 8 khoảng trống G1–G8 + kiến trúc hợp đồng + gói P0–P2 + 5 câu hỏi mở.
 - **v1.0 (2026-10-08, #55):** 5 câu trả lời chốt (1b · 2a · **3b tự điều chỉnh — khác đề xuất, P1-1 thiết kế lại kèm an toàn đảo ngược** · 4a · 5a) · P1-5 loại bỏ · thêm §9 đánh giá độ sẵn sàng dữ liệu cho ANN/nghiên cứu (26 model · 32 route · 6 hooks) · trạng thái **ĐÃ CHỐT TRIỂN KHAI**.
+- **v1.1 (2026-10-08, #56 — review đối kháng):** vá **4 lỗi P0**: (1) outlier 2 lớp — cấu trúc + dải giá giới hạn làm issue, Hampel chỉ INFO (chống crying wolf trên ngày trần/sàn thật); (2) split-heuristic **chỉ VN + bắt buộc vượt dải giá giới hạn** (crash thật không thể vượt dải → gap vượt là artefact chắc chắn; US/HK dùng parse `events` Yahoo — crash −50%/ngày có thật ở Mỹ), hệ số f bất kỳ giá trị (cổ thưởng 1,2/1,3/1,5), **hướng điều chỉnh f = open[t]/close[t−1] × chuỗi trước event + volume ×(1/f) + tính lại value** (trước đó ambiguous "nhân theo ratio" — nhân ngược sẽ phình giá cũ k lần); (3) **ma trận ngưỡng PASS/DEGRADED/SEVERE** định nghĩa đủ 6 phép (trước đây test 4/7 treo vào chân không); (4) **P0-6/P0-7** phủ vốn cho nhiệm vụ S0 IngestSummary + S1 digest-verdict (§1.2 hứa nhưng không gói nào dựng). Cùng đợt vá 5 lỗi P1: verdict lưu AgentRun.output (giải mâu thuẫn "0 đổi schema") + DataQualityReport dời P1-7 · đợt A 3 nhịp con S0∥S2→A9→S1 (phụ thuộc vòng trong wave song song) · lịch phiên theo sàn + 3 trạng thái thiếu/đóng cửa/cũ (mâu thuẫn footer 09:15–15:00 vs 14:45 đo thực) · gap per-market quorum 50% + kiểm outage tổng · pipeline một cửa dời P1-6 (P0 hậu kiểm post-hoc, không đụng eod-sync ổn định). Test nâng 11 → 15 mục.
 
 ---
 
-*Tài liệu phiên #54–#55. Mọi con số đều đo trực tiếp từ mã nguồn, DB và quy trình vận hành ngày 2026-10-08 — không có số suy đoán.*
+*Tài liệu phiên #54–#56 (soạn #54 → chốt #55 → review đối kháng #56). Mọi con số đều đo trực tiếp từ mã nguồn, DB và quy trình vận hành ngày 2026-10-08 — không có số suy đoán.*

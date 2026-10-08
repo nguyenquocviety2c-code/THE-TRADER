@@ -1457,3 +1457,22 @@ Stage Summary:
 - Trả lời 4 câu readiness: (1) DB 26 model đủ cho ANN hiện tại + L1–L2; 3 lỗ hổng có kế hoạch (P1-1/2/4); PIT là rủi ro nghiên cứu-sai-không-biết duy nhất (2) cơ chế cập nhật CÓ chạy thật hằng ngày (10 đường, thực đo) (3) phục vụ agents CÓ; nghiên cứu có dữ liệu thô nhưng chưa qua kiểm định → đúng động cơ P0-4 (4) đường ống API/backend/WS/hooks ĐỦ — thiếu hợp đồng, P0 không cần route/hook mới
 - Phát hiện doc drift: docs ghi 25 model, thực tế 26 (RiskQuantSnapshot #51) — sẽ đồng bộ trong đợt triển khai P0
 - Sẵn sàng triển khai P0-1→5 (chốt 5a, 1–2 phiên) khi user ra lệnh
+
+---
+Task ID: 56
+Agent: main-orchestrator (Z.ai Code)
+Task: Review đối kháng DATA_PLATFORM_BLUEPRINT v1.0 (nhập vai kỹ sư AI/kiến trúc sư hệ thống theo yêu cầu user) — tìm lỗi/vấn đề/thiếu sót rồi vá hết vào doc
+
+Work Log:
+- Đọc lại toàn văn blueprint 324 dòng + đối chiếu chéo schema/API/hooks/đo vận hành đã làm ở #54–#55; tự phản biện từng thuật toán (Hampel · split-heuristic · union-calendar · auto-adjust) bằng logic thị trường VN
+- Tìm ra 4 lỗi P0: (1) Hampel cứng trên return flag ngày trần/sàn VN là "outlier" → crying wolf mỗi ngày sôi động — chính failure mode doc phê phán A9 cũ; (2) split-heuristic k∈{2,3,5,10} bỏ sót ĐA SỐ động tác VN (cổ thưởng 1,2/1,3/1,5) + áp cho US/HK là thảm hoạ (crash −50%/ngày có thật ở Mỹ → auto-adjust sẽ hỏng lịch sử thật); (3) "nhân chuỗi theo ratio" AMBIGUOUS — nhân theo k=close[t−1]/open[t] làm giá cũ phình k lần (đúng phải f=open[t]/close[t−1]<1); volume/value không được nhắc → ADTV méo; (4) ngưỡng PASS/DEGRADED/SEVERE không bao giờ định nghĩa trong khi test 4/7 phụ thuộc nó
+- Tìm ra 5 lỗi P1: §1.2 hứa nhiệm vụ S0/S1 nhưng không gói P nào dựng (lời hứa không dòng kèo) · verdict lưu DB mâu thuẫn "P0 = 0 đổi schema" (để 2 lựa chọn mở trong doc đã chốt) · Wave A song song mâu thuẫn phụ thuộc vòng (A9 cần readiness S2 · S1 cần verdict A9 cùng chu kỳ) · lịch phiên hardcode 1 sàn HOSE 09:15–14:45 trong khi footer UI ghi 09:15–15:00 (2 nguồn sự thật) + HNX/UPCOM/US/HK khác hẳn · gap union "rổ chuẩn" 3 lỗ (rổ xoay làm lịch lung lay · gộp liên sàn tạo gap giả ngày lễ VN · outage tổng vô hình) · pipeline một cửa đụng eod-sync ổn định quá sớm
+- Tìm ra 6 điểm P2: top-10 context LLM đổi thành phần sau P0-2 (dự kiến, không phải regression) · P1-3 đối chiếu chéo chỉ ý nghĩa khi mode realtime (so sim-vs-EOD là vacuous) · featureReadinessAt chưa rõ lưu đâu (0-schema) · P0-1 chưa liệt kê trọn consumer (backtest/bandit/ensemble) · test 5 thiếu nhánh P1 auto-adjust · vài typo (tay đTimer · rở về · trămk · duyệt.dead-letter)
+- VÁ TOÀN BỘ vào doc nâng v1.0 → v1.1: outlier 2 lớp (cấu trúc + dải giá giới hạn 7/10/15% = issue; Hampel = INFO, ≥5 cờ/mã/quý mới lên issue) · split chỉ-VN + điều kiện tiên quyết gap vượt dải giá giới hạn (đòn bẩy an toàn: chuyển động thật KHÔNG THỂ vượt dải → gap vượt chắc chắn artefact) + f bất kỳ giá trị + HƯỚNG f=open[t]/close[t−1] + giá×f volume×(1/f) value tính lại + US/HK parse Yahoo events payload (đang bị bỏ đi) · MA TRẬN NGƯỠNG 6 phép × DEGRADED/SEVERE (điều chỉnh qua AppSetting) · P0-6 S0 IngestSummary + P0-7 S1 digest-verdict (đóng nợ lời hứa §1.2) · đợt A 3 nhịp con S0∥S2→A9→S1 · lịch phiên theo sàn + 3 trạng thái THIẾU/ĐÓNG CỬA/CŨ + Quote-freshness trong phiên vs Bar-freshness ngoài phiên · gap per-market quorum ≥50% + kiểm outage tổng · verdict → AgentRun.output (0 schema, khớp cam kết) + DataQualityReport dời P1-7 · pipeline một cửa dời P1-6 (P0 hậu kiểm post-hoc) · CorporateEvent @@unique(instrumentId,date,kind) · test 11 → 15 mục · changelog đầy đủ
+- README đồng bộ dòng v1.1 + commit + push
+
+Stage Summary:
+- Verdict review: HƯỚNG KIẾN TRÚC ĐÚNG (hợp đồng 4 tầng · engine-as-Timer · VETO không đụng · bảng kỷ luật công nghệ) — nhưng spec v1.0 có 4 lỗ hổng đủ nghiêm trọng để gây sự cố khi code: 3/4 lỗ nằm ở chính những cơ chế "an toàn" nhất của doc (outlier + split auto-adjust + ngưỡng verdict)
+- Bài học lặp lại: "heuristic định lượng không đặt trong bối cảnh ràng buộc thị trường (dải giá VN ±7/10/15%) là heuristic thiếu neo" — dải giá chính là知己 miễn phí biến "nghi-vấn" thành "chắc chắn artefact"
+- P1-1 auto-adjust giờ an toàn theo thiết kế: VN-only + vượt-dải mới điều chỉnh (crash thật không thể vượt dải) + AuditLog đảo ngược + kill-switch + unique chống trùng
+- Điểm số tự đánh: v1.0 = 8/10 (chẩn đoận + kiến trúc hướng đúng) → v1.1 = 9/10 (spec đủ chặt để code — không còn ambiguity nào phát hiện được ở mức review tĩnh)
