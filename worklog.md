@@ -1398,3 +1398,23 @@ Stage Summary:
 - CRB-6 lần đầu serving thật: pBreach 33,5%/chu kỳ vào RiskQuantSnapshot + MarketAssessment.detail + UI — đúng thiết kế cổng AUC ≥ 55% (64,8% đạt sau khi bỏ lookahead 1 phiên)
 - Nghiệm thu CRB-7.4 (nút reset) hoàn thành THẬT sau khi #51 chỉ mới có endpoint: 2-step confirm + Beta(1,99) + AuditLog minh bạch
 - Bài học tool: MultiEdit khi fail VẪN CÓ THỂ áp dụng một phần các edit trước đó (xác nhận lần 2 sau bài học #51) — sau mỗi lần fail phải re-read file thay vì tin "nothing applied"; chuỗi chứa run ký tự ─── dài dễ sai lệch khi copy → dùng anchor ngắn duy nhất
+
+---
+Task ID: 53
+Agent: main-orchestrator (Z.ai Code)
+Task: Đề xuất thứ tự thảo luận/nghiên cứu/nâng cấp 3 nhóm còn lại (Nền tảng dữ liệu · Ban điều hành · Phòng học máy) — 2 nhóm Nghiên cứu + Kiểm soát đã xong
+
+Work Log:
+- Đọc Fixbug.md (giao thức chuẩn hoá) + đuôi worklog #52 (8 bug F1–F8 đã vá, CRB v1.1.2, CRB-6 serving thật lần đầu AUC 64,8%)
+- Đọc ML_LEARNING_BLUEPRINT.md v1.0.1: trạng thái "ĐÃ DUYỆT #51 — kế hoạch tương lai, chờ cổng dữ liệu §6" (L3: 30 ngày RetrievalLog · L4: ≥250 phiên/regime · L5: ≥3 tháng BanditEvent)
+- Đối chiếu agent-roster.ts: 5 nhóm 23 agents — research 5 ✅ · control 3 ✅ · executive 4 (A1 Chủ tịch LLM + A10/A11/A12 service) ⏳ · platform 4 (S0/S1/S2/A9) ⏳ · ml 7 (A13–A19, S3) ⏳
+- Phân tích bằng chứng trong nhà: 4/8 bug Fixbug #52 có gốc tầng dữ liệu (F1 tương quan lệch ngày sai 0,69 · F2 return theo index thay vì ngày · F6 rổ xoay theo quote volume bất ổn 4 mô-đun · F7 lookahead 1 phiên) — phải vá rải rác trong engine vì tầng dữ liệu chưa có hợp đồng chuẩn
+- Trình bày đề xuất thứ tự cho user kèm lý do từng vị trí + phạm vi thảo luận dự kiến từng nhóm
+
+Stage Summary:
+- ĐỀ XUẤT (chờ user duyệt): ① Nền tảng dữ liệu → ② Ban điều hành → ③ Phòng học máy — nguyên tắc "nâng theo chiều dữ liệu chảy", mỗi nhóm nâng xong nhận input đã ổn
+- Lý do chính nhóm 1 trước: bug #52 gốc tầng dữ liệu; đồng hồ tích luỹ cho cổng ML §6 chỉ ý nghĩa trên nền sạch (point-in-time); platform đang gánh 150 mã/90k bar/3 nguồn/US-HK mà A9 chỉ kiểm tuổi-độ phủ thô; ML là người tiêu thụ lớn nhất nên chốt hợp đồng dữ liệu trước để tránh rework
+- Lý do nhóm 2: vành đai yếu nhất dịch về khâu quyết định cuối (Chủ tịch tiêu thụ pBreach/hệ số hạn mức/cổng 80% dạng text prompt, chưa có khung hình thức); ROI tức thời 100% chu kỳ; chỉ cần hợp đồng số liệu của nhóm 1, không cần chờ cổng dài hạn
+- Lý do nhóm 3 cuối: nhất quán quyết định #51 (blueprint duyệt làm kế hoạch tương lai); L1–L5 đều đóng cổng dữ liệu thật; có E chuẩn trước làm điểm giải trình khi ML ảnh hưởng quyết định
+- Dòng thời gian tối ưu: nâng nền xong = đồng hồ sạch cho ML bắt đầu chạy song song lúc triển khai nhóm 2
+- Bước mở màn phiên sau (nếu user duyệt): chẩn đoán 4 agents platform (S0/S1/S2/A9) + đo dữ liệu thật → soạn docs/DATA_PLATFORM_BLUEPRINT.md theo quy trình 2 nhóm trước
