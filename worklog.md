@@ -2071,3 +2071,27 @@ Stage Summary:
 - docs/EXECUTION_OPS_BLUEPRINT.md v1.0 sinh xong — blueprint NHÓM 3 Điều hành & Thực thi với ánh xạ "đầy đủ tất cả những gì lấy từ 4 tài liệu" theo yêu cầu: 44 cụm nội dung per-document (mỗi cụm: trang + người dùng + hạng mục áp dụng), ma trận tổng agent×nội dung, danh mục loại có chủ đích kèm lý do, stack 3 giai đoạn.
 - Phát kiến chẩn đoán chính: A10 thực thi "TWAP/VWAP + theo dõi khớp + báo cáo" 0 hiện thực (thực thi thật = signal-execution + fill engine tick ngoài nhóm) · A11 0 phép đối chiếu + biểu phí 2 nguồn hardcode · A12 không cộng cam kết tiềm năng · A1 config phân bổ 0 consumer — mọi phát kiến đều có bằng chứng rg/đường-dẫn file.
 - 4 hợp đồng dữ liệu mới + 15 hạng mục P0-P2 đều gắn nguồn tài liệu; 5 câu hỏi mở chờ trader; readiness §8 phát hiện 1 lỗ hổng dữ liệu (chuỗi cash lịch sử) làm precondition cho dự báo dòng tiền P1-3.
+
+---
+Task ID: RESTORE-1
+Agent: Z.ai Code (kỹ sư AI chính — main conversation)
+Task: User yêu cầu "Tiến hành kiểm tra dữ liệu app trong sandbox đã bị reset chưa, nếu rồi thì tiến hành tải lại bản mới nhất từ Github cho tôi"
+
+Work Log:
+- Chẩn đoán reset XÁC NHẬN: git remote biến mất · worklog chỉ còn 270 dòng (snapshot P0-era 05/10) · docs/DATA_PLATFORM_BLUEPRINT.md v1.7 + scripts/p2-verify.ts + src/lib/{notify,market-session,feature-cache}.ts mất · .env bị sanitize còn mỗi DATABASE_URL sqlite · dev server cũ trả 500 mọi API (thiếu credentials Supabase) → sandbox reset về snapshot 09/10 11:15
+- Truy vết: phát hiện /tmp/my-project (bản sao 09/10 09:34 — worklog 2073 dòng + docs/EXECUTION_OPS_BLUEPRINT.md v1.0) + git checkpoint d082a19 giữ nguyên .env đầy đủ credentials Supabase (nền tảng sanitize working tree nhưng checkpoint vẫn còn) + docs/USER_PROMPTS.md ghi repo https://github.com/vietnq130593-code/THE-TRADER
+- GitHub: repo PUBLIC — clone không cần PAT; commit mới nhất e677545 "blueprint #66: EXECUTION_OPS_BLUEPRINT v1.0 — nhóm 3 Điều hành & Thực thi" (push 09:33 UTC 09/10 — phiên trước kịp push trước khi hết context); diff clone vs /tmp/my-project chỉ còn file legacy P0 không track (route accounts/overview cũ, market-data cũ)
+- Restore: kill dev server cũ → rm file project cũ → cp clone đầy đủ (58 commit + remote origin) → giữ nguyên thư mục nền tảng (upload/ 4 PDF user · backups/ · skills/ · examples/ · .zscripts/ · Caddyfile gateway :81 · tool-results/ · tests/)
+- .env khôi phục từ checkpoint d082a19: SUPABASE_URL/ANON_KEY/SERVICE_ROLE_KEY/ACCESS_TOKEN/DB_PASSWORD/DB_URL_SESSION/TX + DATABASE_URL=postgresql://postgres.hcxflipjffclxqlqmirg:***@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres?schema=trader · GHI CHÚ MẤT SAU RESET: GITHUB_PAT (push cần cấp lại — clone/pull OK vì repo public) + OPENCODE_ZEN_API_KEY (LLM tự fallback z-ai GLM-4.6 trong sandbox)
+- Phát hiện shell nhiễm DATABASE_URL sqlite cũ (đúng cảnh báo trong ecosystem.config.js) — mọi lệnh prisma CLI phải chạy env -u DATABASE_URL; PM2 ecosystem tự đọc .env truyền xuống nên the-trader chạy đúng DB
+- bun install (252 pkgs) + bunx prisma generate + env -u DATABASE_URL bunx prisma db push → "The database is already in sync with the Prisma schema" — DB Supabase SỐNG NGUYÊN VẸN qua reset (31 model + toàn bộ dữ liệu 215k bars, agents, signals, settings)
+- PM2 7.0.4 cài lại (npm -g, bị mất cùng reset) + mini-services/market-engine bun install + pm2 start ecosystem.config.js → the-trader :3000 + market-engine :3003 ONLINE · pm2 save
+- Engine lỗi connect vài giây đầu (app đang compile lần đầu) → tự hồi phục hoàn toàn: POST /api/market/tick 200 liên tục mỗi 10s vào dev.log; EOD hôm nay đã được sync từ 15:46 ICT bởi engine của sandbox trước (lastSuccessAt trong system/status)
+- Verify E2E QUA GATEWAY :81 (chuẩn fixbug #65): title "The Trader — Multi-Agent Trading System" · 0 console error · 0 page error · dashboard đầy đủ dữ liệu thật (VN30 · tin tức Tuổi Trẻ thật · 12 tín hiệu · chu kỳ 23 agents 12:11 09-10 · AI $5.04 · 1.6M tokens) · WS realtime SỐNG 100%: VN30 999,90 → 999,43 sau 25s với 0 refetch HTTP (chỉ 2 fetch lúc load) · mobile 390×844: docH 2356 > winH 844 footer đẩy xuống tự nhiên, overflowX false · screenshots docs/restore-verify-{desktop,mobile}.png
+- Smoke API toàn bộ 200: / · /api/agents · /api/system/status · /api/market/quotes · /api/news · /api/settings · /api/market/engine-state · /api/research/scorecard · /api/coverage · /api/ml/status
+
+Stage Summary:
+- Sandbox ĐÃ reset (về snapshot P0-era 05/10) → đã tải lại bản mới nhất từ GitHub commit e677545 — gồm cả EXECUTION_OPS_BLUEPRINT v1.0 nhóm Điều hành & Thực thi (phiên #66) vừa viết trước khi session cũ hết context
+- Toàn bộ hệ thống vận hành lại đồng bộ: code e677545 · .env Supabase khôi phục từ git checkpoint · DB Supabase nguyên vẹn qua reset · PM2 the-trader + market-engine online · WS realtime verify sống qua gateway
+- 2 bí mật MẤT sau reset cần user cấp lại khi dùng: GITHUB_PAT (để push code — clone/pull vẫn OK) · OPENCODE_ZEN_API_KEY (LLM Opencode Zen — đang fallback z-ai GLM-4.6 trong sandbox)
+- Commit local hoàn tất; PUSH chờ user cấp PAT mới (thử push sẽ 401/không xác thực)
