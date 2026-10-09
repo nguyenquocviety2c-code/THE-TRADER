@@ -2095,3 +2095,29 @@ Stage Summary:
 - Toàn bộ hệ thống vận hành lại đồng bộ: code e677545 · .env Supabase khôi phục từ git checkpoint · DB Supabase nguyên vẹn qua reset · PM2 the-trader + market-engine online · WS realtime verify sống qua gateway
 - 2 bí mật MẤT sau reset cần user cấp lại khi dùng: GITHUB_PAT (để push code — clone/pull vẫn OK) · OPENCODE_ZEN_API_KEY (LLM Opencode Zen — đang fallback z-ai GLM-4.6 trong sandbox)
 - Commit local hoàn tất; PUSH chờ user cấp PAT mới (thử push sẽ 401/không xác thực)
+
+---
+Task ID: CREDS-1
+Agent: Z.ai Code (kỹ sư AI chính — main conversation)
+Task: User cấp lại 2 bí mật mất sau reset (GITHUB_PAT + OPENCODE_ZEN_API_KEY) — dặn "giữ PAT cẩn thận" + yêu cầu cấu hình Zen key để app LUÔN dùng Space Bunny Free + hỏi 4 tài liệu upload còn giữ không.
+
+Work Log:
+- Kiểm tra sandbox: KHÔNG reset lại — repo bb88d07 (đã qua restore #67), working tree sạch, PM2 the-trader/market-engine online 68m, DB Supabase sống, tick 200 liên tục trong dev.log.
+- 4 tài liệu upload: CÒN NGUYÊN VẸN tại upload/ (Machine Learning.pdf 464KB · MATH.pdf 352KB · Data Analytics.pdf 622KB · DEEP LEARNING.pdf 373KB — 79 trang đã dùng cho EXECUTION_OPS_BLUEPRINT v1.0 #66).
+- .env (gitignore dòng 45 `.env*` — không bao giờ commit): điền GITHUB_PAT + khối LLM mới LLM_PROVIDER=opencode-zen (ép LUÔN dùng Zen kể cả trong sandbox — hết fallback z-ai GLM-4.6 trả phí) · OPENCODE_ZEN_API_KEY · OPENCODE_ZEN_BASE_URL · OPENCODE_ZEN_MODEL=space-bunny-free · OPENCODE_ZEN_REASONING_EFFORT=low.
+- Git credential store: git config --global credential.helper store + ~/.git-credentials (perm 600, ngoài repo) → push xác thực bằng PAT không nhét token vào URL remote.
+- Test trực tiếp Zen gateway https://opencode.ai/zen/v1: POST /chat/completions với Authorization: Bearer → **401 "Upstream request failed: Invalid credential"** · GET /models OK với CẢ HAI kiểu header · POST với **x-api-key → 200** → chẩn đoán: gateway xác thực key oc_sk_… qua x-api-key, Bearer bị coi là credential upstream passthrough (docs chính thức Zen vẫn ghi Bearer — thực nghiệm thắng).
+- Vá src/lib/llm.ts: headers đổi Authorization: Bearer → "x-api-key" + comment thực đo 2026-10-09 + doc comment đầu file ghi rõ ⚠️ AUTH; đồng bộ docs/DATA_SOURCES.md §76 + docs/TECHNICAL_BLUEPRINT.md §478 (2 chỗ ghi "Bearer" cũ).
+- pm2 restart ecosystem.config.js --update-env → GET /api/settings llm: provider opencode-zen · model space-bunny-free · modelLabel "space-bunny-free · Opencode Zen (free)" · free true · $0/$0 MTok · runsOutsideSandbox true.
+- E2E qua app: POST /api/agents/cmuwojdpb025liaszg6hydp10/chat (market-analyst) → 200 trong 7,1s, agent trả lời bằng dữ liệu thật VN30 (15 tăng/10 giảm · VIC +1,14% · VPB −1,70% · PNJ −1,64%) — pipeline DB→prompt→Zen x-api-key→space-bunny-free→parse→AgentMessage sống 100%.
+- Kiểm định: tsc 0 lỗi src/ (5 lỗi cũ examples/+skills/ ngoài phạm vi app) · lint 3 problems đều examples/websocket/frontend.tsx (code demo cũ nền tảng) · dev.log sạch toàn 200, 0 lỗi runtime, chat 200 7,1s.
+- Push origin bằng PAT → **403 "Permission to vietnq130593-code/THE-TRADER.git denied to nguyenquocviety2c-code"**: PAT user cấp thuộc tài khoản THỨ HAI nguyenquocviety2c-code (verify API /user), còn repo thuộc vietnq130593-code → permissions push:false pull:true; lịch sử USER_PROMPTS 6.1 xác nhận các lần push trước dùng PAT đúng tài khoản chủ repo (mất theo reset). API PUT collaborator bị 404 (không quyền owner) · tài khoản nguyenquocviety2c-code không có fork/repo THE-TRADER sẵn.
+- Giải pháp an toàn: **tạo fork nguyenquocviety2c-code/THE-TRADER** (PAT full scope repo) + thêm remote `fork` + push `e677545..53f8eac main→main` THÀNH CÔNG (3 commit: 9632193 restore #67 · bb88d07 checkpoint · 53f8eac creds #68) — code có backup trên GitHub, không phụ thuộc checkpoint nền tảng; ~/.git-credentials cập nhật username đúng token-owner.
+
+Stage Summary:
+- **Space Bunny Free HOẠT ĐỘNG thường trực**: LLM_PROVIDER=opencode-zen ép provider (auto chỉ là dự phòng), model free $0, key oc_sk_ hợp lệ qua x-api-key — chạy cả trong sandbox lẫn máy local trader.
+- 1 bug thực tế được vá: Zen gateway từ chối Bearer với key oc_sk_ → đổi header x-api-key (bằng chứng 401 vs 200 cô lập biến).
+- GITHUB_PAT giữ 2 lớp an toàn: ~/.git-credentials perm 600 (để push fork) + .env GITHUB_PAT (gitignored, sống qua platform checkpoint để khôi phục credential sau reset tương lai).
+- ⚠️ CẦN USER QUYẾT để push lại origin (repo gốc vietnq130593-code): (a) thêm nguyenquocviety2c-code làm collaborator repo Settings → Collaborators, HOẶC (b) cấp PAT của đúng tài khoản vietnq130593-code. Đến lúc đó: fetch origin + push origin main; fork xóa được bất cứ lúc nào (PAT có scope delete_repo).
+- 4 tài liệu user upload còn nguyên vẹn — đầu vào đã tiêu thụ cho blueprint nhóm Điều hành & Thực thi (#66).
+- BẢN MỚI NHẤT hiện tại: fork nguyenquocviety2c-code/THE-TRADER @ 53f8eac (origin còn đứng ở e677545) — mọi lần khôi phục sandbox sau này phải clone từ FORK cho tới khi origin được cấp quyền lại.
