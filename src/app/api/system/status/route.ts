@@ -18,19 +18,20 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const escalated = await escalateStaleSources();
-    const [sources, newsCount, signalCount, orderCount, messageCount] =
+    // Perf #64 — getEffectiveMode ĐỘC LẬP với escalate/readSources (chỉ đọc
+    // AppSetting) nên ghép vào cùng Promise.all (trước fix chạy tuần tự sau
+    // nhóm — phí thêm 1 RTT WAN ~100ms mỗi lần footer poll).
+    const [sources, newsCount, signalCount, orderCount, messageCount, eff] =
       await Promise.all([
         readSources(),
         db.newsItem.count(),
         db.signal.count(),
         db.order.count(),
         db.agentMessage.count(),
+        getEffectiveMode(),
       ]);
 
     const trading = getTradingMode();
-    // Phiên #34 (additive — không phá shape cũ): mode dữ liệu hiệu lực +
-    // trạng thái realtime finfo để footer/monitoring hiển thị cảnh báo fallback.
-    const eff = await getEffectiveMode();
 
     return NextResponse.json({
       sources: sources.map((s) => {
@@ -56,7 +57,8 @@ export async function GET() {
         phaseLabel: SESSION_PHASE_LABEL[sessionPhase(new Date())],
         inSession: isTradingSession(new Date()),
         strictSession: process.env.MARKET_STRICT_SESSION === "true",
-        // Phiên #34 — optional additive (SystemStatusResponse.market giữ nguyên)
+        // Phiên #34 (additive — không phá shape cũ): mode dữ liệu hiệu lực +
+        // trạng thái realtime finfo để footer/monitoring hiển thị cảnh báo fallback.
         effectiveMode: eff.effectiveMode,
         realtimeOk: eff.realtimeOk,
       },

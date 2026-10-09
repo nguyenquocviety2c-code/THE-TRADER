@@ -287,6 +287,8 @@ export interface RetryOutcome {
   sent: number;
   stillPending: number;
   errors: string[];
+  /** F-63B-05/#64 — ghi chú khi retry tự động bị skip vì kênh đang TẮT. */
+  note?: string;
 }
 
 /**
@@ -300,13 +302,36 @@ export interface RetryOutcome {
  * (không có đường gửi nào) dần chiếm hết slot oldest → webhook starve,
  * mâu thuẫn lời hứa blueprint "máy chủ có egress → tự phát hết backlog".
  *
+ * F-63B-05/#64 (quyết định thay user): retry TỰ ĐỘNG (piggyback S1 — opts.manual
+ * không đặt) tôn trọng notify.enabled — người dùng TẮT kênh nghĩa là NGỪNG bắn
+ * ra ngoài ngay lập tức; backlog giữ nguyên PENDING_EGRESS để bật lại thì tự
+ * cạn (không FAILED — không đánh lừa "đã thử và hỏng"). Nút "Thử gửi lại"
+ * (POST /api/notify → opts.manual=true) là ý định tường minh của người bấm —
+ * vẫn bắn kể cả khi kênh đang TẮT (đúng ngữ nghĩa nút).
+ *
  * F-63B-11/#63: prune piggyback SENT/FAILED cũ hơn 30 ngày (best-effort —
  * PENDING_EGRESS KHÔNG prune: backlog chờ egress phải sống qua restart).
  *
  * F-63B-09/#63: DB lỗi ở đây NÉM lên (POST route → 500 trung thực; S1
  * piggyback đã .catch(() => null) tại call-site — không chặn chu kỳ).
  */
-export async function retryPendingOutbox(limit = 5): Promise<RetryOutcome> {
+export async function retryPendingOutbox(
+  limit = 5,
+  opts?: { manual?: boolean }
+): Promise<RetryOutcome> {
+  // F-63B-05/#64 — retry tự động chỉ chạy khi kênh đang BẬT
+  if (!opts?.manual) {
+    const settings = await getNotifySettings().catch(() => null);
+    if (settings && !settings.enabled) {
+      return {
+        retried: 0,
+        sent: 0,
+        stillPending: await countPending(),
+        errors: [],
+        note: "kênh thông báo đang TẮT — retry tự động bị bỏ qua (F-63B-05); backlog giữ PENDING để bật lại thì tự cạn",
+      };
+    }
+  }
   await db.notificationOutbox
     .deleteMany({
       where: {
@@ -369,7 +394,7 @@ export async function listOutbox(limit = 20): Promise<OutboxRowView[]> {
   return rows.map((r) => ({
     id: r.id,
     channel: r.channel,
-    target: r.target,
+    target: maskTarget(r.target),
     subject: r.subject,
     status: r.status,
     attempts: r.attempts,
@@ -378,6 +403,27 @@ export async function listOutbox(limit = 20): Promise<OutboxRowView[]> {
     createdAt: r.createdAt.toISOString(),
     sentAt: r.sentAt?.toISOString() ?? null,
   }));
+}
+
+/**
+ * F-63B-12/#64 (quyết định thay user): mask đích webhook khi hiển thị trong
+ * bảng outbox — query string của URL có thể nhúng token (?key=…, ?token=…)
+ * và một webhook URL đăng ký trên dịch vụ public thường là bí mật; giữ origin
+ * + path (đủ nhận diện endpoint), che phần ?… → trailing. Trường CÀI ĐẶT
+ * (input webhookUrl người dùng tự nhập/sửa) KHÔNG mask. Email giữ nguyên
+ * (không phải bí mật trong ngữ cảnh này). Payload digest chưa từng lộ (đã
+ * kiểm chứng #63) — giữ nguyên.
+ */
+function maskTarget(target: string): string {
+  if (/^https?:\/\//i.test(target)) {
+    try {
+      const u = new URL(target);
+      return `${u.protocol}//${u.hostname}${u.pathname}${u.search ? "?••••" : ""}`;
+    } catch {
+      // URL hỏng — rơi về truncate
+    }
+  }
+  return target.length > 48 ? `${target.slice(0, 45)}…` : target;
 }
 
 /** Trạng thái tóm tắt cho UI Cài đặt (kèm bản tin SENT cuối).

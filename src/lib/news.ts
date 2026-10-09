@@ -118,6 +118,87 @@ export interface NewsIngestResult {
 /** Guard rate-limit trong bộ nhớ (một process Next.js duy nhất). */
 let lastIngestAt = 0;
 
+/**
+ * F-63C-08/#64 (quyết định thay user): guard crawl cross-process qua CAS trên
+ * AppSetting "news-crawl-guard" (value = epoch-ms lúc crawl BẮT ĐẦU). Trước
+ * fix guard chỉ là biến module PER-PROCESS → script kiểm định (p2-verify) gọi
+ * ingestNews() tiến trình riêng KHÔNG serialize với POST /api/news của engine
+ * (15'/lần) → crawl chồng lấn + read-merge-write meta.reliability lost-update
+ * + create trùng URL bị unique violation đánh feed ok:false giả.
+ * Cơ chế: đọc value → chưa đủ 60s → skip; đủ → updateMany where value=CŨ (CAS
+ * atomic — tiến trình thua đọc count=0 → skip). Fail-open khi DB lỗi (guard
+ * là advisory — unique constraint DB đã chặn trùng tin; không được chặn crawl
+ * vì lỗi guard). opts.force (đường kiểm định) bypass cả 2 lớp guard.
+ */
+const NEWS_GUARD_KEY = "news-crawl-guard";
+
+/** Kết quả khi guard chặn — mode THẬT từ DB (F-107: không tự xoá nhãn
+ * fallback/stale vì guard không crawl) + đếm ngược cho client backoff (F-210). */
+async function guardSkipResult(sinceMs: number): Promise<NewsIngestResult> {
+  const [total, status] = await Promise.all([
+    db.newsItem.count(),
+    db.dataSourceStatus.findUnique({
+      where: { key: "news" },
+      select: { mode: true },
+    }),
+  ]);
+  return {
+    added: 0,
+    updated: 0,
+    total,
+    mode: (status?.mode as SourceMode) ?? "fallback",
+    feeds: [],
+    ingestedAt: new Date(sinceMs).toISOString(),
+    retryAfterSeconds: Math.max(
+      1,
+      Math.ceil((MIN_INGEST_INTERVAL_MS - (Date.now() - sinceMs)) / 1000)
+    ),
+  };
+}
+
+export async function ingestNews(opts?: {
+  /** Đường kiểm định (p2-verify): bypass guard in-process + DB CAS. */
+  force?: boolean;
+}): Promise<NewsIngestResult> {
+  const now = Date.now();
+  // Fast path — guard in-process (0 query)
+  if (!opts?.force && now - lastIngestAt < MIN_INGEST_INTERVAL_MS) {
+    return guardSkipResult(lastIngestAt);
+  }
+  // Cross-process — DB CAS guard (F-63C-08/#64)
+  if (!opts?.force) {
+    try {
+      const row = await db.appSetting.findUnique({
+        where: { key: NEWS_GUARD_KEY },
+        select: { value: true },
+      });
+      const lastAt = row ? Number(row.value) : 0;
+      if (Number.isFinite(lastAt) && now - lastAt < MIN_INGEST_INTERVAL_MS) {
+        return guardSkipResult(lastAt);
+      }
+      if (row) {
+        const cas = await db.appSetting.updateMany({
+          where: { key: NEWS_GUARD_KEY, value: row.value },
+          data: { value: String(now) },
+        });
+        if (cas.count === 0) return guardSkipResult(lastAt); // tiến trình khác vừa giành quyền
+      } else {
+        // Lần đầu (row chưa tồn tại) — upsert; cửa sổ race 2 tiến trình cùng
+        // thấy null rất nhỏ và tự thu hẹp vĩnh viễn sau row đầu tiên.
+        await db.appSetting.upsert({
+          where: { key: NEWS_GUARD_KEY },
+          create: { key: NEWS_GUARD_KEY, value: String(now) },
+          update: { value: String(now) },
+        });
+      }
+    } catch {
+      // fail-open (xem comment NEWS_GUARD_KEY ở trên)
+    }
+  }
+  lastIngestAt = now;
+  return crawlNews();
+}
+
 const parser = new XMLParser({
   ignoreAttributes: true,
   trimValues: true,
@@ -222,34 +303,9 @@ function extractItems(xml: string): Record<string, unknown>[] {
   );
 }
 
-export async function ingestNews(): Promise<NewsIngestResult> {
-  const now = Date.now();
-  if (now - lastIngestAt < MIN_INGEST_INTERVAL_MS) {
-    // F-107 (audit 19-b): trả mode THẬT từ DB thay vì hardcode "live" —
-    // guard không crawl nên không được phép tự xoá nhãn fallback/stale.
-    const [total, status] = await Promise.all([
-      db.newsItem.count(),
-      db.dataSourceStatus.findUnique({
-        where: { key: "news" },
-        select: { mode: true },
-      }),
-    ]);
-    return {
-      added: 0,
-      updated: 0,
-      total,
-      mode: (status?.mode as SourceMode) ?? "fallback",
-      feeds: [],
-      ingestedAt: new Date(lastIngestAt).toISOString(),
-      // F-210 (audit 19-b): đếm ngược còn lại cho client backoff
-      retryAfterSeconds: Math.max(
-        1,
-        Math.ceil((MIN_INGEST_INTERVAL_MS - (now - lastIngestAt)) / 1000)
-      ),
-    };
-  }
-  lastIngestAt = now;
-
+/** Thân crawl thật — guard (in-process + DB CAS) đã xử lý ở wrapper
+ * ingestNews() phía trên; hàm này KHÔNG đụng guard. */
+async function crawlNews(): Promise<NewsIngestResult> {
   const feeds: FeedResult[] = [];
   let added = 0;
   let updated = 0;

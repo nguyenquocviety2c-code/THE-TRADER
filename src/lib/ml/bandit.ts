@@ -57,15 +57,23 @@ export interface SettleResult {
   details?: { agentCode: string; agentName: string; reward: number; assessmentId: string }[];
 }
 
-/** Upsert 6 BanditArm nếu thiếu (idempotent — gọi an toàn mọi nơi). */
+/** Upsert 6 BanditArm nếu thiếu (idempotent — gọi an toàn mọi nơi).
+ * Perf #64: TRƯỚC fix upsert 6 arm TUẦN TỰ mỗi lần gọi (~600ms WAN — Comics
+ * đóng góp lớn nhất trong 1,4s của /api/ml/status); giờ chạy parallel MỘT
+ * lần/process (module flag) — các lần sau 0 query. */
+let armsEnsured = false;
 export async function ensureArms(): Promise<void> {
-  for (const code of BANDIT_ARM_CODES) {
-    await db.banditArm.upsert({
-      where: { agentCode: code },
-      update: {},
-      create: { agentCode: code, alpha: 1, beta: 1, pulls: 0, wins: 0 },
-    });
-  }
+  if (armsEnsured) return;
+  await Promise.all(
+    BANDIT_ARM_CODES.map((code) =>
+      db.banditArm.upsert({
+        where: { agentCode: code },
+        update: {},
+        create: { agentCode: code, alpha: 1, beta: 1, pulls: 0, wins: 0 },
+      })
+    )
+  );
+  armsEnsured = true;
 }
 
 /**
@@ -123,6 +131,31 @@ function filterArms(votes: CastVote[]): CastVote[] {
   return votes.filter((v) => armSet.has(v.code));
 }
 
+/** Perf #64 — memo phiếu bầu theo assessmentId: detail MarketAssessment là
+ * JSON ~11KB/row và BẤT BIẾN sau khi tạo (ghi 1 lần mỗi chu kỳ), nhưng
+ * pendingSettleCount/settle quét 30 bản gần nhất MỖI LẦN → 340KB WAN
+ * (~1,4s /api/ml/status). Memo hoá sau: chỉ assessment MỚI mới cần fetch
+ * detail — steady-state ~11KB/lần chu kỳ. Cap 128 entry (quét tối đa 30 —
+ * cap dư địa cho chạy dài). */
+const voteMemo = new Map<string, CastVote[]>();
+
+function votesOf(a: { id: string }): CastVote[] {
+  return voteMemo.get(a.id) ?? [];
+}
+
+/** Nạp memo cho các id chưa có — fetch detail CHỈ những row còn thiếu. */
+async function warmVoteMemo(ids: string[]): Promise<void> {
+  const missing = ids.filter((id) => !voteMemo.has(id));
+  if (missing.length === 0) return;
+  const rows = await db.marketAssessment.findMany({
+    where: { id: { in: missing } },
+    select: { id: true, detail: true },
+  });
+  if (voteMemo.size > 128) voteMemo.clear();
+  for (const r of rows) voteMemo.set(r.id, parseVotes(r.detail));
+  for (const id of missing) if (!voteMemo.has(id)) voteMemo.set(id, []); // row xoá giữa chừng — memo cả negative
+}
+
 /**
  * Kết toán mọi phiếu chờ: với mỗi assessment (30 bản gần nhất) chưa có
  * BanditEvent settled mà đã đủ 5 ngày giao dịch tính từ createdAt → tính
@@ -132,12 +165,16 @@ function filterArms(votes: CastVote[]): CastVote[] {
 export async function settlePendingRewards(): Promise<SettleResult> {
   await ensureArms();
 
-  const assessments = await db.marketAssessment.findMany({
+  // Perf #64 — hai bước: lấy id trước, fetch detail CHỈ row chưa có trong
+  // memo (trước fix kéo full detail 30×~11KB mỗi lần settle).
+  const idRows = await db.marketAssessment.findMany({
     orderBy: { createdAt: "desc" },
     take: SETTLE_SCAN_LIMIT,
-    select: { id: true, createdAt: true, detail: true },
+    select: { id: true, createdAt: true },
   });
-  if (assessments.length === 0) return { settled: 0, votes: 0 };
+  if (idRows.length === 0) return { settled: 0, votes: 0 };
+  await warmVoteMemo(idRows.map((a) => a.id));
+  const assessments = idRows;
 
   // Phiếu đã settle (assessmentId:agentCode) — bỏ qua khi quét
   const events = await db.banditEvent.findMany({
@@ -152,7 +189,7 @@ export async function settlePendingRewards(): Promise<SettleResult> {
 
   // Chỉ assessment còn phiếu chờ mới cần bar
   const pending = assessments.filter((a) => {
-    const votes = parseVotes(a.detail);
+    const votes = votesOf(a);
     return votes.some((v) => !settledKeys.has(`${a.id}:${v.code}`));
   });
   if (pending.length === 0) return { settled: 0, votes: 0 };
@@ -200,7 +237,7 @@ export async function settlePendingRewards(): Promise<SettleResult> {
   const details: NonNullable<SettleResult["details"]> = [];
 
   for (const a of pending) {
-    const votesForAssessment = parseVotes(a.detail).filter(
+    const votesForAssessment = votesOf(a).filter(
       (v) => !settledKeys.has(`${a.id}:${v.code}`)
     );
     if (votesForAssessment.length === 0) continue;
@@ -284,8 +321,22 @@ export async function settlePendingRewards(): Promise<SettleResult> {
   return { settled, votes, details };
 }
 
-/** Ảnh chụp posterior các arm (sắp theo posteriorMean giảm dần) + lần settle cuối. */
-export async function banditSnapshot(): Promise<{
+/** Ảnh chụp posterior các arm (sắp theo posteriorMean giảm dần) + lần settle cuối.
+ * Perf #64 — TTL cache 15s: arm chỉ đổi lúc settle (mỗi chu kỳ agent), UI poll
+ * /api/ml/status 30s/lần nên cache hấp thụ 1/2 request; stale tối đa 15s
+ * hoàn toàn chấp nhận được cho badge trạng thái. */
+export type BanditSnapshot = Awaited<ReturnType<typeof banditSnapshotRaw>>;
+let snapCache: { at: number; value: BanditSnapshot } | null = null;
+const SNAP_TTL_MS = 15_000;
+
+export async function banditSnapshot(): Promise<BanditSnapshot> {
+  if (snapCache && Date.now() - snapCache.at < SNAP_TTL_MS) return snapCache.value;
+  const value = await banditSnapshotRaw();
+  snapCache = { at: Date.now(), value };
+  return value;
+}
+
+async function banditSnapshotRaw(): Promise<{
   arms: {
     agentCode: string;
     name: string;
@@ -298,8 +349,11 @@ export async function banditSnapshot(): Promise<{
   lastSettleAt: Date | null;
 }> {
   await ensureArms();
-  const arms = await db.banditArm.findMany();
-  const agg = await db.banditEvent.aggregate({ _max: { settledAt: true } });
+  // Perf #64 — 2 query độc lập chạy parallel (trước fix tuần tự 2 RTT)
+  const [arms, agg] = await Promise.all([
+    db.banditArm.findMany(),
+    db.banditEvent.aggregate({ _max: { settledAt: true } }),
+  ]);
   const mapped = arms.map((a) => {
     const roster = ROSTER_BY_CODE.get(a.agentCode);
     return {
@@ -316,16 +370,25 @@ export async function banditSnapshot(): Promise<{
   return { arms: mapped, lastSettleAt: agg._max.settledAt };
 }
 
-/** Số phiếu bầu LLM chờ tới phiên thứ 5 (chưa settle) — 30 assessment gần nhất. */
+/** Số phiếu bầu LLM chờ tới phiên thứ 5 (chưa settle) — 30 assessment gần nhất.
+ * Perf #64 — memo phiếu bầu (chỉ assessment MỚI cần fetch detail ~11KB;
+ * trước fix kéo 340KB mỗi lần) + TTL cache 15s (số chỉ đổi khi có assessment
+ * mới hoặc settle — đều xảy ra trong chu kỳ agent). */
+let pendingCountCache: { at: number; value: number } | null = null;
+
 export async function pendingSettleCount(): Promise<number> {
-  const assessments = await db.marketAssessment.findMany({
+  if (pendingCountCache && Date.now() - pendingCountCache.at < SNAP_TTL_MS) {
+    return pendingCountCache.value;
+  }
+  const ids = await db.marketAssessment.findMany({
     orderBy: { createdAt: "desc" },
     take: SETTLE_SCAN_LIMIT,
-    select: { id: true, detail: true },
+    select: { id: true },
   });
-  if (assessments.length === 0) return 0;
+  if (ids.length === 0) return 0;
+  await warmVoteMemo(ids.map((a) => a.id));
   const events = await db.banditEvent.findMany({
-    where: { assessmentId: { in: assessments.map((a) => a.id) } },
+    where: { assessmentId: { in: ids.map((a) => a.id) } },
     select: { assessmentId: true, agentCode: true, settledAt: true },
   });
   const settledKeys = new Set(
@@ -334,10 +397,11 @@ export async function pendingSettleCount(): Promise<number> {
       .map((e) => `${e.assessmentId}:${e.agentCode}`)
   );
   let pending = 0;
-  for (const a of assessments) {
-    for (const v of parseVotes(a.detail)) {
+  for (const a of ids) {
+    for (const v of votesOf(a)) {
       if (!settledKeys.has(`${a.id}:${v.code}`)) pending++;
     }
   }
+  pendingCountCache = { at: Date.now(), value: pending };
   return pending;
 }

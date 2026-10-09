@@ -45,8 +45,21 @@ function seededUnit(symbol: string, dateIso: string): number {
   return ((h >>> 0) % 1000) / 1000; // [0, 1)
 }
 
-/** Best-effort nạp từ nguồn ngoài — hiện sẽ fail trong sandbox → fallback. */
+/** Best-effort nạp từ nguồn ngoài — hiện sẽ fail trong sandbox → fallback.
+ * Perf #64 — MEMO âm tính 10 phút: sandbox/mạng chặn egress làm fetch treo
+ * tới timeout 5s MỖI LẦN GỌI /api/market/flows (đóng góp lớn nhất trong
+ * 4,2s đo được); thăm dò lại mỗi 10 phút thay vì mỗi request — khi nhà cung
+ * cấp thật mở kết nối, tối đa chậm 10 phút được phát hiện. */
+const EXTERNAL_PROBE_TTL_MS = 10 * 60_000;
+let externalLastProbeAt = 0;
+let externalLastOk = false;
+
 async function tryExternalFlows(): Promise<FlowsSummary | null> {
+  const now = Date.now();
+  if (!externalLastOk && now - externalLastProbeAt < EXTERNAL_PROBE_TTL_MS) {
+    return null; // memo âm tính — bỏ qua thăm dò trong cửa sổ TTL
+  }
+  externalLastProbeAt = now;
   try {
     const res = await fetch("https://cafef.vn/thi-truong-chung-khoan.rss", {
       method: "GET",
@@ -134,9 +147,18 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
   }
   let persisted = 0;
   let skippedLive = 0;
+  // Perf #64 — upsert ForeignFlow song song theo chunk (trước fix 76 lần
+  // TUẦN TỰ ≈ 3s — cùng lớp lỗi như tick route đã fix); map symbol→item thay
+  // find() O(n²). Fail-soft giữ nguyên (persist không chặn phục vụ flows).
+  const itemBySymbol = new Map(items.map((it) => [it.symbol, it.netValue]));
+  interface FlowWrite {
+    instrumentId: string;
+    netValue: bigint;
+  }
+  const flowWrites: FlowWrite[] = [];
   for (const inst of instruments) {
-    const item = items.find((it) => it.symbol === inst.symbol);
-    if (!item) continue;
+    const netValue = itemBySymbol.get(inst.symbol);
+    if (netValue == null) continue;
     if (liveInstrumentIds == null) {
       continue; // guard không đọc được → không ghi (fail-closed)
     }
@@ -144,16 +166,28 @@ export async function getForeignFlows(): Promise<FlowsSummary> {
       skippedLive++;
       continue; // giữ nguyên row live — mô phỏng không đè dữ liệu thật
     }
-    await db.foreignFlow
-      .upsert({
-        where: { instrumentId_date: { instrumentId: inst.id, date: flowDate } },
-        create: { instrumentId: inst.id, date: flowDate, netValue: BigInt(item.netValue), mode: "simulated" },
-        update: { netValue: BigInt(item.netValue) }, // mode giữ nguyên (đã lọc live ở trên)
-      })
-      .then(() => {
-        persisted++;
-      })
-      .catch(() => undefined); // fail-soft — persist không chặn phục vụ flows
+    flowWrites.push({ instrumentId: inst.id, netValue: BigInt(netValue) });
+  }
+  // Perf #64 — chunk 25: 76 row → 4 đợt parallel (~0,4s) — Prisma pool mặc
+  // định và Supabase chấp nhận thoải mái ở mức này.
+  const FLOW_CHUNK = 25;
+  for (let i = 0; i < flowWrites.length; i += FLOW_CHUNK) {
+    const chunk = flowWrites.slice(i, i + FLOW_CHUNK);
+    const results = await Promise.allSettled(
+      chunk.map((w) =>
+        db.foreignFlow.upsert({
+          where: { instrumentId_date: { instrumentId: w.instrumentId, date: flowDate } },
+          create: {
+            instrumentId: w.instrumentId,
+            date: flowDate,
+            netValue: w.netValue,
+            mode: "simulated",
+          },
+          update: { netValue: w.netValue }, // mode giữ nguyên (đã lọc live ở trên)
+        })
+      )
+    );
+    persisted += results.filter((r) => r.status === "fulfilled").length;
   }
 
   const totalNet = totalBuy - totalSell;

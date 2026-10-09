@@ -487,6 +487,25 @@ async function runTick(): Promise<NextResponse> {
       rtQuotes = realtimeCache.ok === true ? realtimeCache.quotes : null;
     }
 
+    // ── Perf #64: TÁCH 2 PHA — trước fix vòng lặp dưới chờ MỖI db.quote.update
+    // TUẦN TỰ (~76 mã × ~40ms RTT WAN ≈ 3s/tick, tick 10s/lần → server bận
+    // 30% thời gian và mọi request UI xếp hàng phía sau). Pha 1 compute thuần
+    // (0 DB call — mọi phép toán giá/khối lượng/spread deterministic theo q),
+    // pha 2 ghi DB song song theo chunk 10 (thứ tự ghi không quan trọng: mỗi
+    // row quote/bar của MỘT instrument riêng — không phụ thuộc nhau).
+    interface QuoteWrite {
+      quoteId: string;
+      data: Parameters<typeof db.quote.update>[0]["data"];
+    }
+    interface BarWrite {
+      instrumentId: string;
+      date: Date;
+      create: Parameters<typeof db.bar.upsert>[0]["create"];
+      update: Parameters<typeof db.bar.upsert>[0]["update"];
+    }
+    const quoteWrites: QuoteWrite[] = [];
+    const barWrites: BarWrite[] = [];
+
     for (const inst of instruments) {
       const q = inst.quotes[0];
       if (!q || q.last <= 0) continue;
@@ -499,6 +518,7 @@ async function runTick(): Promise<NextResponse> {
       let floor: number;
       let ceiling: number;
       let volumeBase: number;
+      let rolloverBar: { date: Date; open: number; high: number; low: number; close: number; volume: number; value: bigint } | null = null;
 
       if (isRollover) {
         // Ghi Bar OHLCV của phiên vừa đóng — chỉ ngày giao dịch (Q7: bỏ T7/CN/lễ)
@@ -507,27 +527,15 @@ async function runTick(): Promise<NextResponse> {
         // đè lên lịch sử thật; chỉ mode "simulated" mới tự ghi bar.
         const barDate = new Date(`${prevIso}T15:00:00.000Z`);
         if (mode === "simulated" && isTradingDay(barDate)) {
-          await db.bar.upsert({
-            where: { instrumentId_date: { instrumentId: inst.id, date: barDate } },
-            create: {
-              instrumentId: inst.id,
-              date: barDate,
-              open: q.open,
-              high: q.high,
-              low: q.low,
-              close: q.last,
-              volume: q.volume,
-              value: BigInt(Math.max(0, q.volume)) * BigInt(q.last),
-            },
-            update: {
-              open: q.open,
-              high: q.high,
-              low: q.low,
-              close: q.last,
-              volume: q.volume,
-              value: BigInt(Math.max(0, q.volume)) * BigInt(q.last),
-            },
-          });
+          rolloverBar = {
+            date: barDate,
+            open: q.open,
+            high: q.high,
+            low: q.low,
+            close: q.last,
+            volume: q.volume,
+            value: BigInt(Math.max(0, q.volume)) * BigInt(q.last),
+          };
           barsWritten++;
         }
         // Phiên mới: refPrice = close phiên trước, dải ±7% mới, volume về 0
@@ -588,13 +596,38 @@ async function runTick(): Promise<NextResponse> {
       const bidPrice = Math.max(floor, next - spread);
       const askPrice = Math.min(ceiling, next + spread);
 
-      // High/low dồn phiên (PHASE3 B3) — realtime và random-walk cùng pattern
-      await db.quote.update({
-        where: { id: q.id },
+      if (rolloverBar) {
+        const b = rolloverBar;
+        barWrites.push({
+          instrumentId: inst.id,
+          date: b.date,
+          create: {
+            instrumentId: inst.id,
+            date: b.date,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            value: b.value,
+          },
+          update: {
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            value: b.value,
+          },
+        });
+      }
+      quoteWrites.push({
+        quoteId: q.id,
         data: {
           ...(isRollover
             ? { refPrice: ref, ceilingPrice: ceiling, floorPrice: floor }
             : {}),
+          // High/low dồn phiên (PHASE3 B3) — realtime và random-walk cùng pattern
           open: isRollover ? next : q.open,
           high: Math.max(isRollover ? next : q.high, next),
           low: Math.min(isRollover ? next : q.low, next),
@@ -611,6 +644,29 @@ async function runTick(): Promise<NextResponse> {
       });
       lastByInstrument.set(inst.id, next);
       ticked++;
+    }
+
+    // Pha 2 — ghi DB song song theo chunk 10 (Perf #64): 76 update tuần tự
+    // ~3s → ~0,4-0,6s; chunk 10 giữ pool WAN an toàn (Supabase chấp nhận
+    // thoải mái, Prisma pool mặc định đủ rộng).
+    const WRITE_CHUNK = 10;
+    for (let i = 0; i < barWrites.length; i += WRITE_CHUNK) {
+      const chunk = barWrites.slice(i, i + WRITE_CHUNK);
+      await Promise.all(
+        chunk.map((b) =>
+          db.bar.upsert({
+            where: { instrumentId_date: { instrumentId: b.instrumentId, date: b.date } },
+            create: b.create,
+            update: b.update,
+          })
+        )
+      );
+    }
+    for (let i = 0; i < quoteWrites.length; i += WRITE_CHUNK) {
+      const chunk = quoteWrites.slice(i, i + WRITE_CHUNK);
+      await Promise.all(
+        chunk.map((w) => db.quote.update({ where: { id: w.quoteId }, data: w.data }))
+      );
     }
 
     // P2-3/#62 + F-63A-04/#63 — dồn MỘT invalidation duy nhất sau vòng lặp:

@@ -10,6 +10,9 @@
  * Chạy: bun scripts/fix-audit-findings.ts  (KHÔNG xóa dữ liệu — chỉ UPDATE tại chỗ)
  */
 import { db } from "../src/lib/db";
+// F-63A-08/#64 — script sửa Bar THẬT (db.bar.update :74) → xoá cache rổ
+// thanh khoản FeatureValue khi kết thúc.
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "../src/lib/feature-cache";
 
 const round100 = (v: number) => Math.max(0, Math.round(v / 100) * 100);
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
@@ -111,6 +114,8 @@ async function main() {
   }
 
   console.log("\n✅ Migration hoàn tất.");
+  // F-63A-08/#64 — đã sửa Bar thật → dọn cache topByAdtv (không chờ TTL 10')
+  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
 }
 
 main()

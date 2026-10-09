@@ -1934,3 +1934,26 @@ Stage Summary:
 - 2 lỗi P1 đáng chú ý đã triệt: retry webhook starve (EMAIL dead-letter lấn slot) · lịch Quốc khánh 2026 sai cửa sổ (thiếu 31/8+1/9, thừa 3/9 "nghỉ bù" — nguyên nhân A9 false-SEVERE).
 - Gói P0-P2 DATA_PLATFORM_BLUEPRINT hoàn tất cả triển khai lẫn fixbug (v1.7).
 - Commit 982a16a (message UUID lỗi) được amend thành message chuẩn + push origin/main.
+
+---
+Task ID: 64-PERF-P3
+Agent: Z.ai Code (kỹ sư AI chính — main conversation)
+Task: User yêu cầu "App load đang bị chậm, tôi muốn tốc độ đạt realtime dù bấm bất kỳ nút nào, dialog log nào hay thiết lập nào" + uỷ quyền "4 P3 còn lại bạn tự quyết định thay tôi".
+
+Work Log:
+- Đo đạc baseline (curl cold+warm 13 endpoint + browser Performance API): ml/status 1.4-1.7s · flows 4.2s · tick 3.6s (dev.log) · system/status 0.33s · page loadEvent 660ms (worst API 4.4s flows).
+- bandit.ts: ensureArms 6 upsert tuần tự MỖI LẦN gọi (~600ms) → parallel 1 lần/process (module flag); pendingSettleCount kéo 340KB detail/30 assessment → voteMemo theo assessmentId (detail bất biến) + TTL cache 15s (snapshot + pending); banditSnapshot 2 query → Promise.all; settlePendingRewards hưởng memo (2 bước id→detail).
+- tick route: vòng lặp 76 db.quote.update tuần tự → TÁCH 2 PHA compute thuần (0 DB) + ghi chunk 10 song song (bar upsert + quote update độc lập); giữ gate barsWritten>0 + invalidation sau ghi (F-63A-04).
+- flows.ts: tryExternalFlows thăm dò cafef 5s-timeout MỖI REQUEST → memo âm tính TTL 10'; 76 upsert tuần tự → chunk 25 Promise.allSettled (fail-soft giữ); find O(n²) → Map.
+- system/status: getEffectiveMode ghép vào Promise.all chính.
+- providers.tsx: staleTime 15s→30s + gcTime 300s tường minh (dialog mở lại instant; bảng giá vẫn realtime qua WS setQueryData; chu kỳ agent invalidate qua WS "cycle").
+- QUYẾT 4-5 P3 (user uỷ quyền): F-63B-05 retryPendingOutbox(opts.manual) — auto (S1) tôn trọng notify.enabled (TẮT=ngừng bắn, backlog giữ PENDING); POST /api/notify manual:true (nút=ý định tường minh) · F-63B-12 maskTarget() trong listOutbox (scheme://host/path?••••; input settings giữ full) · F-63A-06 p2-verify A7.1×5 kiểm THỨ TỰ THEO BIÊN HÀM (mọi hàm ghi Bar có invalidate SAU ghi cuối — tránh false-positive cấp-file) + A7.2 gate · F-63A-08 p1-verify + fix-audit-findings invalidate topByAdtv khi kết thúc (đã rg: chỉ 2 script này ghi Bar thật) · F-63C-08 guard crawl news cross-process: CAS nguyên tử AppSetting "news-crawl-guard" (fail-open; ingestNews({force}) cho kiểm định; guardSkipResult dùng chung; route 429 giữ nguyên shape).
+- Lỗi giữa chừng: MultiEdit chèn news.ts wrapper sai vị trí (function cũ chưa đóng + parser lọt vào trong) → tsc transient + bundler parse error :304 transient HMR → sửa wrapper/crawlNews tách đúng; reload browser console SẠCH (0 error). Bun -e Prisma script: sai field name status→taskStatus (đã phát hiện qua PrismaClientValidationError).
+- Kiểm định: tsc 0 lỗi src/ · lint PASS · p2-verify 67→73 check 73/73 PASS ×2 (A7.1×5 + A7.2 + C1 force) · guard cross-process sống (POST 200 → 429 → script không force bị CAS chặn feeds:0/55s → force 5/5) · PM2 restart ×4 · đo SAU: ml/status 72-100ms · tick 194-382ms · flows 0.93-1.10s · system/status 0.18s · loadEvent 517ms · console 0 error · workspace Đội Agent mở OK · chu kỳ 23 agents qua nút UI: 23/23 COMPLETED 0 lỗi + S1 delivery PENDING_EGRESS trung thực.
+- Docs: blueprint v1.7→v1.8 (header + Changelog v1.8 đầy đủ đo trước/sau + quyết P3) · README dòng nhóm 4.
+
+Stage Summary:
+- PERF: ml/status 12-17× · tick 9-18× · flows 4× · server duty tick ~36%→2.5% · dialog mở lại instant trong 30s (staleTime) + gcTime 5'.
+- RTT WAN ~95-105ms/query là sàn cứng — các endpoint còn lại 0.1-0.4s gần sàn, đã parallel hết chỗ có thể.
+- 4-5 P3 quyết thay user: retry tôn trọng switch · mask webhook URL · A7 guard mạnh hoá · scripts invalidate · news guard CAS cross-process.
+- p2-verify 73/73; chu kỳ 23 agents 0 lỗi; commit + push.

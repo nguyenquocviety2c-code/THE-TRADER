@@ -27,6 +27,10 @@ import { trainingWindowDigest, buildTrainingSet, type SymbolSeries } from "../sr
 import { INGEST_REGISTRY } from "../src/lib/ingest-pipeline";
 import { crossCheckFinfoVsEod, type PreAnchorQuote } from "../src/lib/eod-sync";
 import { markSource } from "../src/lib/sources";
+// F-63A-08/#64 — script ghi/sửa Bar THẬT (12 chỗ) → phải xoá cache rổ
+// thanh khoản FeatureValue khi kết thúc (nếu trùng chu kỳ agents đang chạy,
+// cache L2 10' có thể còn giá trị rổ cũ).
+import { invalidateFeatureCache, TOPBYADTV_CACHE_PREFIX } from "../src/lib/feature-cache";
 
 const db = new PrismaClient();
 
@@ -755,6 +759,9 @@ async function main() {
     }
     await setAutoAdjustEnabled(true); // kill-switch luôn về BẬT khi thoát
   }
+  // F-63A-08/#64 — script đã ghi/sửa Bar thật → dọn cache topByAdtv để chu kỳ
+  // agents kế tiếp tính lại từ dữ liệu mới (không chờ TTL 10').
+  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
   // process.exit SAU finally (exit trong try sẽ nhảy khỏi finally)
   if (fail > 0) process.exit(1);
 }

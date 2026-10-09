@@ -182,6 +182,55 @@ async function verifyFeatureCache() {
       intlSrc.includes("invalidateFeatureCache")
   );
 
+  // A7.1 (F-63A-06/#64 — guard mạnh hoá: includes() nói dối được nếu invalidate
+  // nằm TRƯỚC phép ghi) — kiểm THỨ TỰ THEO BIÊN HÀM: mọi hàm chứa ghi Bar phải
+  // có invalidateFeatureCache SAU ghi cuối cùng của chính hàm đó (cấp-file sẽ
+  // false-positive khi một file có nhiều hàm ghi: eod-sync có syncEod +
+  // deepBackfill, corporate-events có apply/reapply/reverse).
+  const barWriteRe =
+    /(?:db|tx)\.bar\.(?:upsert|create|createMany|update|updateMany|delete|deleteMany)/g;
+  const fnStartRe = /^(?:export\s+)?(?:async\s+)?function\s+\w+/gm;
+  const guardFiles: [string, string][] = [
+    ["eod-sync.ts", eodSrc],
+    ["corporate-events.ts", ceSrc],
+    ["tick/route.ts", tickSrc],
+    ["reprobe/route.ts", reprobeSrc],
+    ["intl-eod.ts", intlSrc],
+  ];
+  for (const [name, src] of guardFiles) {
+    const starts: number[] = [];
+    for (const m of src.matchAll(fnStartRe)) starts.push(m.index ?? 0);
+    const bounds = [...starts, src.length]; // sentinel EOF
+    let writeFns = 0;
+    let badFns = 0;
+    for (let i = 0; i < bounds.length - 1; i++) {
+      const seg = src.slice(bounds[i], bounds[i + 1]);
+      let lastWrite = -1;
+      for (const m of seg.matchAll(barWriteRe)) lastWrite = Math.max(lastWrite, m.index ?? 0);
+      if (lastWrite < 0) continue; // hàm không ghi Bar — bỏ qua
+      writeFns++;
+      let hasAfter = false;
+      for (const m of seg.matchAll(/invalidateFeatureCache/g)) {
+        if ((m.index ?? 0) > lastWrite) {
+          hasAfter = true;
+          break;
+        }
+      }
+      if (!hasAfter) badFns++;
+    }
+    check(
+      `A7.1 ${name}: ${writeFns} hàm ghi Bar đều có invalidate SAU ghi cuối`,
+      badFns === 0 && writeFns > 0,
+      badFns === 0 ? undefined : `${badFns} hàm thiếu`
+    );
+  }
+  // tick route: invalidation phải có gate barsWritten > 0 (chỉ xoá khi thật sự ghi)
+  check(
+    "A7.2 tick/route.ts: invalidation được gate `barsWritten > 0` (không bắn khi mode real không ghi bar)",
+    tickSrc.includes("barsWritten > 0") &&
+      tickSrc.indexOf("barsWritten > 0") < tickSrc.indexOf("await invalidateFeatureCache")
+  );
+
   // A8 — dọn row FeatureValue cuối cùng (fixbug #63 F-63A-05): nguyên tắc
   // header hứa "dọn sạch … FeatureValue rows" nhưng trước fix A6.2 tái tạo
   // row rồi kết thúc — để lại row kiểm định trong bảng thật.
@@ -315,10 +364,11 @@ async function verifyNewsReliability() {
   }
 
   // C1 — chạy ingest thật (5 feed RSS đã kiểm chứng từ môi trường này).
-  // Ghi chú fixbug #63 F-63C-08: guard 60s là biến module PER-PROCESS — ingest
-  // từ tiến trình script này không serialize với POST /api/news của engine;
-  // nếu crawl chồng lấn, C2.1 bắt được runs≠baseline+1 một cách trung thực.
-  const result = await ingestNews();
+  // F-63C-08/#64: guard 60s nay ghép thêm lớp DB CAS cross-process (AppSetting
+  // news-crawl-guard) — script này chạy tiến trình riêng KHÔNG trôi nổi tự do
+  // nữa; {force:true} bypass cả 2 lớp để kiểm định luôn có 1 lần crawl thật
+  // (route engine/UI vẫn đi đường guarded 429).
+  const result = await ingestNews({ force: true });
   check(
     "C1 ingestNews chạy đủ 5 feed, mỗi feed có đủ trường thống kê P2-2",
     result.feeds.length === 5 &&

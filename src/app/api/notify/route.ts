@@ -74,7 +74,10 @@ export async function POST(req: Request): Promise<NextResponse> {
         limit = v;
       }
     }
-    const result = await retryPendingOutbox(limit);
+    // F-63B-05/#64 — manual:true: nút "Thử gửi lại" là ý định tường minh của
+    // người bấm → vẫn bắn kể cả khi notify.enabled=false (retry TỰ ĐỘNG S1
+    // piggyback tôn trọng switch — xem lib/notify.ts).
+    const result = await retryPendingOutbox(limit, { manual: true });
     return NextResponse.json({ ok: true, result });
   } catch (err) {
     console.error("[api/notify POST]", err);
