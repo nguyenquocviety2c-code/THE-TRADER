@@ -2035,3 +2035,20 @@ Stage Summary:
 - Phát hiện quan trọng nhất (không phải bug code): E2E các phiên trước mở localhost:3000 trực tiếp → socket.io 404 câm lặng → WS realtime CHƯA TỪNG được verify đúng chuẩn; từ #65 E2E chuẩn = qua gateway :81 — bằng chứng WS sống 100%: VN30 đổi theo tick + 0 refetch HTTP + WS upgrade 101.
 - Perf claims #64 được xác nhận lại độc lập: ml/status 49-97ms · flows 0.9-1.15s · tick 194-437ms; 1 claim đính chính (F-65A-04: staleTime/gcTime providers là no-op — dialog instant đến từ staleTime cục bộ sẵn có).
 - Commit + push theo pattern fixbug #65.
+
+---
+Task ID: EXEC-DOC-MAP-1
+Agent: main-agent (Z.ai Code)
+Task: User yêu cầu chuyển sang nhóm 3 · executive (Ban Điều hành & Thực thi) — tìm 4 tài liệu user tải lên (không thấy thư mục upload trong cây thư mục) và xác định nội dung/thuật toán/hàm/thư viện/công nghệ trong 4 tài liệu phục vụ nhiệm vụ nhóm + chức trách từng agent. NHIỆM VỤ PHÂN TÍCH — không đụng code.
+
+Work Log:
+- Tìm 4 tài liệu: quét /home/z, /tmp (không có PDF/DOCX ngoài node_modules) → phát hiện `/home/z/my-project/upload/` (bị .gitignore — worklog dòng 17 — nên không hiện trong cây thư mục): Machine Learning.pdf (20tr) · MATH.pdf (14tr) · Data Analytics.pdf (29tr) · DEEP LEARNING.pdf (16tr) — Google Docs Skia exports, A4, tổng 79 trang.
+- Đọc TOÀN BỘ 79 trang 4 PDF bằng Read tool (text layer đầy đủ, 0 trang mất).
+- Đối chiếu chức trách nhóm: agent-roster.ts (executive: portfolio-strategist A1 LLM · execution-manager A10 · settlement A11 · cash-management A12 service) + AGENT_GROUPS "Tổng hợp, ra tín hiệu và thực thi sau phê duyệt" + RESEARCH_COUNCIL_PLAN §3.1 (Đợt E Chủ tịch + Đợt F Ban Điều hành) + TECHNICAL_BLUEPRINT §5.1 (1 LLM + 3 service).
+- Xác minh hiện trạng code nhóm: agent-context.ts:584-606 (prompt Chủ tịch + JSON signal contract) · agents/run/route.ts:90-92,1021-1095 (Đợt E: VETO hard-enforce AUD-CODE #6 + consensusGate snapshot B9; Đợt F: execution-manager ghi nhận KHÔNG tự tạo Order §4.5/§4.9) · agent-service-runs.ts:712-751 (settlement reduce Trade 24h · cash-management buyingPower = cash + GTTH×factor − marginUsed AUD-CODE #15b) · signal-execution.ts (LIMIT paper orders).
+- Tổng hợp báo cáo ánh xạ 4 tài liệu × 4 agents + ma trận tổng + danh mục nội dung KHÔNG dùng (CV/CNN/R/PowerBI/Kafka...) + thư viện Python ứng viên cho worker §13 (NumPy/Pandas/SciPy/scikit-learn/Keras) — trình bày trực tiếp cho user.
+
+Stage Summary:
+- 4 tài liệu gốc lưu tại `/home/z/my-project/upload/` (gitignored) — đã đọc trọn 79 trang, lập bản đồ nội dung: ML.pdf (12 chủ đề: metrics·calculus·self-attention·LLM eval·thuật toán·EDA·LLM·agent frameworks·MLOps·encoders·LangChain·MCP) · MATH.pdf (hồi quy·xác suất·đại số tuyến tính·thống kê suy luận·logistic·SciPy) · DA.pdf (analytics pipeline·Pandas/NumPy·biểu đồ·4 trụ cột/5 cấp độ·CLT/Z·kiểm định·EDA 20 kỹ thuật·12 khái niệm DB·R·preprocessing·LangGraph) · DL.pdf (backprop·ANN/CNN/RNN/LSTM/GRU/Transformer·activations·Keras·RL·RNN so sánh·Keras multi-backend).
+- Điểm neo ánh xạ chính: A1←Bayes+E[V]+4 trụ cột+LangGraph+LLM ops; A10←VWAP kỳ vọng+SciPy.optimize+ACID+RL execution; A11←t-test+12 khái niệm DB(Join/ACID/window)+Great Expectations; A12←CI+quantile+LSTM/GRU dự báo dòng tiền+Keras callbacks. Nguyên lý ensemble voting (Random Forest) = cơ chế đồng thuận 80%; CLT+LLN = nền thống kê cho điểm consensus 23 phiếu.
+- Không có thay đổi code — nhiệm vụ phân tích thuần túy; các nhận định sẽ là đầu vào cho blueprint nhóm executive tiếp theo.
