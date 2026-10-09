@@ -758,10 +758,11 @@ async function main() {
       }
     }
     await setAutoAdjustEnabled(true); // kill-switch luôn về BẬT khi thoát
+    // F-65B-07/#65 — invalidate TRONG finally: script đã ghi/sửa Bar thật
+    // (mã :445 trong try) ngay từ giữa chừng — crash sau đó vẫn phải dọn
+    // cache topByAdtv (trước đây nằm NGOÀI finally → happy-path only).
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
   }
-  // F-63A-08/#64 — script đã ghi/sửa Bar thật → dọn cache topByAdtv để chu kỳ
-  // agents kế tiếp tính lại từ dữ liệu mới (không chờ TTL 10').
-  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
   // process.exit SAU finally (exit trong try sẽ nhảy khỏi finally)
   if (fail > 0) process.exit(1);
 }

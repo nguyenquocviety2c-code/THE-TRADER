@@ -143,15 +143,19 @@ function votesOf(a: { id: string }): CastVote[] {
   return voteMemo.get(a.id) ?? [];
 }
 
-/** Nạp memo cho các id chưa có — fetch detail CHỈ những row còn thiếu. */
+/** Nạp memo cho các id chưa có — fetch detail CHỈ những row còn thiếu.
+ * F-65A-01/#65 — clear-at-128 phải chạy TRƯỚC khi tính missing: trước đây
+ * tính missing trước rồi clear → call tự xoá memo của ~29 id đang cần (chỉ
+ * còn id vừa fetch) → votesOf() của phần còn lại trả [] → settle bỏ qua
+ * phiếu đúng hạn đúng 1 chu kỳ + pendingCountCache undercount 15s. */
 async function warmVoteMemo(ids: string[]): Promise<void> {
+  if (voteMemo.size > 128) voteMemo.clear();
   const missing = ids.filter((id) => !voteMemo.has(id));
   if (missing.length === 0) return;
   const rows = await db.marketAssessment.findMany({
     where: { id: { in: missing } },
     select: { id: true, detail: true },
   });
-  if (voteMemo.size > 128) voteMemo.clear();
   for (const r of rows) voteMemo.set(r.id, parseVotes(r.detail));
   for (const id of missing) if (!voteMemo.has(id)) voteMemo.set(id, []); // row xoá giữa chừng — memo cả negative
 }
@@ -318,6 +322,12 @@ export async function settlePendingRewards(): Promise<SettleResult> {
     settled++;
   }
 
+  // F-65A-02/#65 — settle là WRITE: reset cả 2 TTL cache 15s để mọi read
+  // ngay sau đó (narrative AgentRun đọc pendingSettleCount/banditSnapshot,
+  // POST /api/ml/train → GET /api/ml/status) thấy posterior/pending MỚI
+  // thay vì cache pre-settle trong 15s (read-after-write).
+  snapCache = null;
+  pendingCountCache = null;
   return { settled, votes, details };
 }
 

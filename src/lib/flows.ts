@@ -49,14 +49,18 @@ function seededUnit(symbol: string, dateIso: string): number {
  * Perf #64 — MEMO âm tính 10 phút: sandbox/mạng chặn egress làm fetch treo
  * tới timeout 5s MỖI LẦN GỌI /api/market/flows (đóng góp lớn nhất trong
  * 4,2s đo được); thăm dò lại mỗi 10 phút thay vì mỗi request — khi nhà cung
- * cấp thật mở kết nối, tối đa chậm 10 phút được phát hiện. */
+ * cấp thật mở kết nối, tối đa chậm 10 phút được phát hiện.
+ * F-65A-03/#65 — xoá dead-flag externalLastOk (không chỗ nào set true nên
+ * guard !externalLastOk luôn bật): memo áp THẲNG cho mọi lần gọi. TRÁP cho
+ * người nối luồng live sau này: đừng thêm nhánh "thành công → ngừng memo"
+ * (externalLastOk=true) — khi mạng chết lại, fetch sẽ treo 5s MỖI request
+ * (đúng regression perf mà #64 vá). */
 const EXTERNAL_PROBE_TTL_MS = 10 * 60_000;
 let externalLastProbeAt = 0;
-let externalLastOk = false;
 
 async function tryExternalFlows(): Promise<FlowsSummary | null> {
   const now = Date.now();
-  if (!externalLastOk && now - externalLastProbeAt < EXTERNAL_PROBE_TTL_MS) {
+  if (now - externalLastProbeAt < EXTERNAL_PROBE_TTL_MS) {
     return null; // memo âm tính — bỏ qua thăm dò trong cửa sổ TTL
   }
   externalLastProbeAt = now;

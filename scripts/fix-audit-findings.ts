@@ -114,15 +114,20 @@ async function main() {
   }
 
   console.log("\n✅ Migration hoàn tất.");
-  // F-63A-08/#64 — đã sửa Bar thật → dọn cache topByAdtv (không chờ TTL 10')
-  await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
 }
 
+let exitCode = 0;
 main()
   .catch((e) => {
     console.error("❌ Migration lỗi:", e);
-    process.exit(1);
+    exitCode = 1;
   })
   .finally(async () => {
+    // F-65B-07/#65 — invalidate trong finally: main() đã sửa Bar thật (clamp
+    // ±7% ngay từ đầu) — lỗi giữa chừng cũng phải dọn cache topByAdtv
+    // (trước đây invalidate nằm cuối main → happy-path only, và
+    // process.exit(1) trong catch giết process trước .finally chạy).
+    await invalidateFeatureCache(TOPBYADTV_CACHE_PREFIX).catch(() => undefined);
     await db.$disconnect();
+    process.exit(exitCode);
   });

@@ -197,17 +197,25 @@ async function verifyFeatureCache() {
     ["reprobe/route.ts", reprobeSrc],
     ["intl-eod.ts", intlSrc],
   ];
-  for (const [name, src] of guardFiles) {
+  for (const [name, srcRaw] of guardFiles) {
+    // F-65B-08/#65 — strip comment trước phân tích: trước đây chuỗi
+    // "invalidateFeatureCache" trong comment phía sau ghi cuối cũng thoả
+    // check (false-pass). Sentinel đầu 0 (module scope): write nằm TRƯỚC
+    // function declaration đầu không còn vô hình — thuộc "segment module"
+    // và cũng phải có invalidate sau ghi cuối.
+    const src = srcRaw
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/\/\/[^\n]*/g, " ");
     const starts: number[] = [];
     for (const m of src.matchAll(fnStartRe)) starts.push(m.index ?? 0);
-    const bounds = [...starts, src.length]; // sentinel EOF
+    const bounds = [0, ...starts, src.length]; // sentinel 0 (module scope) + EOF
     let writeFns = 0;
     let badFns = 0;
     for (let i = 0; i < bounds.length - 1; i++) {
       const seg = src.slice(bounds[i], bounds[i + 1]);
       let lastWrite = -1;
       for (const m of seg.matchAll(barWriteRe)) lastWrite = Math.max(lastWrite, m.index ?? 0);
-      if (lastWrite < 0) continue; // hàm không ghi Bar — bỏ qua
+      if (lastWrite < 0) continue; // segment không ghi Bar — bỏ qua
       writeFns++;
       let hasAfter = false;
       for (const m of seg.matchAll(/invalidateFeatureCache/g)) {
@@ -219,9 +227,9 @@ async function verifyFeatureCache() {
       if (!hasAfter) badFns++;
     }
     check(
-      `A7.1 ${name}: ${writeFns} hàm ghi Bar đều có invalidate SAU ghi cuối`,
+      `A7.1 ${name}: ${writeFns} hàm/segment ghi Bar đều có invalidate SAU ghi cuối (đã strip comment)`,
       badFns === 0 && writeFns > 0,
-      badFns === 0 ? undefined : `${badFns} hàm thiếu`
+      badFns === 0 ? undefined : `${badFns} segment thiếu`
     );
   }
   // tick route: invalidation phải có gate barsWritten > 0 (chỉ xoá khi thật sự ghi)

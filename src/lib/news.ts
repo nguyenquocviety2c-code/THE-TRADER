@@ -128,7 +128,9 @@ let lastIngestAt = 0;
  * Cơ chế: đọc value → chưa đủ 60s → skip; đủ → updateMany where value=CŨ (CAS
  * atomic — tiến trình thua đọc count=0 → skip). Fail-open khi DB lỗi (guard
  * là advisory — unique constraint DB đã chặn trùng tin; không được chặn crawl
- * vì lỗi guard). opts.force (đường kiểm định) bypass cả 2 lớp guard.
+ * vì lỗi guard). opts.force (đường kiểm định) bypass CHECK của cả 2 lớp guard
+ * nhưng vẫn GHI value=now (F-65B-05/#65 — không để engine crawl chồng < 60s
+ * sau force-crawl của script).
  */
 const NEWS_GUARD_KEY = "news-crawl-guard";
 
@@ -181,7 +183,16 @@ export async function ingestNews(opts?: {
           where: { key: NEWS_GUARD_KEY, value: row.value },
           data: { value: String(now) },
         });
-        if (cas.count === 0) return guardSkipResult(lastAt); // tiến trình khác vừa giành quyền
+        if (cas.count === 0) {
+          // F-65B-06/#65 — thua CAS: đọc lại value MỚI (tiến trình thắng vừa
+          // ghi) thay vì dùng giá trị cũ — trước đây retryAfter tính từ lastAt
+          // cũ → 1s, client dập lại sớm vô ích + ingestedAt lệch thời điểm.
+          const fresh = await db.appSetting
+            .findUnique({ where: { key: NEWS_GUARD_KEY }, select: { value: true } })
+            .catch(() => null);
+          const since = fresh ? Number(fresh.value) : NaN;
+          return guardSkipResult(Number.isFinite(since) ? since : now);
+        }
       } else {
         // Lần đầu (row chưa tồn tại) — upsert; cửa sổ race 2 tiến trình cùng
         // thấy null rất nhỏ và tự thu hẹp vĩnh viễn sau row đầu tiên.
@@ -194,6 +205,18 @@ export async function ingestNews(opts?: {
     } catch {
       // fail-open (xem comment NEWS_GUARD_KEY ở trên)
     }
+  }
+  if (opts?.force) {
+    // F-65B-05/#65 — force bypass CHECK nhưng vẫn GHI guard value=now: nếu
+    // bỏ ghi, engine được phép crawl < 60s sau force-crawl của script kiểm
+    // định → chồng nguồn (vi phạm kỷ luật 60s tôn trọng nguồn tin).
+    await db.appSetting
+      .upsert({
+        where: { key: NEWS_GUARD_KEY },
+        create: { key: NEWS_GUARD_KEY, value: String(now) },
+        update: { value: String(now) },
+      })
+      .catch(() => undefined); // best-effort — guard là advisory
   }
   lastIngestAt = now;
   return crawlNews();
@@ -359,20 +382,32 @@ async function crawlNews(): Promise<NewsIngestResult> {
           }
           continue;
         }
-        await db.newsItem.create({
-          data: {
-            title,
-            summary: summary || null,
-            url,
-            source: feed.name,
-            sourceUrl: feed.url,
-            category: feed.category,
-            publishedAt,
-          },
-        });
-        added++;
-        feedAdded++;
-        parsed++;
+        try {
+          await db.newsItem.create({
+            data: {
+              title,
+              summary: summary || null,
+              url,
+              source: feed.name,
+              sourceUrl: feed.url,
+              category: feed.category,
+              publishedAt,
+            },
+          });
+          added++;
+          feedAdded++;
+          parsed++;
+        } catch (err) {
+          // F-65B-10/#65 — trùng URL do crawl chồng lấn (guard fail-open hoặc
+          // crawl kéo dài > 60s): P2002 là unique-violation trên url — tin ĐÃ
+          // CÓ, đếm duplicates (lành tính cho reliability) thay vì để lỗi nổ
+          // ra đánh feed ok:false GIẢ — đúng lớp vấn đề F-63C-08 gốc.
+          if ((err as { code?: string } | null)?.code === "P2002") {
+            duplicates++;
+            continue;
+          }
+          throw err;
+        }
       }
       // Item hợp lệ đủ trường nhưng URL đã có vẫn tính "parsed" (đã hiểu
       // đúng cấu trúc) — parseSkipped chỉ đếm item KHÔNG dùng được.

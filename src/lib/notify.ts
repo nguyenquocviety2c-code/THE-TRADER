@@ -320,15 +320,22 @@ export async function retryPendingOutbox(
   opts?: { manual?: boolean }
 ): Promise<RetryOutcome> {
   // F-63B-05/#64 — retry tự động chỉ chạy khi kênh đang BẬT
+  // F-65B-02/#65 — bỏ .catch(() => null) chết: getNotifySettings nuốt lỗi
+  // nội bộ (catch → EMPTY enabled:false) nên không bao giờ reject. DB đọc
+  // lỗi → EMPTY → skip (fail-closed đúng như #64 đã live; đường DB chết hẳn
+  // thì countPending() dưới sẽ ném → 500 trung thực, F-63B-09).
   if (!opts?.manual) {
-    const settings = await getNotifySettings().catch(() => null);
-    if (settings && !settings.enabled) {
+    const settings = await getNotifySettings();
+    if (!settings.enabled) {
       return {
         retried: 0,
         sent: 0,
         stillPending: await countPending(),
         errors: [],
-        note: "kênh thông báo đang TẮT — retry tự động bị bỏ qua (F-63B-05); backlog giữ PENDING để bật lại thì tự cạn",
+        // F-65B-09/#65 — note chính xác số phận backlog: chỉ WEBHOOK tự cạn
+        // khi bật lại; EMAIL không có đường gửi trong môi trường này (chờ
+        // SMTP trên máy chủ có egress) — hứa "tự cạn" cho mọi kênh là sai.
+        note: "kênh thông báo đang TẮT (hoặc cài đặt đọc không được) — retry tự động bị bỏ qua (F-63B-05); bật lại thì backlog WEBHOOK tự cạn, EMAIL giữ pending chờ SMTP",
       };
     }
   }
@@ -359,7 +366,10 @@ export async function retryPendingOutbox(
       r.error
     ).catch(() => undefined);
     if (r.status === "SENT") sent++;
-    else if (r.error) errors.push(`${row.target.slice(0, 40)}: ${r.error.slice(0, 80)}`);
+    // F-65B-04/#65 — mask target trong errors[]: trước đây slice(0,40) để lộ
+    // full URL (kèm ?token=… nếu ≤40 ký tự) trong cùng response POST mà GET
+    // đã mask (F-63B-12).
+    else if (r.error) errors.push(`${maskTarget(row.target)}: ${r.error.slice(0, 80)}`);
   }
   return {
     retried: rows.length,
@@ -418,7 +428,10 @@ function maskTarget(target: string): string {
   if (/^https?:\/\//i.test(target)) {
     try {
       const u = new URL(target);
-      return `${u.protocol}//${u.hostname}${u.pathname}${u.search ? "?••••" : ""}`;
+      // F-65B-01/#65 — u.host (không phải u.hostname) để GIỮ SỐ CỔNG: 2
+      // webhook khác port phải hiển thị khác nhau để operator phân biệt row
+      // pending trỏ endpoint nào. (u.host cũng loại user:pass@ — an toàn hơn.)
+      return `${u.protocol}//${u.host}${u.pathname}${u.search ? "?••••" : ""}`;
     } catch {
       // URL hỏng — rơi về truncate
     }

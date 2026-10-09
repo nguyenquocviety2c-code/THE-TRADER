@@ -368,7 +368,7 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
   let delivery: {
     results: { channel: string; status: string; note: string }[];
     pendingCount: number;
-    retried?: { sent: number; stillPending: number };
+    retried?: { sent: number; stillPending: number; note?: string };
   } | null = null;
   try {
     delivery = await dispatchDigest({
@@ -378,7 +378,15 @@ async function runNotificationOfficer(ctx?: ServiceRunContext): Promise<ServiceR
     });
     // Piggyback: quét lại backlog PENDING_EGRESS cũ (webhook) mỗi chu kỳ
     const retry = await retryPendingOutbox(3).catch(() => null);
-    if (retry) delivery.retried = { sent: retry.sent, stillPending: retry.stillPending };
+    // F-65B-03/#65 — giữ nguyên note (nếu có) vào AgentRun.output: trước đây
+    // chỉ copy sent/stillPending → thông điệp "vì sao retry tự động ngừng"
+    // (F-63B-05: kênh TẮT) không tới nổi người đọc log chu kỳ.
+    if (retry)
+      delivery.retried = {
+        sent: retry.sent,
+        stillPending: retry.stillPending,
+        ...(retry.note ? { note: retry.note } : {}),
+      };
   } catch (err) {
     console.error("[S1 notify] dispatchDigest lỗi (không chặn S1):", err);
   }
