@@ -127,14 +127,18 @@ export function parseAllocationProposal(raw: unknown): AllocationProposal | null
 /** Đếm parse-fail (drift metric E-P2-1) — AppSetting counter, fail-soft. */
 export async function bumpAllocationParseFail(): Promise<void> {
   try {
+    // F-73A-11: đọc Number trực tiếp — value hỏng (không parse được) → NaN →
+    // reset 1 thay vì JSON.parse throw làm counter đóng băng im lặng. Ghi chuỗi
+    // số thô (Number() lẫn JSON.parse() đọc lại được cả hai định dạng cũ/mới).
     const row = await db.appSetting.findUnique({
       where: { key: ALLOCATION_PARSE_FAIL_KEY },
     });
-    const cur = row ? (Number(JSON.parse(row.value)) || 0) : 0;
+    const cur = row ? Number(row.value) : 0;
+    const next = Number.isFinite(cur) && cur > 0 ? Math.round(cur) + 1 : 1;
     await db.appSetting.upsert({
       where: { key: ALLOCATION_PARSE_FAIL_KEY },
-      create: { key: ALLOCATION_PARSE_FAIL_KEY, value: JSON.stringify(cur + 1) },
-      update: { value: JSON.stringify(cur + 1) },
+      create: { key: ALLOCATION_PARSE_FAIL_KEY, value: String(next) },
+      update: { value: String(next) },
     });
   } catch {
     // fail-soft: drift counter không được làm sập chu kỳ Chairman
@@ -144,10 +148,11 @@ export async function bumpAllocationParseFail(): Promise<void> {
 /** Đọc counter parse-fail (hiển thị/kiểm định) — 0 khi chưa có. */
 export async function readAllocationParseFail(): Promise<number> {
   try {
+    // F-73A-11: Number trực tiếp — value hỏng → NaN → || 0 (không throw).
     const row = await db.appSetting.findUnique({
       where: { key: ALLOCATION_PARSE_FAIL_KEY },
     });
-    return row ? (Number(JSON.parse(row.value)) || 0) : 0;
+    return row ? Number(row.value) || 0 : 0;
   } catch {
     return 0;
   }

@@ -92,6 +92,9 @@ export interface ChairmanScorecard {
   /** RMSE stopLoss vs low thực 5 phiên (BUY có stop) — VND. */
   stopRmse: number | null;
   calibration: CalibrationBucket[];
+  /** F-73B-06: số nhãn theo từng quy tắc — tín hiệu CÓ target/stop nhưng
+   *  không chạm trong 5 phiên vẫn fallback close-5 (semantics khai báo rõ). */
+  ruleCounts: { targetStop: number; close5: number; pending: number };
   /** n ≥ 30 [DA D7] — false → UI "chưa đủ dữ liệu" trung thực. */
   enoughData: boolean;
   note: string;
@@ -240,13 +243,45 @@ export async function buildChairmanScorecard(
     where: { code: CHAIRMAN_CODE },
     select: { id: true },
   });
-  // Tín hiệu Chủ tịch (theo agentId nếu có DB row; fallback mọi tín hiệu —
-  // hệ thống thật chỉ Chủ tịch sinh tín hiệu qua chu kỳ).
+  // F-73B-08: thiếu agent row → scorecard RỖNG trung thực — fallback lấy mọi
+  // tín hiệu của mọi agent sẽ chấm sai cohort (DB thật có tín hiệu từ 4 agentId).
+  if (!chairmanAgent) {
+    return {
+      v: 1,
+      kind: "ChairmanScorecard",
+      window: { days, from: from.toISOString(), to: to.toISOString() },
+      signals: 0,
+      labeled: 0,
+      pendingLabels: 0,
+      buys: 0,
+      sells: 0,
+      confusion: { tp: 0, fp: 0, fn: 0, tn: 0 },
+      precision: null,
+      recall: null,
+      f1: null,
+      aucPr: null,
+      targetRmse: null,
+      stopRmse: null,
+      calibration: (["LOW", "MEDIUM", "HIGH"] as const).map((confidence) => ({
+        confidence,
+        n: 0,
+        wins: 0,
+        winrate: null,
+        odds: null,
+      })),
+      ruleCounts: { targetStop: 0, close5: 0, pending: 0 },
+      enoughData: false,
+      note: "Không xác định được agent Chủ tịch (portfolio-strategist) trong DB — scorecard trống trung thực, không fallback lấy tín hiệu mọi agent.",
+      generatedAt: new Date().toISOString(),
+    };
+  }
+  // F-73B-08: cohort neo agentId Chủ tịch đã xác thực — không fallback mọi
+  // tín hiệu (mọi agentId) khi thiếu row (đã trả rỗng trung thực ở trên).
   const signals = await db.signal.findMany({
     where: {
       createdAt: { gte: from, lt: to },
       direction: { in: ["BUY", "SELL"] },
-      ...(chairmanAgent ? { agentId: chairmanAgent.id } : {}),
+      agentId: chairmanAgent.id,
       ...(opts?.signalIds ? { id: { in: opts.signalIds } } : {}),
     },
     select: {
@@ -385,10 +420,23 @@ export async function buildChairmanScorecard(
     targetRmse: rmseOf(targetErrors),
     stopRmse: rmseOf(stopErrors),
     calibration,
+    // F-73B-06: minh bạch quy tắc chấm — bao nhiêu nhãn target/stop vs
+    // fallback close-5 vs chưa chấm được (pending).
+    ruleCounts: {
+      targetStop: labels.filter((l) => l.rule === "target-stop").length,
+      close5: labels.filter((l) => l.rule === "close5").length,
+      pending: labels.filter((l) => l.rule === "pending").length,
+    },
     enoughData: labeled.length >= ENOUGH_DATA_N,
     note:
       "Nhãn 5 phiên sau (target/stop chạm trước; fallback close-5-phiên) — đủData " +
-      `yêu cầu ${ENOUGH_DATA_N} nhãn [DA D7]. Scorecard mô tả, không phán xét (§6.5).`,
+      `yêu cầu ${ENOUGH_DATA_N} nhãn [DA D7]. Scorecard mô tả, không phán xét (§6.5). ` +
+      // F-73B-06/F-73B-07: khai báo semantics fallback close-5 + phạm vi RMSE.
+      // F-73R2-04: close5 gồm CẢ 2 loại — tín hiệu không đặt target/stop lẫn
+      // tín hiệu CÓ target/stop nhưng không chạm trong 5 phiên (fallthrough).
+      "Tín hiệu có target/stop nhưng không chạm trong 5 phiên → fallback close-5 " +
+      "(ruleCounts.close5 gồm cả tín hiệu không đặt target/stop lẫn fallthrough). " +
+      "RMSE tính trên tập BUY (SELL đối xứng hoá ở P2).",
     generatedAt: new Date().toISOString(),
   };
 }

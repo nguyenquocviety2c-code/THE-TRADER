@@ -108,6 +108,9 @@ function quantile(sorted: number[], q: number): number {
 
 /** Số mẫu tối thiểu để fit xu hướng (dưới mức này → trend null, CI null). */
 const MIN_FIT_N = 5;
+/** F-73B-05: span tối thiểu để fit xu hướng (ngày) — 5 snapshot trong vài phút
+ *  cho slope "VND/ngày" ngoại suy vô nghĩa (đo thực tế: 720 triệu ₫/ngày). */
+const MIN_SPAN_DAYS = 1;
 /** Ngưỡng đủ dữ liệu hiển thị độ tin cậy [DA D7 n≥30]. */
 const ENOUGH_DATA_N = 30;
 
@@ -122,31 +125,38 @@ export async function computeCashflowForecast(
   const horizonHours = input.horizonHours ?? 1;
   const horizonDays = horizonHours / 24;
 
+  // F-73B-01 (fixbug #73): orderBy desc + reverse — orderBy asc + take sẽ
+  // lấy 500 dòng CŨ NHẤT, trend/CI đóng băng trên dữ liệu cũ khi chuỗi > 500.
   const snapshots = await db.cashSnapshot.findMany({
     where: accountId ? { brokerAccountId: accountId } : undefined,
-    orderBy: { createdAt: "asc" },
+    orderBy: { createdAt: "desc" }, // F-73B-01: lấy 500 MỚI NHẤT...
     take: 500,
     select: { createdAt: true, cash: true },
   });
+  snapshots.reverse(); // ...rồi đảo lại thành tăng dần cho OLS
   const series = snapshots.map((s) => ({
     t: s.createdAt.getTime(),
     cash: Number(s.cash),
   }));
 
+  // F-73R2-05: span THÔ (ms→ngày, KHÔNG làm tròn) cho guard fit — history.spanDays
+  // đã toFixed(2) nên span 0,995 ngày thành "1.00" → fit nhầm sớm ~30ph.
+  const rawSpanDays =
+    series.length > 1 ? (series[series.length - 1].t - series[0].t) / 86_400_000 : 0;
+
   const history = {
     n: series.length,
     from: series.length > 0 ? series[0].t : null,
     to: series.length > 0 ? series[series.length - 1].t : null,
-    spanDays:
-      series.length > 1
-        ? Number(((series[series.length - 1].t - series[0].t) / 86_400_000).toFixed(2))
-        : 0,
+    spanDays: Number(rawSpanDays.toFixed(2)),
   };
 
   // ── Baseline OLS: cash ~ a + b×t (b = VND/ms → đổi VND/ngày) ──
   let trendVndPerDay: number | null = null;
   let residualQuantiles: { p2_5: number; p97_5: number } | null = null;
-  if (series.length >= MIN_FIT_N) {
+  // F-73B-05: span < 1 ngày → slope "VND/ngày" vô nghĩa — trend/CI null
+  // (fail trung thực như n < 5, không ngoại suy chuỗi trải vài phút).
+  if (series.length >= MIN_FIT_N && rawSpanDays >= MIN_SPAN_DAYS) {
     const n = series.length;
     const t0 = series[0].t;
     const xs = series.map((s) => (s.t - t0) / 86_400_000); // ngày (số thực)
@@ -236,7 +246,11 @@ export async function computeCashflowForecast(
     note:
       "Baseline hồi quy tuyến tính + quantile phần dư (TypeScript thuần — §7.5); " +
       "worker GRU [DL L2/L7] chỉ mở khi baseline vượt ngưỡng lỗi. Kịch bản half là " +
-      "kịch bản minh bạch, KHÔNG phải xác suất thật. Dự báo KHÔNG dùng chặn lệnh (§6.4).",
+      "kịch bản minh bạch, KHÔNG phải xác suất thật. Dự báo KHÔNG dùng chặn lệnh (§6.4). " +
+      // F-73B-09/F-73B-10: khai báo minh bạch horizon + CI + bảo thủ một chiều.
+      "Chân trời cố định 1h (mặc định P1 — không theo AGENT_CYCLE_MINUTES); CI95 từ " +
+      "phần dư thang NGÀY nên rộng hơn cho chân trời ngắn (bảo thủ); kịch bản allApprove " +
+      "chưa tính dòng vào của tín hiệu SELL ACTIVE (bảo thủ một chiều — khai báo minh bạch).",
   };
 }
 

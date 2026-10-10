@@ -144,6 +144,16 @@ export function ChairmanScorecardCard() {
               <span className="tabular-nums" title="RMSE stopLoss vs low thực 5 phiên [ML M2]">
                 RMSE cắt lỗ {sc.stopRmse == null ? "—" : `${formatVndCompact(sc.stopRmse)} ₫`}
               </span>
+              {/* F-73B-06: minh bạch quy tắc chấm — render điều kiện để an toàn
+                  với payload cũ thiếu field (cache react-query). */}
+              {sc.ruleCounts ? (
+                <span
+                  className="tabular-nums"
+                  title="Số nhãn theo quy tắc chấm: target/stop chạm trước vs fallback close-5 phiên (F-73B-06)"
+                >
+                  Chấm theo target/stop: {sc.ruleCounts.targetStop} · close-5: {sc.ruleCounts.close5}
+                </span>
+              ) : null}
             </div>
 
             {/* Calibration — bảng winrate + odds theo confidence */}

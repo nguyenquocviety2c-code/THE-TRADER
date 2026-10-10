@@ -43,7 +43,8 @@ function pctLabel(n: number | null): string {
 }
 
 function FunnelBar({ step, max }: { step: FunnelStep; max: number }) {
-  const ratio = max > 0 ? Math.max(2, Math.round((step.value / max) * 100)) : 0;
+  // F-73B-13: value=0 phải vẽ thanh 0 — Math.max(2,…) chỉ dành cho value > 0.
+  const ratio = max > 0 && step.value > 0 ? Math.max(2, Math.round((step.value / max) * 100)) : 0;
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-2">

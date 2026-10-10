@@ -75,14 +75,20 @@ export async function POST(
         return NextResponse.json({ error: result.error }, { status: result.status });
       }
 
-      const updated = await db.signal.update({
+      // F-73A-05 (fixbug #73): claim ACTED đã diễn ra atomic trong
+      // createPaperOrderFromSignal — KHÔNG ghi đè vô điều kiện ở đây (REJECT đua
+      // có thể bị/APPROVE đè nhầm). Chỉ re-read để dựng response.
+      const updated = await db.signal.findUnique({
         where: { id },
-        data: { status: "ACTED" },
         include: {
           instrument: { select: { symbol: true, name: true } },
           agent: { select: { code: true, name: true } },
         },
       });
+      // Guard nhẹ — signal chắc chắn tồn tại (đã check 404 ở trên), chỉ cho TS.
+      if (!updated) {
+        return NextResponse.json({ error: "Không tìm thấy tín hiệu." }, { status: 404 });
+      }
 
       await db.auditLog.create({
         data: {
@@ -130,18 +136,35 @@ export async function POST(
     }
 
     // ── Từ chối → REJECTED (không tạo AgentMessage — tránh bịa lời agent) ──
-    const rejected = await db.signal.update({
-      where: { id },
+    // F-73A-05 (fixbug #73): REJECT cũng phải claim có điều kiện — APPROVE đua
+    // đã chuyển ACTED + tạo N lệnh thì REJECT KHÔNG được phép đè thành REJECTED
+    // (lệnh vẫn sống). updateMany where status=ACTIVE là claim atomic thật.
+    const claimedReject = await db.signal.updateMany({
+      where: { id, status: "ACTIVE" },
       data: {
         status: "REJECTED",
         rejectedAt: new Date(),
         rejectNote: note && note.length > 0 ? note : null,
       },
+    });
+    if (claimedReject.count === 0) {
+      const cur = await db.signal.findUnique({ where: { id }, select: { status: true } });
+      return NextResponse.json(
+        { error: signalStatusConflictMessage(cur?.status ?? "UNKNOWN") },
+        { status: 409 }
+      );
+    }
+    const rejected = await db.signal.findUnique({
+      where: { id },
       include: {
         instrument: { select: { symbol: true, name: true } },
         agent: { select: { code: true, name: true } },
       },
     });
+    // Guard nhẹ như APPROVE — signal chắc chắn tồn tại, chỉ cho TS non-null.
+    if (!rejected) {
+      return NextResponse.json({ error: "Không tìm thấy tín hiệu." }, { status: 404 });
+    }
 
     await db.auditLog.create({
       data: {

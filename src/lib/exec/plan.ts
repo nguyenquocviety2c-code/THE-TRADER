@@ -26,6 +26,7 @@ import {
   PLAN_SLIPPAGE_BUDGET_PCT,
   PLAN_ORDER_TYPE,
   DEFAULT_DEADLINE_TICKS,
+  TWAP_ADTV_TRIGGER_PCT,
 } from "@/lib/exec/constants";
 import { isTradingDay } from "@/lib/market-session";
 
@@ -74,7 +75,16 @@ export interface ExecutionPlan {
   twap?: PlanTwapMeta;
 }
 
-/** Sinh plan JSON cho lệnh (P0 luôn 1 lát SINGLE — đúng hành vi engine hiện tại). */
+/** Lý do đi SINGLE thay vì tách TWAP (F-73A-13 fixbug #73) — rationale plan
+ *  phải nói đúng lý do THẬT của con đường an toàn, không gộp chung một câu:
+ *  - under-threshold:    notional ≤ ngưỡng TWAP_ADTV_TRIGGER_PCT% ADTV-20;
+ *  - adtv-unavailable:   không đo được ADTV-20 (lỗi query hoặc chưa đủ 20 bar —
+ *                        F-73A-07) → fail-soft §6.6 đi đường an toàn;
+ *  - insufficient-lots:  khối lượng không đủ ≥ sliceCount lot cho mỗi lát. */
+export type SinglePlanReason = "under-threshold" | "adtv-unavailable" | "insufficient-lots";
+
+/** Sinh plan JSON cho lệnh (P0 luôn 1 lát SINGLE — đúng hành vi engine hiện tại).
+ *  F-73A-13: `singleReason` nói đúng lý do không tách (mặc định under-threshold). */
 export function buildExecutionPlan(input: {
   orderId: string;
   quantity: number;
@@ -82,7 +92,23 @@ export function buildExecutionPlan(input: {
   sizing: "nav5pct" | "budget50m";
   humanNote: string;
   createdAt?: Date;
+  singleReason?: SinglePlanReason;
 }): ExecutionPlan {
+  // F-73A-13: rationale theo lý do thật — hằng ngưỡng interpolate từ nguồn đơn.
+  const deadlineTail = `hạn chờ ${DEFAULT_DEADLINE_TICKS} tick trong phiên (~1 phiên giao dịch)`;
+  const reason = input.singleReason ?? "under-threshold";
+  const rationale =
+    reason === "adtv-unavailable"
+      ? "1 lệnh LIMIT nguyên khối — không đo được ADTV-20 (lỗi query hoặc chưa đủ 20 bar) " +
+        "nên không tách lát (fail-soft §6.6 — đi đường an toàn); " +
+        deadlineTail
+      : reason === "insufficient-lots"
+        ? "1 lệnh LIMIT nguyên khối — khối lượng không đủ ≥ sliceCount lot cho mỗi lát " +
+          "nên không tách (E-P1-2); " +
+          deadlineTail
+        : "1 lệnh LIMIT nguyên khối — notional ≤ ngưỡng " +
+          `${TWAP_ADTV_TRIGGER_PCT}% ADTV-20 nên không tách lát (E-P1-2); ` +
+          deadlineTail;
   return {
     v: 1,
     kind: "ExecutionPlan",
@@ -94,9 +120,7 @@ export function buildExecutionPlan(input: {
     orderType: PLAN_ORDER_TYPE,
     sizing: input.sizing,
     humanNote: input.humanNote,
-    rationale:
-      "1 lệnh LIMIT nguyên khối (P0 E-P0-2) — dưới ngưỡng 1% ADTV-20 nên không tách lát; " +
-      `hạn chờ ${DEFAULT_DEADLINE_TICKS} tick trong phiên (~1 phiên giao dịch)`,
+    rationale,
     createdAt: (input.createdAt ?? new Date()).toISOString(),
   };
 }

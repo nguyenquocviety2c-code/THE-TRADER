@@ -149,7 +149,11 @@ async function portfolioSnapshot(): Promise<{
   }[];
   sectorWeights: { sector: string; mv: number; pct: number }[];
 }> {
-  const [positions, account] = await Promise.all([
+  const [account, positionsAll] = await Promise.all([
+    db.brokerAccount.findFirst({
+      where: { deletedAt: null },
+      select: { id: true, cashBalance: true, equity: true, marginUsed: true },
+    }),
     db.position.findMany({
       where: { status: "OPEN" },
       include: {
@@ -162,11 +166,13 @@ async function portfolioSnapshot(): Promise<{
         },
       },
     }),
-    db.brokerAccount.findFirst({
-      where: { deletedAt: null },
-      select: { cashBalance: true, equity: true, marginUsed: true },
-    }),
   ]);
+  // F-73R2-03: lọc positions theo tài khoản sống — không trộn vị thế tài khoản
+  // khác/soft-delete vào NAV của A12 (filter JS theo id — giữ Promise.all,
+  // không thêm truy vấn tuần tự; account trong where gây chicken-egg).
+  const positions = account
+    ? positionsAll.filter((p) => p.brokerAccountId === account.id)
+    : positionsAll;
   const rows = positions.map((p) => {
     const last = p.instrument.quotes[0]?.last ?? p.avgPrice;
     const mv = last * p.quantity;
@@ -763,7 +769,10 @@ async function runSettlement(): Promise<ServiceRunResult> {
     let anomaly: AnomalyScanResult | null = null;
     try {
       if (windowFrom != null && !report.baseline) {
-        anomaly = await detectTradeAnomalies(windowFrom, new Date());
+        // F-73B-11: dùng đúng mép window reconciliation vừa chạy (report.window.toNow)
+        // thay vì new Date() sau đó — không quét trùng trade trong khe giữa 2 mốc.
+        const windowTo = report.window.toNow ? new Date(report.window.toNow) : new Date();
+        anomaly = await detectTradeAnomalies(windowFrom, windowTo);
         await raiseAnomalyAlert(anomaly);
       }
     } catch (anErr) {

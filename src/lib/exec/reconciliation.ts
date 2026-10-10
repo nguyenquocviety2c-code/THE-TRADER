@@ -97,13 +97,21 @@ interface CurrentLedgerState {
 }
 
 async function loadCurrentLedger(): Promise<CurrentLedgerState> {
-  const [account, positions] = await Promise.all([
+  const [account, positionsAll] = await Promise.all([
     db.brokerAccount.findFirst({
       where: { deletedAt: null },
-      select: { cashBalance: true },
+      select: { id: true, cashBalance: true },
     }),
-    db.position.findMany({ select: { instrumentId: true, quantity: true } }),
+    db.position.findMany({
+      select: { brokerAccountId: true, instrumentId: true, quantity: true },
+    }),
   ]);
+  // F-73R3-02 (fixbug #73): positions neo về tài khoản sống — không trộn vị thế
+  // của tài khoản khác/soft-delete vào ledger đối chiếu (cùng họ F-73R2-03;
+  // checkpoint lưu theo cùng phạm vi tài khoản này nên idempotent giữ nguyên).
+  const positions = account
+    ? positionsAll.filter((p) => p.brokerAccountId === account.id)
+    : positionsAll;
   return {
     cash: account ? Number(account.cashBalance) : 0,
     positions: new Map(positions.map((p) => [p.instrumentId, p.quantity])),

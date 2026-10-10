@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import {
   FEE_RATE,
   TAX_RATE,
+  TWAP_ADTV_TRIGGER_PCT,
   getExecFeeTaxConfig,
   pctToFractionGuarded,
 } from "../src/lib/exec/constants";
@@ -994,16 +995,25 @@ async function verifyTwap() {
   );
 
   // ── F3 — E2E hermetic: plant instrument + bar ADTV nhỏ + APPROVE → 3 Order con ──
+  // F-73R3-04: testStart mốc TRƯỚC mọi query — không còn khe fill prod giữa
+  // fetch account và testStart (fill trong khe bị bỏ qua detection).
+  const testStart = new Date();
   const user = await db.user.findFirst({ where: { isActive: true }, select: { id: true } });
   const account = await db.brokerAccount.findFirst({
     where: { deletedAt: null },
-    select: { id: true, cashBalance: true },
+    select: { id: true, cashBalance: true, equity: true },
   });
   if (!user || !account) {
     check("F3 có user/account để cài E2E TWAP", false);
     return;
   }
+  // F-73A-04 (fixbug #73): snapshot cash/equity TRƯỚC test — fill engine chạy nền
+  // (tick 10s) có thể khớp lát 1 giữa lúc tạo lệnh và lúc dọn; finally HOÀN về
+  // đúng mức trước test (cleanup cũ KHÔNG hoàn cash → lệch vĩnh viễn nếu trúng).
+  const cashBefore = account.cashBalance;
+  const equityBefore = account.equity;
   const instrumentId: string[] = [];
+  let signal: { id: string } | null = null;
   try {
     const inst = await db.instrument.create({
       data: {
@@ -1071,7 +1081,7 @@ async function verifyTwap() {
       positions.reduce((s, p) => s + (p.instrument.quotes[0]?.last ?? 0) * p.quantity, 0);
     const expQty = Math.max(100, Math.floor(((equity * 0.05) / 20_000 / 100)) * 100);
 
-    const signal = await db.signal.create({
+    signal = await db.signal.create({
       data: {
         instrumentId: inst.id,
         direction: "BUY",
@@ -1085,8 +1095,8 @@ async function verifyTwap() {
 
     const result = await createPaperOrderFromSignal(signal.id, { sizing: "nav5pct" });
     check(
-      "F3b APPROVE lệnh lớn → ok + twap != null (style TWAP, 3 lát, %ADTV > 1%)",
-      result.ok && result.twap != null && result.twap.sliceCount === 3 && result.twap.triggerPct === 1,
+      "F3b APPROVE lệnh lớn → ok + twap != null (style TWAP, 3 lát, %ADTV > ngưỡng đơn nguồn)",
+      result.ok && result.twap != null && result.twap.sliceCount === 3 && result.twap.triggerPct === TWAP_ADTV_TRIGGER_PCT,
       result.ok ? `twap=${result.twap?.sliceCount} lát · ${result.twap?.notionalPctAdtv}% ADTV` : result.error
     );
     if (result.ok) {
@@ -1152,10 +1162,60 @@ async function verifyTwap() {
         sigAfter?.status === "ACTED" && sigAfter.actedAt != null
       );
     }
-    // Dọn: lệnh PENDING chưa khớp — xoá sạch (trade cascade theo order).
-    await db.order.deleteMany({ where: { signalId: signal.id } });
-    await db.signal.delete({ where: { id: signal.id } });
   } finally {
+    // F-73A-04: dọn hermetic ĐẦY ĐỦ — làm cả khi throw giữa chừng (cleanup cũ nằm
+    // trong try bỏ sót). Xoá order (trade cascade) + MỌI audit theo entityId của
+    // lệnh test (ORDER_CREATED/FILLED/EXPIRED...) + tín hiệu + hoàn cash/equity
+    // về mức trước test nếu tick đã khớp lát nào đó trong window.
+    const testOrders = signal
+      ? await db.order
+          .findMany({ where: { signalId: signal.id }, select: { id: true } })
+          .catch(() => [])
+      : [];
+    if (testOrders.length > 0) {
+      await db.auditLog
+        .deleteMany({
+          where: { entity: "Order", entityId: { in: testOrders.map((o) => o.id) } },
+        })
+        .catch(() => undefined);
+      await db.order
+        .deleteMany({ where: { signalId: signal!.id } })
+        .catch(() => undefined);
+    }
+    if (signal) {
+      await db.signal.delete({ where: { id: signal.id } }).catch(() => undefined);
+    }
+    const accNow = await db.brokerAccount
+      .findUnique({ where: { id: account.id }, select: { cashBalance: true, equity: true } })
+      .catch(() => null);
+    if (accNow && (accNow.cashBalance !== cashBefore || accNow.equity !== equityBefore)) {
+      // F-73R2-02: chỉ hoàn khi KHÔNG có lệnh PROD nào khớp trong window test —
+      // fill prod đồng thời bị hoàn nhầm sẽ làm sổ lệch (reconciliation bắt được,
+      // nhưng cứ để đúng nguồn). Có fill ngoài test → bỏ hoàn + cảnh báo.
+      const testOrderIds = testOrders.map((o) => o.id);
+      const foreignFills = await db.order
+        .findMany({
+          where: {
+            status: "FILLED",
+            filledAt: { gte: testStart, lt: new Date() },
+            ...(testOrderIds.length > 0 ? { id: { notIn: testOrderIds } } : {}),
+          },
+          select: { id: true },
+        })
+        .catch(() => []);
+      if (foreignFills.length === 0) {
+        await db.brokerAccount
+          .update({
+            where: { id: account.id },
+            data: { cashBalance: cashBefore, equity: equityBefore },
+          })
+          .catch(() => undefined);
+      } else {
+        console.warn(
+          `[exec-verify:F3] bỏ hoàn cash — ${foreignFills.length} lệnh PROD khớp trong window test (fill thật giữ nguyên)`
+        );
+      }
+    }
     if (instrumentId.length > 0) {
       // Xoá audit ORDER_CREATED của lệnh test (after JSON chứa symbol EVT1 —
       // hermetic: không để lại audit mồ côi tham chiếu lệnh đã dọn).
@@ -1283,6 +1343,47 @@ async function verifyForecast() {
       "G4 label ước tính nội bộ giữ nguyên câuclaimer (§6.4/§6.7)",
       f.label.includes("ước tính nội bộ") && f.label.includes("không phải hạn mức thật")
     );
+
+    // G5 — F-73B-01 regression (fixbug #73): chuỗi > 500 → phải lấy 500 MỚI NHẤT.
+    // Plant 500 snapshot phẳng 1tỷ trải [T-100d, T-2d] + 1 snapshot 2tỷ ở T-1h:
+    //  - code đúng (orderBy desc + reverse): history.to ≈ T-1h, slope dương (jump
+    //    ở snapshot mới nhất được tính vào xu hướng);
+    //  - code cũ sai (orderBy asc + take): lấy 500 CŨ NHẤT → to ≈ T-2d, chuỗi
+    //    phẳng → slope 0 — trend/CI đóng băng trên dữ liệu cũ mãi mãi.
+    await db.cashSnapshot.deleteMany({ where: { brokerAccountId: account.id } });
+    const tRef = Date.now();
+    const g5Rows = Array.from({ length: 500 }, (_, i) => ({
+      brokerAccountId: account.id,
+      cash: BigInt(1_000_000_000),
+      equity: BigInt(1_000_000_000),
+      source: "seed",
+      createdAt: new Date(tRef - (100 - i * (98 / 500)) * 86_400_000),
+    }));
+    g5Rows.push({
+      brokerAccountId: account.id,
+      cash: BigInt(2_000_000_000),
+      equity: BigInt(2_000_000_000),
+      source: "seed",
+      createdAt: new Date(tRef - 3_600_000),
+    });
+    await db.cashSnapshot.createMany({ data: g5Rows });
+    const f5 = await computeCashflowForecast(
+      { cash: 2_000_000_000, committedBuyNotional: 0, committedSellInflow: 0 },
+      account.id
+    );
+    const newestMs = tRef - 3_600_000;
+    check(
+      "G5 chuỗi 501 > take 500 → dùng 500 MỚI NHẤT (to ≈ snapshot mới nhất — không đóng băng trend)",
+      f5.history.n === 500 &&
+        f5.history.to != null &&
+        Math.abs(new Date(f5.history.to).getTime() - newestMs) < 3_600_000,
+      `n=${f5.history.n} to=${f5.history.to}`
+    );
+    check(
+      "G5b jump 2tỷ ở snapshot mới nhất được tính vào xu hướng (slope > 0 — code cũ đóng băng cho 0)",
+      f5.trendVndPerDay != null && f5.trendVndPerDay > 10_000,
+      `trend=${f5.trendVndPerDay}`
+    );
   } finally {
     await db.cashSnapshot.deleteMany({ where: { brokerAccountId: account.id } });
     await db.brokerAccount.delete({ where: { id: account.id } });
@@ -1381,37 +1482,41 @@ async function verifyChairmanScorecard() {
           expiresAt: opts.createdAt,
         },
       });
-    // 4 tín hiệu tại cuối D0 (sau bar close) — score KHÁC NHAU để test AP rank:
+    // 5 tín hiệu tại cuối D0 (sau bar close) — score KHÁC NHAU để test AP rank:
     //  1) EVS2  BUY  HIGH   target 105 stop 95 → WIN (high D3=105 chạm target trước)
     //  2) EVS2  SELL LOW    target 95 stop 105 → LOSS (high D3=105 chạm stop trước)
     //  3) EVS2  BUY  MEDIUM KHÔNG target/stop → fallback close5=106 > entry 100 → WIN
     //  4) EVS2B BUY  MEDIUM KHÔNG target/stop → fallback close5=93 < entry 100 → LOSS
+    //  5) EVS2  SELL LOW    target 50 stop 200 (XA — không chạm) → fallback
+    //     close5=106 ≥ entry 100 → LOSS [H5: fallthrough semantics + ruleCounts]
     const t0 = new Date(d0.getTime() + 12 * 3_600_000);
     signalIds.push((await mkSignal({ instrumentId: inst.id, direction: "BUY", target: 105, stop: 95, confidence: "HIGH", score: 90, createdAt: t0 })).id);
     signalIds.push((await mkSignal({ instrumentId: inst.id, direction: "SELL", target: 95, stop: 105, confidence: "LOW", score: 50, createdAt: t0 })).id);
     signalIds.push((await mkSignal({ instrumentId: inst.id, direction: "BUY", target: null, stop: null, confidence: "MEDIUM", score: 70, createdAt: t0 })).id);
     signalIds.push((await mkSignal({ instrumentId: instDown.id, direction: "BUY", target: null, stop: null, confidence: "MEDIUM", score: 80, createdAt: t0 })).id);
+    signalIds.push((await mkSignal({ instrumentId: inst.id, direction: "SELL", target: 50, stop: 200, confidence: "LOW", score: 60, createdAt: t0 })).id);
 
     // Cohort filter theo signalIds — hermetic (không trộn tín hiệu prod window).
     const sc = await buildChairmanScorecard(90, { signalIds });
     // Nhãn: s1 BUY WIN (TP) · s2 SELL LOSS (actual up → FN) · s3 BUY WIN (TP) ·
-    // s4 BUY LOSS (actual down → FP) → TP=2, FP=1, FN=1, TN=0.
+    // s4 BUY LOSS (actual down → FP) · s5 SELL LOSS qua fallback close5 (FN) →
+    // TP=2, FP=1, FN=2, TN=0.
     check(
-      "H2a nhãn đúng luật target/stop + fallback: TP=2 · FP=1 · FN=1 · TN=0",
-      sc.confusion.tp === 2 && sc.confusion.fp === 1 && sc.confusion.fn === 1 && sc.confusion.tn === 0,
+      "H2a nhãn đúng luật target/stop + fallback (kể cả fallthrough s5): TP=2 · FP=1 · FN=2 · TN=0",
+      sc.confusion.tp === 2 && sc.confusion.fp === 1 && sc.confusion.fn === 2 && sc.confusion.tn === 0,
       `tp=${sc.confusion.tp} fp=${sc.confusion.fp} fn=${sc.confusion.fn} tn=${sc.confusion.tn}`
     );
     check(
-      "H2b precision = recall = F1 = 2/3 ≈ 66,67%",
+      "H2b precision = 2/3 · recall = 2/4 = 1/2 · F1 = 4/7 ≈ 57,14%",
       sc.precision != null && Math.abs(sc.precision - 2 / 3) < 1e-4 &&
-        sc.recall != null && Math.abs(sc.recall - 2 / 3) < 1e-4 &&
-        sc.f1 != null && Math.abs(sc.f1 - 2 / 3) < 1e-4,
+        sc.recall != null && Math.abs(sc.recall - 0.5) < 1e-4 &&
+        sc.f1 != null && Math.abs(sc.f1 - 4 / 7) < 1e-4,
       `p=${sc.precision} r=${sc.recall} f1=${sc.f1}`
     );
-    // AP rank score [90 T, 80 F, 70 T, 50 T] = 1×⅓ + ⅔×⅓ + ¾×⅓ = 0,8056.
+    // AP rank score [90 T, 80 F, 70 T, 60 T, 50 T] = (1 + 2/3 + 3/4 + 4/5)/4 = 193/240 ≈ 0,8042.
     check(
-      "H2b2 AUC-PR (AP theo rank score) = 1×⅓ + ⅔×⅓ + ¾×⅓ ≈ 0,8056",
-      sc.aucPr != null && Math.abs(sc.aucPr - 29 / 36) < 1e-3,
+      "H2b2 AUC-PR (AP theo rank score) = (1 + ⅔ + ¾ + ⅘)/4 = 193/240 ≈ 0,8042",
+      sc.aucPr != null && Math.abs(sc.aucPr - 193 / 240) < 1e-3,
       `ap=${sc.aucPr}`
     );
     // RMSE target (BUY có target): s1 target 105 vs high5 107 → |−2| → 2;
@@ -1421,21 +1526,26 @@ async function verifyChairmanScorecard() {
       sc.targetRmse === 2 && sc.stopRmse === 6,
       `target=${sc.targetRmse} stop=${sc.stopRmse}`
     );
-    // Calibration: HIGH 1/1 WIN (odds null 0/∞ minh bạch) · LOW 0/1 ·
-    // MEDIUM 1/2 → winrate 0,5 → odds = 1 (exercises p/(1−p)).
+    // Calibration: HIGH 1/1 WIN (odds null 0/∞ minh bạch) · LOW 0/2 (s2 + s5
+    // đều LOSS — odds null) · MEDIUM 1/2 → winrate 0,5 → odds = 1 (exercises p/(1−p)).
     const high = sc.calibration.find((c) => c.confidence === "HIGH")!;
     const low = sc.calibration.find((c) => c.confidence === "LOW")!;
     const med = sc.calibration.find((c) => c.confidence === "MEDIUM")!;
     check(
-      "H2d calibration: HIGH 1/1 (odds null) · LOW 0/1 · MEDIUM 1/2 → odds = 1",
+      "H2d calibration: HIGH 1/1 (odds null) · LOW 0/2 · MEDIUM 1/2 → odds = 1",
       high.n === 1 && high.wins === 1 && high.odds == null &&
-        low.n === 1 && low.wins === 0 &&
+        low.n === 2 && low.wins === 0 &&
         med.n === 2 && med.wins === 1 && med.winrate === 0.5 && med.odds === 1,
       `H=${high.wins}/${high.n} L=${low.wins}/${low.n} M=${med.wins}/${med.n} odds=${med.odds}`
     );
     check(
-      "H3 labeled 4 < 30 → enoughData=false [DA D7] + pendingLabels=0",
-      sc.labeled === 4 && sc.enoughData === false && sc.pendingLabels === 0
+      "H3 labeled 5 < 30 → enoughData=false [DA D7] + pendingLabels=0",
+      sc.labeled === 5 && sc.enoughData === false && sc.pendingLabels === 0
+    );
+    check(
+      "H5 ruleCounts minh bạch: target/stop 2 · close-5 3 · pending 0 — tín hiệu CÓ target/stop nhưng không chạm trong 5 phiên → fallback close-5 (F-73B-06)",
+      sc.ruleCounts.targetStop === 2 && sc.ruleCounts.close5 === 3 && sc.ruleCounts.pending === 0,
+      `targetStop=${sc.ruleCounts.targetStop} close5=${sc.ruleCounts.close5} pending=${sc.ruleCounts.pending}`
     );
     check(
       "H4 hợp đồng v1/kind + note khai báo luật nhãn",
@@ -1467,6 +1577,10 @@ async function verifyAnomaly() {
   const DAY = 86_400_000;
   const from = new Date(Date.now() - 3_600_000);
   const to = new Date(Date.now() + 3_600_000);
+  // F-73B-15 (fixbug #73): plant executedAt/filledAt ở TƯƠNG LAI (+30ph — vẫn
+  // trong [from, to] của scan) → reconciliation window [checkpoint, now) không
+  // bao giờ thấy trade test → I-section hermetic cả khi chu kỳ A11 chạy song song.
+  const futureMs = Date.now() + 30 * 60_000;
   try {
     const inst = await db.instrument.create({
       data: { symbol: "EVA3", name: "exec-verify anomaly test", market: "HOSE", type: "STOCK", isActive: true },
@@ -1489,6 +1603,9 @@ async function verifyAnomaly() {
       });
     }
     // (a) Trade "bất thường" giá 130 (z ≈ +30σ).
+    // F-73B-15: fee đúng nguồn đơn FEE_RATE (bản cũ literal 195 = lệch 10× —
+    // nếu A11 chạy trùng window sẽ gây fee-recompute MISMATCH giả).
+    const zFee = Math.round(FEE_RATE * 130 * 100);
     const zOrder = await db.order.create({
       data: {
         userId: user.id,
@@ -1501,8 +1618,8 @@ async function verifyAnomaly() {
         filledQuantity: 100,
         avgFillPrice: 130,
         status: "FILLED",
-        fee: BigInt(195),
-        filledAt: new Date(),
+        fee: BigInt(zFee),
+        filledAt: new Date(futureMs),
         note: "exec-verify anomaly z",
       },
     });
@@ -1514,13 +1631,17 @@ async function verifyAnomaly() {
         side: "BUY",
         quantity: 100,
         price: 130,
-        fee: BigInt(195),
+        fee: BigInt(zFee),
         tax: BigInt(0),
-        executedAt: new Date(),
+        executedAt: new Date(futureMs),
       },
     });
     // (b) 5 lệnh FILLED slippage [0, 0, 1, 2, 10]% (kèm lệnh z 0% = 6 mẫu:
     // Q1=0 · Q3=1,75 · IQR=1,75 > 0 → rào trên 4,375% — chỉ 10% là outlier).
+    // F-73B-02 regression guard: lệnh FILLED price=0 (dòng bẩn) cắm GIỮA chuỗi
+    // mẫu — code zip + query price>0 đúng thì vô hình; code cũ 2-mảng-song-song
+    // lệch idx → outlier 10% gán nhầm lệnh khác + bỏ sót lệnh thật — I2 bắt qua refId.
+    let tenPctOrderId = "";
     for (let i = 0; i < 5; i++) {
       const price = 20_000;
       const avg = [20_000, 20_000, 20_200, 20_400, 22_000][i];
@@ -1537,11 +1658,32 @@ async function verifyAnomaly() {
           avgFillPrice: avg,
           status: "FILLED",
           fee: BigInt(Math.round(FEE_RATE * price * 100)),
-          filledAt: new Date(),
+          filledAt: new Date(futureMs),
           note: "exec-verify anomaly iqr",
         },
       });
       orderIds.push(o.id);
+      if (i === 4) tenPctOrderId = o.id;
+      if (i === 1) {
+        const zero = await db.order.create({
+          data: {
+            userId: user.id,
+            brokerAccountId: account.id,
+            instrumentId: inst.id,
+            side: "BUY",
+            type: "LIMIT",
+            quantity: 100,
+            price: 0,
+            filledQuantity: 100,
+            avgFillPrice: 20_000,
+            status: "FILLED",
+            fee: BigInt(0),
+            filledAt: new Date(futureMs),
+            note: "exec-verify anomaly zero-price",
+          },
+        });
+        orderIds.push(zero.id);
+      }
     }
 
     const scan = await detectTradeAnomalies(from, to);
@@ -1553,22 +1695,49 @@ async function verifyAnomaly() {
       `z=${zHits[0]?.value}`
     );
     check(
-      "I2 IQR slippage: 6 mẫu [0,0,0,1,2,10]% → chỉ outlier 10% vượt rào trên ~4,4%",
-      iqrHits.length === 1 && Math.abs(iqrHits[0].value - 10) < 0.01,
-      `slip=${iqrHits[0]?.value}%`
+      "I2 IQR slippage: 6 mẫu [0,0,0,1,2,10]% → chỉ outlier 10% vượt rào ~4,4% — refId ĐÚNG lệnh 22.000 dù có lệnh price=0 cắm giữa (F-73B-02)",
+      iqrHits.length === 1 &&
+        Math.abs(iqrHits[0].value - 10) < 0.01 &&
+        iqrHits[0].refId === tenPctOrderId,
+      `slip=${iqrHits[0]?.value}% ref=${iqrHits[0]?.refId === tenPctOrderId ? "đúng" : "SAI"}`
+    );
+    check(
+      "I2b anomaly IQR hiện MÃ cổ phiếu thật (F-73B-03 — hết 'N cp')",
+      iqrHits.length === 1 && iqrHits[0].symbol === "EVA3",
+      `symbol=${iqrHits[0]?.symbol}`
     );
 
     // I3 — RiskAlert INFO + dedupe 24h.
+    // F-73R2-01: snapshot id alert EXEC_TRADE_ANOMALY unacked SẴN CÓ — nếu prod
+    // vừa bắn alert thật thì dedupe là hành vi ĐÚNG (created=0), và finally
+    // KHÔNG được xoá alert prod (chỉ xoá alert do test tự tạo).
+    // F-73R3-01: chỉ đếm alert unacked trong 24h qua (đúng cửa sổ dedupe của
+    // raiseAnomalyAlert) — alert prod cũ hơn 24h không chặn dedupe, không được
+    // tính vào pre-existing (nếu tính → I3 false-fail).
+    const preExistingAlertIds = new Set(
+      (
+        await db.riskAlert.findMany({
+          where: {
+            code: "EXEC_TRADE_ANOMALY",
+            acknowledgedAt: null,
+            createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) },
+          },
+          select: { id: true },
+        })
+      ).map((a) => a.id)
+    );
     const created1 = await raiseAnomalyAlert(scan);
     const alert = await db.riskAlert.findFirst({
       where: { code: "EXEC_TRADE_ANOMALY", acknowledgedAt: null },
       orderBy: { createdAt: "desc" },
     });
-    alertId = alert?.id ?? null;
+    alertId = alert != null && !preExistingAlertIds.has(alert.id) ? alert.id : null;
     const created2 = await raiseAnomalyAlert(scan);
     check(
       "I3 RiskAlert EXEC_TRADE_ANOMALY severity INFO (nhẹ — không ack-bắt-buộc) + dedupe 24h",
-      created1 === 1 && alert != null && alert.severity === "INFO" && created2 === 0
+      preExistingAlertIds.size === 0
+        ? created1 === 1 && alert != null && alert.severity === "INFO" && created2 === 0
+        : created1 === 0 && created2 === 0 // prod đã có alert 24h — dedupe đúng, không false-fail
     );
     // I4 — summary 1 câu trung thực.
     check(

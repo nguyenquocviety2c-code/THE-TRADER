@@ -34,7 +34,8 @@ export interface Adtv20 {
 }
 
 /** ADTV-20 phiên EOD của mã — mean(Bar.value) 20 bar cuối (trước ngày query).
- *  Trả adtvVnd=0 khi chưa đủ dữ liệu (mã mới) — caller treats như "không tách". */
+ *  F-73A-07 (fixbug #73): trả 0 khi CHƯA ĐỦ 20 bar (mã mới/query thiếu) —
+ *  ADTV-k (k<20) là nhiễu cho ngưỡng 1%, caller đi SINGLE an toàn. */
 export async function adtv20For(instrumentId: string, now = new Date()): Promise<Adtv20> {
   const cutoff = new Date(now.getTime() - (TWAP_ADTV_SESSIONS * 2 + 20) * 86_400_000);
   const bars = await db.bar.findMany({
@@ -47,6 +48,8 @@ export async function adtv20For(instrumentId: string, now = new Date()): Promise
     .map((b) => (b.value != null ? Number(b.value) : NaN))
     .filter((v) => Number.isFinite(v) && v > 0);
   if (values.length === 0) return { adtvVnd: 0, sessions: 0 };
+  // F-73A-07: ADTV-k (k<20) là nhiễu cho ngưỡng 1% — trả 0, caller đi SINGLE an toàn.
+  if (values.length < TWAP_ADTV_SESSIONS) return { adtvVnd: 0, sessions: values.length };
   return {
     adtvVnd: values.reduce((s, v) => s + v, 0) / values.length,
     sessions: values.length,
@@ -69,10 +72,14 @@ export interface TwapSliceDraft {
 }
 
 /** Chia khối lượng thành `sliceCount` lát bội lot 100 (phần dư dồn lát đầu).
- *  Trả null khi KHÔNG nên tách: sliceCount < 2, quantity < sliceCount×100
- *  (không đủ 1 lot/lát), hoặc quantity đã ≤ 1 lot. */
+ *  Hợp đồng (F-73A-06 fixbug #73): `quantity` PHẢI là bội 100 — vi phạm (có phần
+ *  dư lot) nghĩa là caller sai upstream, trả null thay vì nuốt dư im lặng.
+ *  Trả null khi KHÔNG nên tách: quantity ≤ 0 / không bội 100 / sliceCount < 2 /
+ *  quantity < sliceCount×100 (không đủ 1 lot/lát). */
 export function draftTwapSlices(quantity: number, sliceCount: number): TwapSliceDraft[] | null {
-  if (sliceCount < 2 || quantity < sliceCount * 100) return null;
+  // F-73A-06: nuốt phần dư lot là bug — caller sai hợp đồng thì từ chối
+  if (sliceCount < 2 || quantity <= 0 || quantity % 100 !== 0) return null;
+  if (quantity < sliceCount * 100) return null;
   const lots = Math.floor(quantity / 100); // đã bảo đảm ≥ sliceCount
   const baseLots = Math.floor(lots / sliceCount);
   let remainderLots = lots - baseLots * sliceCount;

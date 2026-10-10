@@ -42,7 +42,13 @@ export interface MarketSnapshot {
  *  1 dòng ĐA THỊ TRƯỜNG gọn cho agent nghiên cứu; instrumentIdBySymbol phủ
  *  TOÀN BỘ mã giao dịch được (trừ INDEX — không có tín hiệu cho chỉ số). */
 export async function buildMarketBlock(): Promise<MarketSnapshot> {
-  const [instruments, positions, alerts, account] = await Promise.all([
+  // F-73R2-03 (fixbug #73): positions lọc theo tài khoản sống — không trộn vị
+  // thế của tài khoản khác/đã soft-delete (account fetch trước để lọc where).
+  const account = await db.brokerAccount.findFirst({
+    where: { deletedAt: null },
+    select: { id: true, cashBalance: true, equity: true, marginUsed: true },
+  });
+  const [instruments, positions, alerts] = await Promise.all([
     db.instrument.findMany({
       where: { isActive: true },
       select: {
@@ -59,7 +65,7 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
       },
     }),
     db.position.findMany({
-      where: { status: "OPEN" },
+      where: account ? { brokerAccountId: account.id, status: "OPEN" } : { status: "OPEN" },
       include: {
         instrument: {
           select: {
@@ -74,10 +80,6 @@ export async function buildMarketBlock(): Promise<MarketSnapshot> {
       orderBy: { createdAt: "desc" },
       take: 5,
       select: { severity: true, message: true },
-    }),
-    db.brokerAccount.findFirst({
-      where: { deletedAt: null },
-      select: { id: true, cashBalance: true, equity: true, marginUsed: true },
     }),
   ]);
 
@@ -531,26 +533,32 @@ export async function buildOpenSignalsBlock(): Promise<string> {
  * mà khối đề xuất phân bổ của A1 cần đối chiếu.
  */
 export async function buildPortfolioWeightsBlock(): Promise<string> {
-  const [positions, account] = await Promise.all([
-    db.position.findMany({
-      where: { status: "OPEN" },
-      select: {
-        quantity: true,
-        avgPrice: true,
-        instrument: {
-          select: {
-            symbol: true,
-            quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true } },
-          },
+  // F-73A-08: lọc theo tài khoản sống — không trộn vị thế của tài khoản khác/
+  // đã soft-delete (mọi consumer khác đều lọc brokerAccountId).
+  const account = await db.brokerAccount.findFirst({
+    where: { deletedAt: null },
+    select: { id: true, cashBalance: true },
+  });
+  if (!account) {
+    return [
+      "TỶ TRỌNG DANH MỤC HIỆN TẠI (%NAV — dữ liệu chuẩn cho khối đề xuất phân bổ):",
+      "- (không có tài khoản sống — không đo được tỷ trọng)",
+    ].join("\n");
+  }
+  const positions = await db.position.findMany({
+    where: { brokerAccountId: account.id, status: "OPEN" },
+    select: {
+      quantity: true,
+      avgPrice: true,
+      instrument: {
+        select: {
+          symbol: true,
+          quotes: { orderBy: { tradedAt: "desc" }, take: 1, select: { last: true } },
         },
       },
-    }),
-    db.brokerAccount.findFirst({
-      where: { deletedAt: null },
-      select: { cashBalance: true },
-    }),
-  ]);
-  const cash = account ? Number(account.cashBalance) : 0;
+    },
+  });
+  const cash = Number(account.cashBalance);
   const rows = positions.map((p) => {
     const last = p.instrument.quotes[0]?.last ?? p.avgPrice;
     return { symbol: p.instrument.symbol, mv: last * p.quantity };
@@ -808,7 +816,10 @@ export async function buildSingleRunPrompt(
       return { system: role.system, user: [market.block, valuation].join("\n\n") };
     case "liquidity":
       return { system: role.system, user: [market.block, liquidity].join("\n\n") };
-    case "portfolio-strategist":
+    case "portfolio-strategist": {
+      // F-73A-03: single-run cấp cùng block tỷ trọng như chu kỳ — hợp đồng
+      // allocation cần currentPct đo từ DB, không để LLM bịa.
+      const weights = await buildPortfolioWeightsBlock().catch(() => null);
       return {
         system: role.system,
         user: [
@@ -818,8 +829,10 @@ export async function buildSingleRunPrompt(
           valuation,
           liquidity,
           `TÍN HIỆU ĐANG MỞ:\n${openSignals}`,
+          ...(weights ? ["", weights] : []),
         ].join("\n\n"),
       };
+    }
     default:
       throw new Error(
         `Agent "${code}" là service agent — chạy qua runServiceAgent, không dùng LLM prompt.`

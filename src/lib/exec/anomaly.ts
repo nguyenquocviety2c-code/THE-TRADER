@@ -9,8 +9,8 @@
  *  2. z-score fill vs mid [DA D8 — ±2σ "rõ rệt" Empirical rule]: giá khớp
  *     so với phân phối 20 bar CLOSE trước ngày giao dịch của chính mã đó
  *     (mean20/σ20 từ Bar EOD — "mid" ≈ trung bình close 20 phiên; Quote lịch sử
- *     không lưu sâu nên mid = mean close 20 phiên, khai báo minh bạch).
- *     |z| > 2 → fill bất thường.
+ *     không lưu sâu nên mid = mean close 20 phiên, khai báo minh bạch). Cần đủ
+ *     20 bar — thiếu thì bỏ qua trung thực (F-73B-12). |z| > 2 → fill bất thường.
  *
  * RiskAlert mức NHẸ (severity INFO — không ack-bắt-buộc, đúng spec E-P1-5):
  * code EXEC_TRADE_ANOMALY, dedupe 24h (cùng họ EXEC_RECONCILE_MISMATCH).
@@ -72,13 +72,47 @@ export async function detectTradeAnomalies(
       orderBy: { executedAt: "asc" },
     });
 
-    // ── (1) z-score fill vs mean20/σ20 của Bar close ──
-    const instrumentIds = [...new Set(trades.map((t) => t.instrumentId))];
+    // ── (2-prep) Orders FILLED của window — query TRƯỚC nhánh z-score ──
+    // F-73B-02: zip order+slippage thành cặp — 2 mảng song song (filter riêng
+    // rồi forEach theo idx) lệch chỉ số khi có dòng bẩn bị lọc, gán nhầm
+    // anomaly cho lệnh khác + bỏ sót outlier thật (mô phỏng Vòng 1 đã chứng
+    // minh). F-73B-03: cần instrumentId của lệnh cho symbolById dùng chung.
+    const orders = await db.order.findMany({
+      where: {
+        status: "FILLED",
+        filledAt: { gte: from, lt: to },
+        price: { gt: 0 }, // loại dòng bẩn ngay ở query (giữ thẳng hàng mẫu)
+        avgFillPrice: { not: null },
+      },
+      select: { id: true, instrumentId: true, price: true, avgFillPrice: true, quantity: true },
+    });
+
+    // F-73B-03: gộp instrumentIds từ trades VÀ orders → symbolById DÙNG CHUNG
+    // cho z-score + IQR (map trước đây chỉ build trong nhánh z-score nên nhánh
+    // IQR rơi vào "N cp" thiếu mã thật). Chỉ query instrument + build map khi
+    // instrumentIds.length > 0 (fail-soft như cũ).
+    const instrumentIds = [
+      ...new Set([...trades.map((t) => t.instrumentId), ...orders.map((o) => o.instrumentId)]),
+    ];
     const anomalies: TradeAnomaly[] = [];
-    if (instrumentIds.length > 0) {
+    const symbolById =
+      instrumentIds.length > 0
+        ? new Map(
+            (
+              await db.instrument.findMany({
+                where: { id: { in: instrumentIds } },
+                select: { id: true, symbol: true },
+              })
+            ).map((i) => [i.id, i.symbol] as [string, string])
+          )
+        : new Map<string, string>();
+
+    // ── (1) z-score fill vs mean20/σ20 của Bar close ──
+    const tradeInstrumentIds = [...new Set(trades.map((t) => t.instrumentId))];
+    if (tradeInstrumentIds.length > 0) {
       const barFrom = new Date(from.getTime() - 60 * 86_400_000);
       const bars = await db.bar.findMany({
-        where: { instrumentId: { in: instrumentIds }, date: { gte: barFrom, lt: from } },
+        where: { instrumentId: { in: tradeInstrumentIds }, date: { gte: barFrom, lt: from } },
         orderBy: [{ instrumentId: "asc" }, { date: "desc" }],
         select: { instrumentId: true, date: true, close: true },
       });
@@ -88,17 +122,9 @@ export async function detectTradeAnomalies(
         if (arr.length < ZSCORE_BARS) arr.push(b.close); // 20 bar GẦN NHẤT trước window
         closesByInstrument.set(b.instrumentId, arr);
       }
-      const symbolById = new Map(
-        (
-          await db.instrument.findMany({
-            where: { id: { in: instrumentIds } },
-            select: { id: true, symbol: true },
-          })
-        ).map((i) => [i.id, i.symbol])
-      );
       for (const t of trades) {
         const closes = closesByInstrument.get(t.instrumentId) ?? [];
-        if (closes.length < 5) continue; // quá ít dữ liệu → trung thực bỏ qua
+        if (closes.length < ZSCORE_BARS) continue; // F-73B-12: σ từ <20 bar là nhiễu — bỏ qua trung thực
         const n = closes.length;
         const mean = closes.reduce((s, v) => s + v, 0) / n;
         const variance = closes.reduce((s, v) => s + (v - mean) * (v - mean), 0) / n;
@@ -112,25 +138,22 @@ export async function detectTradeAnomalies(
             symbol: symbolById.get(t.instrumentId) ?? "?",
             value: Number(z.toFixed(2)),
             threshold: ZSCORE_THRESHOLD,
-            detail: `Trade ${t.side} giá khớp ${t.price.toLocaleString("vi-VN")} ₫ lệch ${z >= 0 ? "+" : ""}${z.toFixed(2)}σ so mean close ${n} phiên (${Math.round(mean).toLocaleString("vi-VN")} ₫) — vượt ±${ZSCORE_THRESHOLD}σ [DA D8]`,
+            detail: `Trade ${t.side} giá khớp ${t.price.toLocaleString("vi-VN")} ₫ lệch ${z >= 0 ? "+" : ""}${z.toFixed(2)}σ so mean close ${n} phiên trước window (${Math.round(mean).toLocaleString("vi-VN")} ₫) — vượt ±${ZSCORE_THRESHOLD}σ [DA D8]`,
           });
         }
       }
     }
 
     // ── (2) IQR slippage trên lệnh FILLED của window ──
-    const orders = await db.order.findMany({
-      where: {
-        status: "FILLED",
-        filledAt: { gte: from, lt: to },
-        price: { not: null },
-        avgFillPrice: { not: null },
-      },
-      select: { id: true, price: true, avgFillPrice: true, quantity: true },
-    });
-    const slippageSamples = orders
-      .filter((o) => o.price != null && o.avgFillPrice != null && o.price > 0)
-      .map((o) => Number((((o.avgFillPrice! - o.price!) / o.price!) * 100).toFixed(3)));
+    // F-73B-02: zip order+slippage thành cặp — mỗi slip luôn đi kèm đúng lệnh
+    // của nó (đã lọc dòng bẩn ngay ở query nên mẫu thẳng hàng tuyệt đối).
+    const slippage = orders
+      .filter((o) => o.avgFillPrice != null)
+      .map((o) => ({
+        order: o,
+        slip: Number((((o.avgFillPrice! - o.price!) / o.price!) * 100).toFixed(3)),
+      }));
+    const slippageSamples = slippage.map((s) => s.slip);
     if (slippageSamples.length >= IQR_MIN_SAMPLES) {
       const sorted = [...slippageSamples].sort((a, b) => a - b);
       const q = (p: number) => {
@@ -145,19 +168,19 @@ export async function detectTradeAnomalies(
       if (iqr > 0) {
         const low = q1 - 1.5 * iqr;
         const high = q3 + 1.5 * iqr;
-        orders.forEach((o, idx) => {
-          const s = slippageSamples[idx];
-          if (s < low || s > high) {
+        for (const s of slippage) {
+          if (s.slip < low || s.slip > high) {
+            const sym = symbolById.get(s.order.instrumentId) ?? "?";
             anomalies.push({
               kind: "iqr-slippage",
-              refId: o.id,
-              symbol: `${o.quantity} cp`,
-              value: s,
-              threshold: Number((s < low ? low : high).toFixed(3)),
-              detail: `Lệnh FILLED lệch giá khớp vs đặt ${s.toFixed(2).replace(".", ",")}% — ngoài rào IQR [${low.toFixed(2).replace(".", ",")}%; ${high.toFixed(2).replace(".", ",")}%] trên ${slippageSamples.length} mẫu [DA D4]`,
+              refId: s.order.id,
+              symbol: sym,
+              value: s.slip,
+              threshold: Number((s.slip < low ? low : high).toFixed(3)),
+              detail: `Lệnh FILLED ${sym} ${s.order.quantity} cp lệch giá khớp vs đặt ${s.slip.toFixed(2).replace(".", ",")}% — ngoài rào IQR [${low.toFixed(2).replace(".", ",")}%; ${high.toFixed(2).replace(".", ",")}%] trên ${slippage.length} mẫu [DA D4]`,
             });
           }
-        });
+        }
       }
     }
 
