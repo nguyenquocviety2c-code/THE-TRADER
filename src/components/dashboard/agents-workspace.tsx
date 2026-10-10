@@ -38,6 +38,8 @@ import { useSingleAgentRun, RateLimitError } from "@/hooks/use-agent-actions";
 import { AgentRosterCard } from "@/components/dashboard/agent-roster-card";
 import { AgentDetailPanel } from "@/components/dashboard/agent-detail-panel";
 import { CoverageMatrix } from "@/components/dashboard/coverage-matrix";
+// E-P0-5 (EXECUTION_OPS_BLUEPRINT v1.1): khối KPI vận hành nhóm executive.
+import { ExecutiveKpi } from "@/components/dashboard/executive-kpi";
 import { cn } from "@/lib/utils";
 import type { AgentCard, AgentsResponse } from "@/lib/types";
 import type { ScorecardRow } from "@/lib/research/scorecard";
@@ -296,6 +298,10 @@ export function AgentsWorkspace() {
           </div>
         </CardContent>
       </Card>
+
+      {/* E-P0-5 — KPI vận hành nhóm Điều hành & Thực thi (funnel + churn + AOV +
+          slippage) — đặt trên roster để trader nhìn hiệu suất nhóm trước chi tiết */}
+      <ExecutiveKpi />
 
       {/* Body: roster (trái, cuộn dọc khi dài ở desktop) + panel chi tiết/chat (phải) */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">

@@ -2,6 +2,11 @@ import { db } from "@/lib/db";
 import { getTradingMode, liveTradingGate } from "@/lib/trading-mode";
 import { markSource } from "@/lib/sources";
 import { getConsensusSetting } from "@/lib/consensus";
+// E-P0-1 (REV-2 review #69): literal 0.0015 tại đây là nguồn phí thứ 3/3 —
+// chuyển về nguồn đơn src/lib/exec/constants.ts (guard đơn vị percent↔fraction).
+import { FEE_RATE } from "@/lib/exec/constants";
+// E-P0-2 (EXECUTION_OPS_BLUEPRINT v1.1): sinh ExecutionPlan khi APPROVE/convert.
+import { buildExecutionPlan, planToNote, describeExecutionPlan } from "@/lib/exec/plan";
 
 /**
  * MỘT NGUỒN DUY NHẤT cho toán tạo lệnh giấy từ tín hiệu
@@ -388,7 +393,7 @@ export async function createPaperOrderFromSignal(
   // 2 request APPROVE đồng thời đều vượt check → 2 lệnh, trừ tiền mặt 2 lần.
   // Claim atomic: updateMany có điều kiện status=ACTIVE && actedAt=null — chỉ
   // MỘT request thắng; request thua nhận 409 đúng nghĩa "đã chuyển lệnh".
-  const feeBigInt = BigInt(Math.round(0.0015 * price * quantity)); // F-201: phí 0,15% notional
+  const feeBigInt = BigInt(Math.round(FEE_RATE * price * quantity)); // F-201: phí 0,15% notional — E-P0-1 đơn nguồn
   let order;
   try {
     order = await db.$transaction(async (tx) => {
@@ -436,6 +441,30 @@ export async function createPaperOrderFromSignal(
     throw txErr; // lỗi DB thật — để tầng trên xử lý 500
   }
 
+  // ── E-P0-2 (EXECUTION_OPS_BLUEPRINT v1.1): sinh ExecutionPlan đi kèm lệnh ──
+  // Plan cần orderId nên viết sau create; lệnh vừa sinh PENDING chưa thể khớp
+  // trong khoảng mili-giây này (tick mutex 10s) — kể cả bị khớp trước update thì
+  // note plan vẫn vô hại (guard deadline chỉ áp lệnh PENDING/PARTIALLY_FILLED).
+  // Fail-soft: lỗi ghi plan KHÔNG làm hỏng lệnh — chỉ mất guard hạn chờ.
+  let plan: ReturnType<typeof buildExecutionPlan> | null = null;
+  try {
+    plan = buildExecutionPlan({
+      orderId: order.id,
+      quantity,
+      price,
+      sizing: opts.sizing,
+      humanNote: note,
+      createdAt: order.createdAt ?? new Date(),
+    });
+    await db.order.update({
+      where: { id: order.id },
+      data: { note: planToNote(plan) },
+    });
+  } catch (planErr) {
+    plan = null;
+    console.error("[signal-execution:plan]", planErr);
+  }
+
   await db.auditLog.create({
     data: {
       userId: user.id,
@@ -450,6 +479,8 @@ export async function createPaperOrderFromSignal(
         signalId: signal.id,
         mode: getTradingMode().mode,
         sizing: opts.sizing,
+        // E-P0-2: tóm tắt ExecutionPlan đi kèm lệnh (đầy đủ JSON nằm trong Order.note)
+        plan: plan ? describeExecutionPlan(plan) : null,
       }),
     },
   });

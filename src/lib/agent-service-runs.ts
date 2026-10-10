@@ -18,6 +18,9 @@ import { llmStatus } from "@/lib/llm";
 import { getTradingMode, TRADING_MODE_LABEL } from "@/lib/trading-mode";
 import { sessionPhase, SESSION_PHASE_LABEL } from "@/lib/market-session";
 import { ROSTER_BY_CODE } from "@/lib/agent-roster";
+// E-P0-3/E-P0-4 (EXECUTION_OPS_BLUEPRINT v1.1): A11 ReconciliationReport + A12 CommittedCashView.
+import { runReconciliation, reconcileReportSummary } from "@/lib/exec/reconciliation";
+import { computeCommittedCashView, committedViewSummary } from "@/lib/exec/committed";
 import { latestFeatures, loadTopSeries, latestFeatureSnapshot } from "@/lib/ml/features";
 import { topByAdtv } from "@/lib/dated-series";
 import {
@@ -708,27 +711,36 @@ async function runCompliance(): Promise<ServiceRunResult> {
 
 /* ───────────────────── Nhóm 3 · executive (service) ───────────────────── */
 
-/** A11 Settlement — đối chiếu khớp lệnh, phí, thuế 24h. */
+/** A11 Settlement — ReconciliationReport 6 phép idempotent (E-P0-3, v1.1).
+ *  Trước P0: reduce Trade cửa sổ 24h trượt theo run — cùng 1 Trade bị đếm ở
+ *  nhiều chu kỳ, 0 phép đối chiếu (báo cáo suông). Giờ: checkpoint AppSetting
+ *  exec.reconcile + 6 phép (kèm order-fee-ledger REV-8 + whitelist REV-12).
+ *  Fail-soft §6.6: lỗi query → DEGRADED, không sập chu kỳ. */
 async function runSettlement(): Promise<ServiceRunResult> {
-  const since24h = new Date(Date.now() - 24 * 3_600_000);
-  const trades = await db.trade.findMany({
-    where: { executedAt: { gte: since24h } },
-    select: { side: true, quantity: true, price: true, fee: true, tax: true },
-  });
-  const count = trades.length;
-  const totalFee = trades.reduce((s, t) => s + Number(t.fee), 0);
-  const totalTax = trades.reduce((s, t) => s + Number(t.tax), 0);
-  const totalValue = trades.reduce((s, t) => s + t.quantity * t.price, 0);
-
-  return {
-    content: `Thanh toán bù trừ 24h: ${count} lệnh khớp · giá trị ${vnd(totalValue)} ₫ · phí môi giới ${vnd(totalFee)} ₫ · thuế TNCN bán ${vnd(totalTax)} ₫.${count === 0 ? " Không có giao dịch mới — sổ sách đã đối chiếu." : ""}`,
-    reasoning: "Tổng hợp Trade 24h qua (fee/tax BigInt → Number).",
-    sentiment: null,
-    output: { count24h: count, totalValue, totalFee, totalTax },
-  };
+  try {
+    const report = await runReconciliation();
+    return {
+      content: reconcileReportSummary(report),
+      reasoning:
+        "ReconciliationReport 6 phép idempotent — checkpoint AppSetting exec.reconcile (E-P0-3 EXECUTION_OPS_BLUEPRINT v1.1).",
+      sentiment: report.verdict === "MISMATCH" ? "bearish" : null,
+      output: report as unknown as Record<string, unknown>,
+    };
+  } catch (err) {
+    console.error("[agent-service-runs:settlement]", err);
+    return {
+      content:
+        "Bù trừ sổ sách: DEGRADED — lỗi truy vấn dữ liệu đối chiếu (không sập chu kỳ, §6.6 graceful). Chạy lại chu kỳ sau.",
+      reasoning: "runReconciliation throw — fail-soft trả verdict DEGRADED.",
+      sentiment: null,
+      output: { verdict: "DEGRADED", error: err instanceof Error ? err.message : String(err) },
+    };
+  }
 }
 
-/** A12 Cash Management — dòng tiền & sức mua ước tính. */
+/** A12 Cash Management — CommittedCashView (E-P0-4, v1.1 — REV-1):
+ *  sức mua KỂ CẢ cam kết tiềm năng (tín hiệu ACTIVE nav5pct + notional còn lại
+ *  của lệnh PENDING/PARTIALLY_FILLED — cam kết thật phủ cả 2 đường sizing). */
 async function runCashManagement(): Promise<ServiceRunResult> {
   const snap = await portfolioSnapshot();
   const cashCfg = ROSTER_BY_CODE.get("cash-management")?.config as
@@ -736,18 +748,34 @@ async function runCashManagement(): Promise<ServiceRunResult> {
     | undefined;
   const factor = cashCfg?.buyingPowerFactor ?? 0.5;
   const marginMin = cashCfg?.marginRoomMinVnd ?? 500_000_000;
-  // AUD-CODE #15b: trước đây cash + equity×0.5 đếm KÉP tiền mặt (equity = cash + GTTH).
-  // Đúng: sức mua = cash + GTTH vị thế mở × factor − margin đang dùng
-  const positionsMv = Math.max(0, snap.equity - snap.cash);
-  const buyingPower = snap.cash + positionsMv * factor - snap.marginUsed;
-  const tight = buyingPower < marginMin; // marginRoomMinVnd từ roster config
 
-  return {
-    content: `Dòng tiền: tiền mặt ${vnd(snap.cash)} ₫ · NAV ${vnd(snap.equity)} ₫ · margin đang dùng ${vnd(snap.marginUsed)} ₫ · sức mua ước tính ${vnd(buyingPower)} ₫ (tiền mặt + GTTH vị thế × ${factor} − margin; không phải hạn mức thật VNDIRECT).${tight ? ` Sức mua dưới hạn mức nội bộ ${vnd(marginMin)} ₫ — hạn chế tín hiệu MUA quy mô lớn.` : ""}`,
-    reasoning: "cash + positionsMv×factor − marginUsed (AUD-CODE #15b — không đếm kép cash).",
-    sentiment: tight ? "neutral" : null,
-    output: { cash: snap.cash, equity: snap.equity, marginUsed: snap.marginUsed, buyingPower },
-  };
+  try {
+    const view = await computeCommittedCashView({
+      cash: snap.cash,
+      equity: snap.equity,
+      marginUsed: snap.marginUsed,
+      buyingPowerFactor: factor,
+      marginRoomMinVnd: marginMin,
+    });
+    return {
+      content: committedViewSummary(view),
+      reasoning:
+        "buyingPower = cash + GTTH×factor − margin (AUD-CODE #15b) + committed view tín hiệu ACTIVE & lệnh PENDING (E-P0-4 v1.1 — REV-1).",
+      sentiment: view.committedTight || view.tight ? "neutral" : null,
+      output: view as unknown as Record<string, unknown>,
+    };
+  } catch (err) {
+    console.error("[agent-service-runs:cash-management]", err);
+    // Fallback công thức chuẩn AUD-CODE #15b — không đếm kép cash
+    const positionsMv = Math.max(0, snap.equity - snap.cash);
+    const buyingPower = snap.cash + positionsMv * factor - snap.marginUsed;
+    return {
+      content: `Dòng tiền: tiền mặt ${vnd(snap.cash)} ₫ · NAV ${vnd(snap.equity)} ₫ · sức mua ước tính ${vnd(buyingPower)} ₫ (committed view DEGRADED — lỗi truy vấn, §6.6).`,
+      reasoning: "computeCommittedCashView throw — fallback công thức AUD-CODE #15b.",
+      sentiment: null,
+      output: { cash: snap.cash, equity: snap.equity, marginUsed: snap.marginUsed, buyingPower, verdict: "DEGRADED" },
+    };
+  }
 }
 
 /* ───────────── Nhóm 5 · ml + rl (phiên #35 — mô hình học THẬT) ───────────── */

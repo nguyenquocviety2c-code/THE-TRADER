@@ -454,6 +454,10 @@ model Trade {
 
   @@index([orderId])
   @@index([instrumentId, executedAt(sort: Desc)])
+  // E-P0-3 (REV-9 review #69): window query đối chiếu ReconciliationReport lọc
+  // THEO executedAt trên TOÀN bảng — composite [instrumentId, executedAt] không
+  // phục vụ được (instrumentId đứng trước chặn index scan theo executedAt).
+  @@index([executedAt])
 }
 
 // ─────────────────────────────────────────────────────────────────

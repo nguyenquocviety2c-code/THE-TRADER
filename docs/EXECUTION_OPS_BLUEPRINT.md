@@ -1,8 +1,8 @@
 # EXECUTION & OPERATIONS BLUEPRINT — NHÓM ĐIỀU HÀNH & THỰC THI: CHỦ TỊCH TỔNG HỢP, PHÊ DUYỆT LỆNH, BÙ TRỪ SỔ SÁCH & DÒNG TIỀN
 
 > **Project:** The Trader — Hệ thống giao dịch đa agent (VNDIRECT)
-> **Document:** `docs/EXECUTION_OPS_BLUEPRINT.md` · **Version:** 1.0 · **Created:** 2026-10-09 (phiên #66 — kế thừa trực tiếp bản phân tích ánh xạ tài liệu EXEC-DOC-MAP-1 cùng phiên)
-> **Status:** **BẢN THIẾT KẾ — CHỜ TRADER DUYỆT KHUNG P0** (theo đúng quy trình blueprint: soạn → chốt → triển khai → fixbug, như DATA_PLATFORM_BLUEPRINT #54→#55→#57)
+> **Document:** `docs/EXECUTION_OPS_BLUEPRINT.md` · **Version:** 1.1 · **Created:** 2026-10-09 (phiên #66 — kế thừa trực tiếp bản phân tích ánh xạ tài liệu EXEC-DOC-MAP-1 cùng phiên) · **v1.1:** 2026-10-09 (phiên #70)
+> **Status:** **P0 ĐÃ ĐƯỢC TRADER DUYỆT — 3 ĐIỀU KIỆN BẮT BUỘC CỦA REVIEW #69 ĐÃ HÒA NHẬP — ĐANG TRIỂN KHAI** (review v1.0 chấm 8.6/10 · APPROVE WITH AMENDMENTS, commit `9f20ae5`)
 > **Nguồn tri thức (bắt buộc đọc trước khi triển khai):** 4 tài liệu user tải lên, lưu tại `upload/` (gitignored — không hiện trong cây thư mục git, đã đọc trọn **79 trang**):
 > - `upload/Machine Learning.pdf` — 20 trang (viết tắt **[ML]**)
 > - `upload/MATH.pdf` — 14 trang (**[MATH]**)
@@ -36,8 +36,10 @@
           │  consensusGate snapshot bind theo assessment sinh tín hiệu (B9)
           ▼
         Signal {ACTIVE, expiresAt +3 ngày, audit SIGNAL_CREATED}
-          │                                    ┌─ Đợt E-service: A11 reduce 24h · A12 buyingPower
-Đợt F    A10 "ghi nhận" (0 hành động thực thi) ┘
+          │
+Đợt F    A10 "ghi nhận" (0 hành động thực thi)
+          │
+Đợt E-service (route:1180 — chạy SAU Chairman & Đợt F): A11 reduce 24h · A12 buyingPower
           │
 Trader   POST /api/signals/[id]/decision APPROVE → createPaperOrderFromSignal(nav5pct)
          hoặc POST /convert (budget50m) — claim atomic AUD-CODE #2 · LIMIT PENDING
@@ -48,7 +50,7 @@ Tick 10s fill engine (tick/route.ts) — claim PENDING→FILLED · fee 0,15% · 
 Chu kỳ sau: A11 lại reduce 24h — KHÔNG đụng đến phép đối chiếu nào
 ```
 
-**Điểm nghẽn trách nhiệm:** "thực thi" thật phân tán ở 3 nơi ngoài nhóm (signal-execution.ts / fill engine tick / trader tự bấm). A10 đúng vai "người ghi biên bản an toàn" nhưng **sai phạm vi chức trách roster** (tách lệnh + theo dõi khớp + báo cáo). A11 chạy TRƯỚC Chủ tịch (Đợt E-service) nên "báo cáo sau giao dịch" của chu kỳ thực ra là báo cáo **trước** tín hiệu của chính chu kỳ đó.
+**Điểm nghẽn trách nhiệm:** "thực thi" thật phân tán ở 3 nơi ngoài nhóm (signal-execution.ts / fill engine tick / trader tự bấm). A10 đúng vai "người ghi biên bản an toàn" nhưng **sai phạm vi chức trách roster** (tách lệnh + theo dõi khớp + báo cáo). *(Hiệu chỉnh v1.1 — REV-5 review #69: đo lại route:1180, WAVE_E_SERVICE_CODES chạy **SAU** Chủ tịch & Đợt F — bản v1.0 ghi "A11 chạy trước Chủ tịch" là sai; hệ quả đúng: A11 "báo cáo sau giao dịch" về mặt thời điểm là đúng nghĩa, nhưng cửa sổ 24h trượt làm cùng 1 Trade nhảy số giữa các chu kỳ — giữ nguyên khoảng trống G6).*
 
 ### 0.3 Những gì ĐÃ TỐT — giữ nguyên, không làm lại
 
@@ -276,12 +278,13 @@ S1/KPI   Bảng KPI vận hành nhóm (funnel + conversion + churn + AOV) [E-P0-
 | Hợp đồng | Định nghĩa rút gọn | Chủ sở hữu | Hạng mục |
 |---|---|---|---|
 | **`ExecutionPlan`** | `{orderId, style: "SINGLE"\|"TWAP", slices: [{seq, quantity, price, afterTick}], slippageBudgetPct, deadlineTicks, rationale}` — sinh SAU APPROVE, lưu `Order.note` JSON (P0) hoặc bảng riêng (P1 nếu tách thật) | A10 | E-P0-2 |
-| **`ReconciliationReport`** | `{window: {fromCheckpoint, toNow}, expectations: [{name, expected, actual, diff, ok}], verdict: "BALANCED"\|"MISMATCH", severity}` — 5 phép: order-coverage · fee-recompute · tax-recompute · cash-delta · position-delta | A11 | E-P0-3 |
-| **`CommittedCashView`** | `{cash, buyingPower, committedNotional, committedBuyingPower, activeSignals: n, tight: bool}` — committed = Σ (sizing nav5pct của tín hiệu ACTIVE) | A12 | E-P0-4 |
+| **`ReconciliationReport`** | `{window: {fromCheckpoint, toNow}, expectations: [{name, expected, actual, diff, ok}], verdict: "BALANCED"\|"MISMATCH"\|"DEGRADED", severity}` — **6 phép** (v1.1 thêm phép 6 theo REV-8 review #69): order-coverage · fee-recompute · tax-recompute · cash-delta · position-delta · **order-fee-ledger (Order.fee == Σ Trade.fee của cùng order — fill engine ghi 2 sổ phí tick:257 Order + tick:262 Trade)** | A11 | E-P0-3 |
+| **`CommittedCashView`** | `{cash, buyingPower, committedNotional, committedBuyingPower, activeSignals: n, pendingOrders: n, tight: bool}` — committed = **Σ sizing nav5pct của tín hiệu ACTIVE (ước tính) + Σ notional còn lại của Order PENDING/PARTIALLY_FILLED ((quantity − filledQuantity) × price — cam kết THẬT)** *(v1.1 — REV-1 review #69: phải cộng PENDING orders; tín hiệu APPROVE rời tập ACTIVE đúng lúc lệnh PENDING sinh — không cộng PENDING thì mù đúng chỗ cam kết thật; đọc từ chính Order nên tự nhiên phủ cả 2 đường sizing nav5pct/budget50m)* | A12 | E-P0-4 |
 | **`ChairmanScorecard`** | `{window, signals, precision, recall, f1, aucPr, calibration: {LOW/MEDIUM/HIGH → winrate}, targetRmse}` — nhãn = kết quả 5 phiên sau (đối chiếu Bar) | kiểm định (API route) | E-P1-4 |
 
-### 3.3 Đơn vị hoá cấu hình (giải G2 "1 sự thật 2 nguồn")
+### 3.3 Đơn vị hoá cấu hình (giải G2 "1 sự thật 2 nguồn" — hiệu chỉnh v1.1: **3 nguồn**, không phải 2)
 
+- **Thực đo review #69 (REV-2): biểu phí sống ở 3 nơi với 2 đơn vị khác nhau** — `tick/route.ts:60-61` (FEE_RATE=0.0015/TAX_RATE=0.001 — **fraction**) · `signal-execution.ts:391` (literal `0.0015` — fraction) · roster config A11 `{feePct: 0.15, taxSellPct: 0.1}` (**percent** — khác đơn vị 100×!). Module mới `src/lib/exec/constants.ts` chuyển percent→fraction đúng MỘT chỗ kèm **guard biên** `0 < rate ≤ 0.01` — ai đó sửa nhầm đơn vị sẽ nổ ngay lúc import, không chạy im lặng lệch 100× (E-P0-1).
 - `FEE_RATE`/`TAX_RATE` chuyển về **1 nguồn duy nhất** đọc từ config roster A11 (`feePct`/`taxSellPct`) — fill engine + reconciliation + signal-execution cùng import (E-P0-1).
 - `sliceCount`/`maxSlippagePct`/`orderType` của A10 **có consumer** trong ExecutionPlan builder (E-P0-1/E-P0-2).
 - `targetPositions`/`rebalanceThresholdPct`/`style` của A1 **có consumer** trong khối đề xuất phân bổ (E-P1-1).
@@ -294,10 +297,10 @@ S1/KPI   Bảng KPI vận hành nhóm (funnel + conversion + churn + AOV) [E-P0-
 
 | # | Hạng mục | Nguồn tài liệu | Files chạm (dự kiến) | Thử nghiệm nghiệm thu |
 |---|---|---|---|---|
-| **E-P0-1** | **Đơn vị hoá biểu phí + config có consumer**: `FEE_RATE=0.0015`/`TAX_RATE=0.001` từ 1 module (đọc roster config A11) — tick route + signal-execution + reconciliation cùng nguồn; đổi biểu phí sửa 1 chỗ | [DA tr23-25 ACID — "đảm bảo giao dịch luôn đáng tin cậy"] · [ML M14 — kiểm dữ liệu vào/ra] | `agent-roster.ts` (export hằng số từ config) · `market/tick/route.ts` · `signal-execution.ts` · module mới `src/lib/exec/constants.ts` | exec-verify EX-A1: 3 nơi import cùng 1 hằng số (rg không còn hardcode 0.0015/0.001 rải rác); fill thật 1 lệnh test → fee khớp |
-| **E-P0-2** | **`ExecutionPlan` sinh khi APPROVE** (P0: `style=SINGLE` 1 lát đúng hiện trạng + `slippageBudgetPct` từ config + `deadlineTicks` mặc định 1440 tick ≈ 4h phiên); guard deadline: tick expirer hoãn-huỷ lệnh PENDING quá hạn (audit `ORDER_EXPIRED_BY_PLAN`) — kế hoạch đi kèm lệnh chứ KHÔNG tự đặt thêm | [ML M13 vòng agent] · [MATH H3 norm L∞/H7 ε-tolerance] · [DL L6 state/action formalism] · [DA D14 conditional edges] | `signal-execution.ts` (sinh plan vào `Order.note`) · `market/tick/route.ts` (guard deadline) · API trả plan cho UI | EX-A2: APPROVE 1 tín hiệu → Order.note có plan JSON parse được; lệnh PENDING sống > deadline → EXPIRED + audit; E2E UI hiện plan ở tab Lệnh |
-| **E-P0-3** | **A11 → `ReconciliationReport` 5 phép idempotent**: checkpoint `lastReconciledAt` (AppSetting) — window `[checkpoint, now]` không trùng lặp (giải G6); 5 phép: (1) mọi Order kết thúc đều có Trade đủ khối lượng (partial = PARTIALLY_FILLED hợp lệ), (2) fee mỗi Trade = feePct×notional (recompute), (3) tax bán = taxSellPct×notional, (4) delta cash = Σ(±notional ∓ fee ∓ tax), (5) delta position = Σ khối lượng theo hướng. MISMATCH → RiskAlert (không "tự lành") | [DA tr13 Great Expectations] · [DA tr18-20 + MATH H4 — HT 6 bước H0 "sổ khớp 0 lệch"] · [DA D11 ACID/window] · [DA D2 cumsum] | `agent-service-runs.ts` (runSettlement viết lại) · `riskAlert` | EX-B1-B5: cài dữ liệu test tự tạo (trade fee sai 1 dòng) → expectation fail đúng 1 phép + verdict MISMATCH; chạy 2 lần liên tiếp → window 2 lần giao không đếm trùng (idempotent) |
-| **E-P0-4** | **A12 `CommittedCashView`**: giữ buyingPower chuẩn + thêm committed = Σ sizing nav5pct của tín hiệu ACTIVE (giá hiện tại × khối lượng dự kiến) → `committedBuyingPower` hiển thị (KHÔNG chặn — chỉ tham mưu + nhãn "ước tính nội bộ") | [MATH H2 E[X] kỳ vọng] · [DA tr1 KPI] | `agent-service-runs.ts` (runCashManagement mở rộng) | EX-C1: tạo 2 tín hiệu ACTIVE → committed tăng đúng 2 × nav5pct; tín hiệu EXPIRED → committed giảm lại |
+| **E-P0-1** | **Đơn vị hoá biểu phí + config có consumer**: `FEE_RATE=0.0015`/`TAX_RATE=0.001` từ 1 module (đọc roster config A11) — tick route + signal-execution + reconciliation cùng nguồn; đổi biểu phí sửa 1 chỗ. **Hiệu chỉnh v1.1 (REV-2): đếm đủ 3 nguồn phí** (tick:60-61 fraction · signal-execution:391 literal · roster:227 percent) + **guard đơn vị percent↔fraction**: module chuyển percent→fraction đúng 1 chỗ, assert biên `0 < rate ≤ 0.01` — sửa nhầm đơn vị lệch 100× sẽ nổ lúc import chứ không chạy im lặng | [DA tr23-25 ACID — "đảm bảo giao dịch luôn đáng tin cậy"] · [ML M14 — kiểm dữ liệu vào/ra] | `agent-roster.ts` (export hằng số từ config) · `market/tick/route.ts` · `signal-execution.ts` (dòng 391) · module mới `src/lib/exec/constants.ts` | exec-verify EX-A1: 3 nơi import cùng 1 hằng số (rg không còn hardcode 0.0015/0.001 rải rác); EX-A3: guard đơn vị — feePct 0.15 → 0.0015 fraction, giá trị ngoài biên → throw; fill thật 1 lệnh test → fee khớp |
+| **E-P0-2** | **`ExecutionPlan` sinh khi APPROVE** (P0: `style=SINGLE` 1 lát đúng hiện trạng + `slippageBudgetPct` từ config + `deadlineTicks` mặc định 1440 tick ≈ 4h phiên liên tục); guard deadline: tick expirer hoãn-huỷ lệnh PENDING quá hạn (audit `ORDER_EXPIRED_BY_PLAN`) — kế hoạch đi kèm lệnh chứ KHÔNG tự đặt thêm. **Hiệu chỉnh v1.1 (REV-7): `deadlineTicks` chỉ đếm tick TRONG phiên liên tục** (09:15–11:30 + 13:00–14:45, bỏ nghỉ trưa + ngày nghỉ lễ/T7-CN theo vn-calendar — 1440 tick @10s ≈ đúng 1 phiên giao dịch); lệnh không có plan (tạo trước P0 / thủ công) không bị ép hạn mới | [ML M13 vòng agent] · [MATH H3 norm L∞/H7 ε-tolerance] · [DL L6 state/action formalism] · [DA D14 conditional edges] | `signal-execution.ts` (sinh plan vào `Order.note`) · `market/tick/route.ts` (guard deadline) · module mới `src/lib/exec/plan.ts` · API trả plan cho UI | EX-A2: APPROVE 1 tín hiệu → Order.note có plan JSON parse được; lệnh PENDING sống > deadline → EXPIRED + audit; E2E UI hiện plan ở tab Lệnh |
+| **E-P0-3** | **A11 → `ReconciliationReport` 6 phép idempotent**: checkpoint `lastReconciledAt` (AppSetting) — window `[checkpoint, now]` không trùng lặp (giải G6); 6 phép: (1) mọi Order kết thúc đều có Trade đủ khối lượng (partial = PARTIALLY_FILLED hợp lệ), (2) fee mỗi Trade = feePct×notional (recompute), (3) tax bán = taxSellPct×notional, (4) delta cash = Σ(±notional ∓ fee ∓ tax), (5) delta position = Σ khối lượng theo hướng, **(6) Order.fee == Σ Trade.fee của cùng order (REV-8 v1.1)**. MISMATCH → RiskAlert (không "tự lành"). **Hiệu chỉnh v1.1 (REV-12): whitelist semantics phép cash-delta** — mọi write cash ngoài fill-engine (seed/script/manual) sẽ gây MISMATCH CÓ CHỦ ĐÍCH: khai báo rõ "reset checkpoint sau seed/manual write", phép đối chiếu đo đúng ranh giới này | [DA tr13 Great Expectations] · [DA tr18-20 + MATH H4 — HT 6 bước H0 "sổ khớp 0 lệch"] · [DA D11 ACID/window] · [DA D2 cumsum] | `agent-service-runs.ts` (runSettlement viết lại) · module mới `src/lib/exec/reconciliation.ts` · `riskAlert` · `prisma/schema.prisma` (thêm `@@index([executedAt])` cho Trade — REV-9 v1.1: window query không dùng được composite [instrumentId, executedAt]) | EX-B1-B6: cài dữ liệu test tự tạo (trade fee sai 1 dòng) → expectation fail đúng 1 phép + verdict MISMATCH; chạy 2 lần liên tiếp → window 2 lần giao không đếm trùng (idempotent); MISMATCH → RiskAlert |
+| **E-P0-4** | **A12 `CommittedCashView`**: giữ buyingPower chuẩn + thêm committed = Σ sizing nav5pct của tín hiệu ACTIVE (ước tính, giá hiện tại) **+ Σ notional còn lại của Order PENDING/PARTIALLY_FILLED** (REV-1 v1.1: lệnh đã duyệt là cam kết THẬT — đọc (quantity − filledQuantity) × price từ chính Order, tự nhiên phủ cả 2 đường sizing nav5pct lẫn budget50m) → `committedBuyingPower` hiển thị (KHÔNG chặn — chỉ tham mưu + nhãn "ước tính nội bộ") | [MATH H2 E[X] kỳ vọng] · [DA tr1 KPI] | `agent-service-runs.ts` (runCashManagement mở rộng) · module mới `src/lib/exec/committed.ts` | EX-C1: tạo 2 tín hiệu ACTIVE → committed tăng đúng 2 × nav5pct; tín hiệu EXPIRED → committed giảm lại; **APPROVE 1 tín hiệu → lệnh PENDING thay tín hiệu trong tập cam kết — committed KHÔNG tụt mù (REV-1); lệnh FILLED → committed giảm đúng phần đã khớp** |
 | **E-P0-5** | **KPI vận hành nhóm (funnel)**: API + UI khối KPI — tín hiệu sinh (30 ngày) → % duyệt → % lệnh → % khớp · tỷ lệ EXPIRED-chưa-duyệt ("churn") · AOV lệnh · phân bố slippage thực (box plot [DA D5]) | [DA tr1 Conversion/Churn/AOV] · [DA D10 value_counts/groupby] | API route mới `/api/exec/kpi` (hoặc gộp `/api/agents` payload) · UI `agents-workspace` khối nhóm executive | EX-D1: dữ liệu test 10 tín hiệu (5 duyệt, 3 expired, 2 chờ) → KPI tính đúng bằng tay; E2E bảng hiển thị |
 
 ### P1 — Nâng năng lực (vẫn 0 tự động hoá vượt phê duyệt)
@@ -352,11 +355,13 @@ Kèm: `bunx tsc --noEmit` · `bun run lint` · E2E agent-browser **qua gateway :
 
 ## §7. Câu hỏi mở cho trader (trả lời trước khi chốt P0)
 
-1. **E-P0-2 — nơi lưu ExecutionPlan**: `Order.note` JSON (P0 gọn, không migration) hay bảng `ExecutionPlan` riêng (sạch hơn cho P1 tách thật)? *(đề xuất: note JSON ở P0 — migration chỉ khi làm E-P1-2)*
-2. **E-P0-2 — deadline mặc định**: 1440 tick (≈4h phiên liên tục) có hợp lý, hay muốn tính theo `expiresAt` tín hiệu (3 ngày)?
-3. **E-P0-4 — committedBuyingPower âm**: chỉ badge cảnh báo, hay cần RiskAlert ack-bắt-buộc?
-4. **E-P1-1 — phạm vi đề xuất phân bổ**: chỉ narrative + bảng tỷ trọng trong output Chủ tịch (đề xuất), hay muốn push vào prompt các chu kỳ sau như ngữ cảnh?
-5. **E-P1-3 — ngôn ngữ dự báo dòng tiền**: TypeScript thuần (baseline tuyến tính + quantile) đủ cho P1, hay mở worker Python GRU ngay từ đầu?
+> **Ghi nhận v1.1 (phiên #70):** trader duyệt review #69 và chỉ thị bắt đầu P0 → 5 câu lấy **mặc định theo đề xuất gốc của từng câu** (đổi sau không phá hợp đồng — đều là tham số/config, không phải thay đổi schema): (1) `Order.note` JSON ở P0 · (2) deadline 1440 tick phiên liên tục ≈ 1 phiên · (3) committedBuyingPower âm → badge cảnh báo, không ack-bắt-buộc · (4) E-P1-1 chỉ narrative + bảng · (5) E-P1-3 TypeScript thuần baseline trước. Trader muốn đổi câu nào — nói trong chat, cập nhật constants + changelog.
+
+1. **E-P0-2 — nơi lưu ExecutionPlan**: `Order.note` JSON (P0 gọn, không migration) hay bảng `ExecutionPlan` riêng (sạch hơn cho P1 tách thật)? *(đề xuất: note JSON ở P0 — migration chỉ khi làm E-P1-2)* ✅ mặc định: note JSON
+2. **E-P0-2 — deadline mặc định**: 1440 tick (≈4h phiên liên tục) có hợp lý, hay muốn tính theo `expiresAt` tín hiệu (3 ngày)? ✅ mặc định: 1440 tick (chỉ đếm tick trong phiên — REV-7)
+3. **E-P0-4 — committedBuyingPower âm**: chỉ badge cảnh báo, hay cần RiskAlert ack-bắt-buộc? ✅ mặc định: badge (P0 không chặn — không tạo áp lực ack rào)
+4. **E-P1-1 — phạm vi đề xuất phân bổ**: chỉ narrative + bảng tỷ trọng trong output Chủ tịch (đề xuất), hay muốn push vào prompt các chu kỳ sau như ngữ cảnh? ✅ mặc định: narrative + bảng (P1)
+5. **E-P1-3 — ngôn ngữ dự báo dòng tiền**: TypeScript thuần (baseline tuyến tính + quantile) đủ cho P1, hay mở worker Python GRU ngay từ đầu? ✅ mặc định: TypeScript thuần trước (P1)
 
 ---
 
@@ -379,5 +384,14 @@ Kèm: `bunx tsc --noEmit` · `bun run lint` · E2E agent-browser **qua gateway :
 - **§2 là trọng tâm**: ánh xạ chi tiết **44 cụm nội dung** từ 4 tài liệu upload (ML 14 · MATH 8 · DA 15 · DL 7) — mỗi cụm ghi rõ trang gốc, ai dùng, áp vào hạng mục nào; ma trận tổng 2.5; danh mục loại có chủ đích 2.6; stack kết luận 2.7.
 - §0 chẩn đoán trung thực đo từ mã nguồn: 4 bảng roster-vs-code + dòng chảy tín hiệu→lệnh→khớp→bù trừ + 7 khoảng trống (G1-G7); xác nhận bằng rg: config `sliceCount/maxSlippagePct/orderType/taxSellPct/feePct` **0 consumer** — biểu phí thật hardcode 2 hằng số ở `tick/route.ts:60-61`.
 - 10 điểm ĐÃ TỐT giữ nguyên (§0.3) — không làm lại an toàn phê duyệt/claim atomic/VETO/gate LIVE.
-- Kế hoạch 5 P0 + 5 P1 + 5 P2 — **mọi hạng mục gắn nhãn nguồn tài liệu** (không hạng mục "không rõ gốc"); 5 câu hỏi mở §7 cho trader; 5 nguyên tắc bất khả xâm phạm §6 bổ sung vào 5 điều sứ mệnh §1.1.
+- Kế hoạch 5 P0 + 5 P1 + 5 P2 — **mọi hạng mục gắn nhãn nguồn tài liệu** (không hạng mục "không rõ gốc"); 5 câu hỏi mở §7 cho trader; 7 nguyên tắc bất khả xâm phạm §6 bổ sung vào 5 điều sứ mệnh §1.1. *(Hiệu chỉnh v1.1 — REV-6: bản ghi "5 nguyên tắc" ở đây sai — §6 có **7** nguyên tắc.)*
 - Trạng thái: **BẢN THIẾT KẾ — chưa triển khai code nào** (chỉ document). Chờ trader duyệt khung P0 + trả lời 5 câu hỏi §7 trước khi lên code (quy trình soạn→chốt→triển khai→fixbug như DATA_PLATFORM_BLUEPRINT #54→#55→#57).
+
+### v1.1 — 2026-10-09 (phiên #70)
+- **Trader duyệt review #69** (chấm 8.6/10 · APPROVE WITH AMENDMENTS, commit `9f20ae5`) — chỉ thị "đưa 3 điều kiện bắt buộc vào blueprint và bắt đầu triển khai phase 0". 3 điều kiện bắt buộc hoà nhập:
+  1. **E-P0-4 (REV-1)**: CommittedCashView **cộng PENDING/PARTIALLY_FILLED orders** (notional còn lại từ chính Order — phủ cả 2 đường sizing nav5pct/budget50m) + EX-C1 thêm ca APPROVE không tụt mù.
+  2. **E-P0-1 (REV-2)**: **guard đơn vị percent↔fraction** (assert biên, sai 100× nổ lúc import) + đếm đủ **3 nguồn phí** (tick:60-61 · signal-execution:391 · roster:227) + EX-A3 kiểm guard.
+  3. **Docs (REV-5/REV-6)**: §0.2 sửa thứ tự chạy (WAVE_E_SERVICE_CODES chạy SAU Chairman & Đợt F — route:1180) + changelog v1.0 ghi đúng "7 nguyên tắc §6".
+- Kèm 4 hiệu chỉnh khuyến nghị của review: REV-7 (deadlineTicks chỉ đếm tick trong phiên liên tục) · REV-8 (phép đối chiếu thứ 6: Order.fee == Σ Trade.fee) · REV-9 (Trade `@@index([executedAt])`) · REV-12 (whitelist semantics phép cash-delta — MISMATCH khi seed/manual write là CÓ CHỦ ĐÍCH, reset checkpoint sau seed).
+- §7: 5 câu hỏi lấy mặc định theo đề xuất từng câu (đổi được sau — tham số, không phá hợp đồng).
+- Trạng thái: **P0 TRIỂN KHAI** (E-P0-1→5 + exec-verify §5 — phiên #70).
