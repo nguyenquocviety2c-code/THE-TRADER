@@ -94,6 +94,18 @@ export async function POST(
             symbol: updated.instrument.symbol,
             direction: updated.direction,
             orderId: result.order.id,
+            // E-P1-2: đầy đủ Order con khi TWAP tách lát (mỗi con 1 plan con).
+            orderIds: result.orders.map((o) => o.id),
+            ...(result.twap
+              ? {
+                  twap: {
+                    style: "TWAP",
+                    sliceCount: result.twap.sliceCount,
+                    notionalPctAdtv: result.twap.notionalPctAdtv,
+                    adtvVnd: result.twap.adtvVnd,
+                  },
+                }
+              : {}),
           }),
         },
       });
@@ -109,6 +121,10 @@ export async function POST(
             price: result.order.price,
             status: result.order.status,
           },
+          // E-P1-2 (v1.2): mọi Order con (TWAP) + mô tả quyết định tách —
+          // UI/audit nhìn đủ kế hoạch thực thi, không chỉ lát đầu.
+          orders: result.orders,
+          twap: result.twap,
         })
       );
     }

@@ -19,7 +19,13 @@ import { fetchFinfoLastPrices, type FinfoQuote } from "@/lib/vndirect";
 // (2/3 nguồn phí rải rác; nguồn thứ 3 là literal 0.0015 ở signal-execution.ts:391).
 import { FEE_RATE, TAX_RATE } from "@/lib/exec/constants";
 // E-P0-2 (REV-7): guard hạn chờ ExecutionPlan — đếm tick TRONG phiên liên tục.
-import { parseExecutionPlan, planDeadlineExceeded, describeExecutionPlan } from "@/lib/exec/plan";
+// E-P1-2: guard lượt lát TWAP — chỉ khớp Order con khi tới afterTick của lát.
+import {
+  parseExecutionPlan,
+  planDeadlineExceeded,
+  planSliceEligible,
+  describeExecutionPlan,
+} from "@/lib/exec/plan";
 
 export const dynamic = "force-dynamic";
 
@@ -701,6 +707,8 @@ async function runTick(): Promise<NextResponse> {
     let fills = 0;
     // E-P0-2: số lệnh PENDING bị huỷ vì quá hạn chờ của ExecutionPlan.
     let expiredByPlan = 0;
+    // E-P1-2: số lệnh TWAP còn bị GIỮ vì chưa tới lượt lát (afterTick).
+    let twapWaiting = 0;
     // Where-clause lọc status IN (PENDING, PARTIALLY_FILLED) — thu hẹp kiểu cho FillSnapshot
     const pending = (await db.order.findMany({
       where: {
@@ -763,6 +771,15 @@ async function runTick(): Promise<NextResponse> {
         continue;
       }
 
+      // ── E-P1-2 (v1.2): guard lượt lát TWAP — chỉ khớp khi tới afterTick ──
+      // Order con TWAP chưa tới lượt lát (tick phiên < afterTick) → GIỮ nguyên
+      // (không expired, không fill) — lệnh rải đều theo lịch kế hoạch. Lát 1
+      // afterTick=0 → luôn eligible; SINGLE giữ đúng hành vi cũ (plan cũ/ko plan).
+      if (plan && !planSliceEligible(plan, order.createdAt, now)) {
+        twapWaiting++;
+        continue;
+      }
+
       const last = lastByInstrument.get(order.instrumentId);
       if (last == null || order.price == null) continue;
       const crossed = order.side === "BUY" ? last <= order.price : last >= order.price;
@@ -777,13 +794,14 @@ async function runTick(): Promise<NextResponse> {
       }
     }
 
-    if (fills > 0 || expiredByPlan > 0) {
+    if (fills > 0 || expiredByPlan > 0 || twapWaiting > 0) {
       await markSource("trading", {
         mode: "paper",
         success: true,
         meta: {
           fills,
           ...(expiredByPlan > 0 ? { expiredByPlan } : {}),
+          ...(twapWaiting > 0 ? { twapWaiting } : {}),
           lastFillAt: now.toISOString(),
         },
       });

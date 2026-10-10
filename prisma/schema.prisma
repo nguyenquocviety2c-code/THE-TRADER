@@ -576,6 +576,21 @@ model AppSetting {
   updatedAt DateTime @updatedAt
 }
 
+// E-P1-3 (EXECUTION_OPS_BLUEPRINT v1.1 §4/§8): chuỗi snapshot tiền mặt theo
+// thời gian — ĐIỀU KIỆN TIÊN QUYẾT của dự báo dòng tiền A12 (§8 đánh giá
+// "chưa có chuỗi cash theo thời gian — cần snapshot mỗi chu kỳ"). A12 ghi
+// 1 dòng mỗi chu kỳ (cash + equity); prune giữ 90 ngày để không phình vô hạn.
+model CashSnapshot {
+  id              String   @id @default(cuid())
+  brokerAccountId String
+  cash            BigInt // số dư tiền mặt lúc snapshot (VND)
+  equity          BigInt // NAV lúc snapshot (VND)
+  source          String   @default("cycle") // cycle | seed | manual
+  createdAt       DateTime @default(now())
+
+  @@index([brokerAccountId, createdAt(sort: Desc)])
+}
+
 // Bộ tổng hợp Bayes — posterior thị trường theo 3 bậc nhân quả
 // (thị trường → nhóm ngành → cổ phiếu) sau mỗi chu kỳ 23 agents
 // (source="cycle") hoặc tổng hợp lại thủ công (source="manual", 0 LLM).

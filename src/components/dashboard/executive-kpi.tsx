@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Sigma } from "lucide-react";
+import { Activity, Sigma, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -17,6 +17,13 @@ import { apiGet } from "@/lib/api";
 import { formatVndCompact } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { ExecKpi } from "@/lib/exec/kpi";
+// E-P1-3: dự báo dòng tiền kèm payload KPI (fail-soft → có thể null).
+import type { CashflowForecast } from "@/lib/exec/forecast";
+
+/** Payload /api/exec/kpi — KPI + forecast (E-P1-3 v1.2). */
+interface ExecKpiResponse extends ExecKpi {
+  forecast: CashflowForecast | null;
+}
 
 /**
  * E-P0-5 (EXECUTION_OPS_BLUEPRINT v1.1 §4) — khối KPI vận hành nhóm
@@ -49,7 +56,49 @@ function FunnelBar({ step, max }: { step: FunnelStep; max: number }) {
   );
 }
 
-/** Box plot slippage thuần CSS: min ─ P25 ┃ median ┃ P75 ─ max. */
+/** E-P1-3 — dải dự báo dòng tiền kịch bản {none, half, allApprove} + CI 95%.
+ *  Chỉ hiển thị + nhãn "ước tính nội bộ" (§6.4/§6.7 — KHÔNG dùng chặn lệnh). */
+function ForecastStrip({ f }: { f: CashflowForecast }) {
+  const vnd = (n: number) => formatVndCompact(n);
+  const name: Record<string, string> = {
+    none: "Không duyệt thêm",
+    half: "Duyệt một nửa",
+    allApprove: "Duyệt tất cả",
+  };
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-dashed p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <TrendingUp className="size-3.5 text-primary" aria-hidden="true" />
+          Dự báo dòng tiền {f.horizonHours}h tới — 3 kịch bản phê duyệt (ước tính nội bộ)
+        </span>
+        <Badge variant="outline" className="tabular-nums" title={f.note}>
+          {f.history.n} snapshot · {f.baseline}
+        </Badge>
+      </div>
+      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
+        {f.scenarios.map((s) => (
+          <div key={s.name} className="flex min-w-0 flex-1 flex-col">
+            <span className="text-[10px] text-muted-foreground">{name[s.name]}</span>
+            <span className="tabular-nums text-sm font-semibold">
+              {vnd(s.cashAtHorizon)} ₫
+            </span>
+            <span className="text-[10px] tabular-nums text-muted-foreground/80">
+              {s.ci95 ? `CI95 ${vnd(s.ci95.low)} – ${vnd(s.ci95.high)}` : "chưa đủ mẫu CI"}
+            </span>
+          </div>
+        ))}
+      </div>
+      {!f.enoughData && (
+        <p className="text-[10px] text-muted-foreground">
+          Chưa đủ 30 mẫu snapshot — độ tin cậy hạn chế [DA D7]. Kịch bản “duyệt một nửa”
+          là kịch bản minh bạch, không phải xác suất thật. Không dùng chặn lệnh (§6.4).
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SlippageBox({ s }: { s: NonNullable<ExecKpi["slippage"]> }) {
   // Quy chiếu [min, max] về 0..100%; khi min == max (toàn 0%) dồn về giữa.
   const span = s.maxPct - s.minPct;
@@ -98,11 +147,12 @@ function SlippageBox({ s }: { s: NonNullable<ExecKpi["slippage"]> }) {
 export function ExecutiveKpi() {
   const kpiQuery = useQuery({
     queryKey: ["exec-kpi"],
-    queryFn: () => apiGet<ExecKpi>("/api/exec/kpi"),
+    queryFn: () => apiGet<ExecKpiResponse>("/api/exec/kpi"),
     staleTime: 30_000,
   });
 
   const kpi = kpiQuery.data;
+  const forecast = kpi?.forecast ?? null;
 
   return (
     <Card>
@@ -136,7 +186,8 @@ export function ExecutiveKpi() {
           </p>
         ) : !kpi ? null : (
           <div className="flex flex-col gap-5">
-            {/* Funnel 4 bước [DA tr1 Conversion] */}
+            {/* Funnel 4 bước [DA tr1 Conversion] — bước 3/4 neo theo TÍN HIỆU
+                (E-P1-2: 1 duyệt TWAP sinh N lệnh con — hint hiển thị số lát thật) */}
             <div className="grid grid-cols-2 gap-x-4 gap-y-5 sm:grid-cols-4">
               <FunnelBar
                 step={{
@@ -153,13 +204,23 @@ export function ExecutiveKpi() {
               <FunnelBar
                 step={{
                   label: "Lệnh tạo",
-                  value: kpi.funnel.ordersCreated,
-                  hint: "lệnh từ phê duyệt window · plan đi kèm",
+                  value: kpi.funnel.approvedWithOrders,
+                  hint:
+                    kpi.funnel.ordersCreated !== kpi.funnel.approvedWithOrders
+                      ? `${kpi.funnel.ordersCreated} lát lệnh (TWAP tách lát)`
+                      : "lệnh từ phê duyệt window · plan đi kèm",
                 }}
                 max={Math.max(1, kpi.funnel.signals)}
               />
               <FunnelBar
-                step={{ label: "Khớp", value: kpi.funnel.ordersFilled, hint: pctLabel(kpi.fillPct) }}
+                step={{
+                  label: "Khớp trọn vẹn",
+                  value: kpi.funnel.signalsFullyFilled,
+                  hint:
+                    kpi.funnel.ordersFilled !== kpi.funnel.signalsFullyFilled
+                      ? `${kpi.funnel.ordersFilled}/${kpi.funnel.ordersCreated} lát đã khớp`
+                      : pctLabel(kpi.fillPct),
+                }}
                 max={Math.max(1, kpi.funnel.signals)}
               />
             </div>
@@ -205,6 +266,15 @@ export function ExecutiveKpi() {
             ) : (
               <p className="text-xs text-muted-foreground">
                 Chưa có lệnh khớp trong window — phân bố slippage hiển thị sau lệnh khớp đầu tiên.
+              </p>
+            )}
+
+            {/* E-P1-3 — Dự báo dòng tiền kịch bản (kèm KPI card, ước tính nội bộ) */}
+            {forecast ? (
+              <ForecastStrip f={forecast} />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Dự báo dòng tiền chưa sẵn sàng (chuỗi snapshot cash đang tích lũy mỗi chu kỳ A12).
               </p>
             )}
           </div>

@@ -24,6 +24,12 @@ export interface ExecKpiFunnel {
   ordersCreated: number;
   /** Lệnh của cohort đã khớp toàn phần. */
   ordersFilled: number;
+  /** E-P1-2 (v1.2): số TÍN HIỆU cohort có ≥1 lệnh (TWAP 1 duyệt = N lệnh con —
+   *  bước funnel theo tín hiệu giữ tính đơn điệu; ordersCreated là số LÁT thật). */
+  approvedWithOrders: number;
+  /** E-P1-2: số tín hiệu cohort có MỌI lệnh con đã FILLED (kế hoạch thực thi
+   *  trọn vẹn — tách lát coi là khớp khi đủ cả N lát, không phải 1 lát). */
+  signalsFullyFilled: number;
   /** Lệnh tạo trong window KHÔNG từ phễu phê duyệt window (thủ công/seed/
    *  đường cũ) — hiển thị chip riêng để trung thực, không trộn vào funnel. */
   ordersOutOfFunnel: number;
@@ -125,6 +131,22 @@ export async function computeExecKpi(days = 30): Promise<ExecKpi> {
   const ordersFilled = funnelOrders.filter((o) => o.status === "FILLED");
   const ordersOutOfFunnel = orders.length - ordersCreated;
 
+  // E-P1-2 (v1.2): funnel bước 3/4 neo theo TÍN HIỆU (giữ đơn điệu khi TWAP
+  // 1 duyệt sinh N lệnh con) — approvedWithOrders = distinct tín hiệu cohort
+  //  có ≥1 lệnh; signalsFullyFilled = tín hiệu có MỌI lệnh con FILLED (kế
+  //  hoạch thực thi trọn vẹn).
+  const ordersBySignal = new Map<string, typeof funnelOrders>();
+  for (const o of funnelOrders) {
+    if (o.signalId == null) continue;
+    const arr = ordersBySignal.get(o.signalId) ?? [];
+    arr.push(o);
+    ordersBySignal.set(o.signalId, arr);
+  }
+  const approvedWithOrders = ordersBySignal.size;
+  const signalsFullyFilled = [...ordersBySignal.values()].filter(
+    (arr) => arr.length > 0 && arr.every((o) => o.status === "FILLED")
+  ).length;
+
   // AOV — notional lệnh khớp (avgFillPrice × quantity)
   const filledNotionals = ordersFilled
     .filter((o) => o.avgFillPrice != null)
@@ -160,6 +182,8 @@ export async function computeExecKpi(days = 30): Promise<ExecKpi> {
       approved,
       ordersCreated,
       ordersFilled: ordersFilled.length,
+      approvedWithOrders,
+      signalsFullyFilled,
       ordersOutOfFunnel,
       expired,
       holdCount: signals.length - actionable.length,

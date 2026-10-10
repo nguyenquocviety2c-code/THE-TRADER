@@ -6,8 +6,13 @@
  *
  * Nguyên tắc bất khả xâm phạm §6.1: plan chỉ sinh SAU APPROVE — builder duy nhất
  * được gọi từ createPaperOrderFromSignal (đường lệnh đã duyệt); chu kỳ KHÔNG
- * tự sinh plan. Lưu tại `Order.note` dạng JSON (chọn mặc định §7.1 — không
- * migration P0; sang bảng riêng khi làm E-P1-2 tách TWAP thật).
+ * tự sinh plan. Lưu tại `Order.note` dạng JSON (chọn mặc định §7.1 — E-P1-2
+ * v1.2 GIỮ note JSON: mỗi Order con tự chứa sub-plan riêng, không cần bảng riêng).
+ *
+ * E-P1-2 (v1.2): thêm style=TWAP — khi khối lượng lệnh gốc > 1% ADTV-20 phiên,
+ * APPROVE sinh NHIỀU Order con (mỗi Order con 1 plan con, lát seq kích hoạt
+ * sau afterTick tick phiên). Fill engine chỉ khớp Order con tới lượt lát
+ * (guard afterTick) — chu kỳ vẫn KHÔNG tự đặt lệnh.
  *
  * Hạn chờ (REV-7): deadlineTicks chỉ đếm tick TRONG phiên liên tục HOSE
  * 09:15–11:30 + 13:00–14:45 (bỏ nghỉ trưa, T7/CN, ngày lễ theo vn-calendar) —
@@ -24,6 +29,10 @@ import {
 } from "@/lib/exec/constants";
 import { isTradingDay } from "@/lib/market-session";
 
+// PLAN_SLICE_COUNT được tiêu thụ bởi src/lib/exec/twap.ts (E-P1-2) — re-export
+// để mọi consumer plan đều thấy tham số tách lát từ MỘT nguồn (E-P0-1 tinh thần).
+export { PLAN_SLICE_COUNT };
+
 /** Một lát cắt của plan (P0: đúng 1 lát; P1 TWAP: nhiều lát afterTick). */
 export interface PlanSlice {
   seq: number;
@@ -32,12 +41,27 @@ export interface PlanSlice {
   afterTick: number;
 }
 
-/** Hợp đồng ExecutionPlan §3.2 — serialize vào Order.note. */
+/** Thông tin TWAP của plan con (E-P1-2) — chỉ có khi style=TWAP. */
+export interface PlanTwapMeta {
+  /** Tổng số lát của kế hoạch cha (bao gồm mọi Order con). */
+  totalSlices: number;
+  /** Tín hiệu gốc sinh ra kế hoạch (audit truy nguồn). */
+  signalId: string;
+  /** Notional lệnh GỐC phần trăm ADTV-20 lúc quyết định tách (minh bạch lý do). */
+  notionalPctAdtv: number;
+  /** ADTV-20 phiên (VND) lúc quyết định tách. */
+  adtvVnd: number;
+}
+
+/** Hợp đồng ExecutionPlan §3.2 — serialize vào Order.note.
+ *  SINGLE: 1 plan = 1 Order nguyên khối (P0 — đúng hiện trạng engine).
+ *  TWAP:   1 phê duyệt = nhiều Order con, mỗi Order con 1 plan con có
+ *          slices[0].afterTick = lượt kích hoạt lát (E-P1-2). */
 export interface ExecutionPlan {
   v: 1;
   kind: "ExecutionPlan";
   orderId: string;
-  style: "SINGLE";
+  style: "SINGLE" | "TWAP";
   slices: PlanSlice[];
   slippageBudgetPct: number;
   deadlineTicks: number;
@@ -46,6 +70,8 @@ export interface ExecutionPlan {
   humanNote: string;
   rationale: string;
   createdAt: string;
+  /** Siêu dữ liệu TWAP (E-P1-2) — chỉ có khi style=TWAP. */
+  twap?: PlanTwapMeta;
 }
 
 /** Sinh plan JSON cho lệnh (P0 luôn 1 lát SINGLE — đúng hành vi engine hiện tại). */
@@ -69,10 +95,49 @@ export function buildExecutionPlan(input: {
     sizing: input.sizing,
     humanNote: input.humanNote,
     rationale:
-      "1 lệnh LIMIT nguyên khối (P0 E-P0-2) — tách TWAP nhiều lát là E-P1-2; " +
-      `sliceCount config=${PLAN_SLICE_COUNT} (chưa tiêu thụ tới khi có TWAP); ` +
+      "1 lệnh LIMIT nguyên khối (P0 E-P0-2) — dưới ngưỡng 1% ADTV-20 nên không tách lát; " +
       `hạn chờ ${DEFAULT_DEADLINE_TICKS} tick trong phiên (~1 phiên giao dịch)`,
     createdAt: (input.createdAt ?? new Date()).toISOString(),
+  };
+}
+
+/** Sinh plan CON style=TWAP cho 1 Order con của kế hoạch tách lát (E-P1-2). */
+export function buildTwapChildPlan(input: {
+  orderId: string;
+  seq: number;
+  quantity: number;
+  price: number;
+  afterTick: number;
+  sizing: "nav5pct" | "budget50m";
+  humanNote: string;
+  twap: PlanTwapMeta;
+  createdAt?: Date;
+}): ExecutionPlan {
+  return {
+    v: 1,
+    kind: "ExecutionPlan",
+    orderId: input.orderId,
+    style: "TWAP",
+    slices: [
+      {
+        seq: input.seq,
+        quantity: input.quantity,
+        price: input.price,
+        afterTick: input.afterTick,
+      },
+    ],
+    slippageBudgetPct: PLAN_SLIPPAGE_BUDGET_PCT,
+    deadlineTicks: DEFAULT_DEADLINE_TICKS,
+    orderType: PLAN_ORDER_TYPE,
+    sizing: input.sizing,
+    humanNote: input.humanNote,
+    rationale:
+      `TWAP lát ${input.seq}/${input.twap.totalSlices} — lệnh gốc ` +
+      `${input.twap.notionalPctAdtv.toFixed(2).replace(".", ",")}% ADTV-20 ` +
+      `(${Math.round(input.twap.adtvVnd).toLocaleString("vi-VN")} ₫/phiên) vượt ngưỡng 1% → tách đều; ` +
+      `lát kích hoạt sau ${input.afterTick} tick phiên; hạn chờ chung ${DEFAULT_DEADLINE_TICKS} tick phiên`,
+    createdAt: (input.createdAt ?? new Date()).toISOString(),
+    twap: input.twap,
   };
 }
 
@@ -156,8 +221,25 @@ export function planDeadlineExceeded(plan: ExecutionPlan, createdAt: Date, now: 
   return inSessionElapsedTicks(createdAt, now) >= plan.deadlineTicks;
 }
 
+/** E-P1-2: True khi LÁT của plan đủ điều kiện kích hoạt — số tick phiên đã trôi
+ *  kể từ lúc tạo lệnh ≥ afterTick của lát đầu (lát 1 afterTick=0 → luôn eligible,
+ *  đúng hành vi SINGLE cũ; lát TWAP sau chờ tới lượt rải đều). */
+export function planSliceEligible(plan: ExecutionPlan, createdAt: Date, now: Date): boolean {
+  const afterTick = plan.slices[0]?.afterTick ?? 0;
+  if (afterTick <= 0) return true;
+  return inSessionElapsedTicks(createdAt, now) >= afterTick;
+}
+
 /** Mô tả ngắn plan cho UI/audit (không cần parse lại nơi khác). */
 export function describeExecutionPlan(plan: ExecutionPlan): string {
   const slice = plan.slices[0];
-  return `Plan ${plan.style}: ${plan.slices.length} lát × ${slice?.quantity ?? "?"} cp @${slice?.price ?? "?"} · trượt ≤${plan.slippageBudgetPct}% · hạn ${plan.deadlineTicks} tick phiên`;
+  if (plan.style === "TWAP") {
+    const t = plan.twap;
+    return (
+      `Plan TWAP lát ${slice?.seq ?? "?"}/${t?.totalSlices ?? "?"}: ${slice?.quantity ?? "?"} cp @${slice?.price ?? "?"} ` +
+      `sau ${slice?.afterTick ?? "?"} tick phiên · trượt ≤${plan.slippageBudgetPct}% · hạn ${plan.deadlineTicks} tick phiên` +
+      (t ? ` · lệnh gốc ${t.notionalPctAdtv.toFixed(2).replace(".", ",")}% ADTV-20` : "")
+    );
+  }
+  return `Plan SINGLE: ${plan.slices.length} lát × ${slice?.quantity ?? "?"} cp @${slice?.price ?? "?"} · trượt ≤${plan.slippageBudgetPct}% · hạn ${plan.deadlineTicks} tick phiên`;
 }

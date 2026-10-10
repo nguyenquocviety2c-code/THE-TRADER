@@ -123,6 +123,16 @@ export const PLAN_ORDER_TYPE = "LIMIT";
  */
 export const DEFAULT_DEADLINE_TICKS = 1440;
 
+// ── E-P1-2 (EXECUTION_OPS_BLUEPRINT v1.1 §4 — TWAP tách lát thật) ──────────
+// Ngưỡng kích hoạt TWAP theo [tư duy A5 Liquidity — MATH H7 ε-tolerance]:
+// khối lượng lệnh (notional) > 1% ADTV-20 phiên → tách sliceCount lát LIMIT
+// rải đều afterTick trong hạn chờ plan (mỗi lát bội lot 100 — F-202).
+
+/** Ngưỡng phần trăm ADTV-20 để kích hoạt TWAP (PERCENT — 1%). */
+export const TWAP_ADTV_TRIGGER_PCT = 1;
+/** Số phiên EOD tính ADTV cho ngưỡng TWAP. */
+export const TWAP_ADTV_SESSIONS = 20;
+
 // ── Sizing A12/tín hiệu (E-P0-4 — cùng nguồn cho fill + committed view) ──
 
 /** Sizing 5% NAV cho lệnh từ phê duyệt tín hiệu (nav5pct — run route cũ). */
