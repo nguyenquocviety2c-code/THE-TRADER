@@ -4,7 +4,10 @@ import { markSource } from "@/lib/sources";
 import { getConsensusSetting } from "@/lib/consensus";
 // E-P0-1 (REV-2 review #69): literal 0.0015 tại đây là nguồn phí thứ 3/3 —
 // chuyển về nguồn đơn src/lib/exec/constants.ts (guard đơn vị percent↔fraction).
-import { FEE_RATE } from "@/lib/exec/constants";
+// Fixbug #71 F-701-01: POSITION_SIZE_PCT cũng về nguồn đơn (trước đây còn bản
+// địa 0.05 tại đây — sizing thật dùng bản địa còn committed view (E-P0-4) dùng
+// bản exec/constants → đổi 1 chỗ sẽ lệch ước tính cam kết im lặng).
+import { FEE_RATE, POSITION_SIZE_PCT } from "@/lib/exec/constants";
 // E-P0-2 (EXECUTION_OPS_BLUEPRINT v1.1): sinh ExecutionPlan khi APPROVE/convert.
 import { buildExecutionPlan, planToNote, describeExecutionPlan } from "@/lib/exec/plan";
 
@@ -118,8 +121,8 @@ export type PaperOrderResult =
   | { ok: true; order: CreatedPaperOrder }
   | { ok: false; status: number; error: string };
 
-/** Sizing 5% NAV (đúng run route) — lot 100 tối thiểu 100 cp. */
-const POSITION_SIZE_PCT = 0.05;
+// POSITION_SIZE_PCT (5% NAV) — nguồn đơn src/lib/exec/constants.ts (E-P0-4
+// cùng nguồn cho sizing thật lẫn ước tính committed view — fixbug #71 F-701-01).
 
 /**
  * Tạo lệnh giấy LIMIT PENDING từ tín hiệu BUY/SELL.

@@ -2168,3 +2168,24 @@ Stage Summary:
 - Kiểm định: exec-verify **41/41** (và đã tự bắt + vá 1 khoảng mù thật của reconciliation: lệnh FILLED thiếu Trade vô hình với order-coverage) · p2-verify 72/72 không hồi quy · E2E golden path qua gateway :81 với fill thật VIC (fee khớp nguồn đơn 101.385 ₫, A11 6/6 BALANCED) · 0 console error desktop+mobile.
 - Trạng thái giao dịch thật trong DB sau E2E: 1 tín hiệu test VIC (ACTED, rationale ghi rõ test) + 1 lệnh FILLED 300 cp + 1 Trade nhất quán — reconciliation kế tiếp sẽ thấy BALANCED (đã verify A11 chạy sau fill). AGENT_CYCLE_MINUTES=0 giữ nguyên (chu kỳ tự động tắt).
 - Chưa làm (P1 theo blueprint): E-P1-1 phân bổ danh mục A1 · E-P1-2 TWAP thật (cần bảng riêng + plan-level claim — 2 câu hỏi kiến trúc review §7) · E-P1-3 dự báo dòng tiền · E-P1-4 ChairmanScorecard · E-P1-5 IQR/z-score.
+
+---
+Task ID: 71-FIXBUG-exec-p0
+Agent: Z.ai Code (main conversation — giao thức Fixbug)
+Task: User chỉ thị "Tiến hành giao thức fixbug với phần vừa triển khai, báo cáo sau khi hoàn thành và push code, sau đó cho tôi biết 2 câu hỏi về kiến trúc được nhắc đến trong P1" — scope = toàn bộ Phase 0 EXECUTION_OPS_BLUEPRINT (commit bee1025: src/lib/exec/* 5 module + API /api/exec/kpi + UI ExecutiveKpi + plan note + tick route deadline guard + signal-execution plan + agent-service-runs A11/A12).
+
+Work Log:
+- VÒNG 1 (4 lớp đủ): Tĩnh-code đọc trọn constants/plan/reconciliation/committed/kpi + diff bee1025 4 file sửa + fillOrder (2 sổ phí Order:265/Trade:270) · Tĩnh-dữ liệu: checkpoint exec.reconcile BALANCED + vị thế VIC 300 trong snapshot + 0 alert + 0 lệnh treo + index Trade_executedAt_idx sống + 1 tài khoản sống 0 lệnh mồ côi · Runtime: tick 200 chu kỳ 10s + /api/exec/kpi dữ liệu thật + A11 đơn lẻ 6/6 BALANCED + A12 buyingPower AUD-CODE #15b · Browser: KPI card + plan note tab Lệnh + mobile 390 0 overflow.
+- 4 FINDINGS vòng 1: F-701-01 (P1) POSITION_SIZE_PCT 2 nguồn — signal-execution.ts:122 giữ bản địa 0.05 trong khi exec/constants.ts xuất bản thứ 2 cho committed view → đổi 1 chỗ lệch ước tính cam kết im lặng · F-701-02 (P1) funnel KPI trộn 2 cohorts — bước 1-2 đếm signal.createdAt∈window nhưng bước 3-4 đếm MỌI lệnh order.createdAt∈window → UI thật hiển thị "Trader duyệt 2 → Lệnh tạo 9" (bằng chứng DB: 5 lệnh seed "Tự động từ tín hiệu agent" + 2 "Thủ công" vào nhầm phễu) · F-701-03 (P2) position-delta actual:NaN khi MISMATCH → JSON hoá null mất con số · F-701-04 (P2) PLAN_ORDER_TYPE ternary đồng vị "LIMIT":"LIMIT" đọc config mà không tiêu thụ.
+- FIX: F-701-01 signal-execution import POSITION_SIZE_PCT từ exec/constants (xoá bản địa) · F-701-02 kpi.ts neo cohort phê duyệt — lệnh vào funnel chỉ khi gắn tín hiệu actionable ACTED của window (đúng nguyên văn §2 D1 "funnel phê duyệt"); lệnh còn lại đếm riêng ordersOutOfFunnel + UI chip "Ngoài phễu N" (không biến mất — trung thực); AOV/slippage neo theo cohort; exec-verify D1a/D2 đồng bộ (+1 lệnh cohort, pendingOrder không signalId → ngoài phễu) · F-701-03 actual = tổng delta thật theo mã · F-701-04 hằng số thẳng + comment ghi rõ config orderType tiêu thụ thật ở E-P1-2. Blueprint changelog v1.1.1 (phiên #71) ghi đầy đủ 4 findings — không đổi thiết kế nào đã chốt (F-701-02 là đưa code VỀ đúng spec).
+- KIỂM ĐỊNH SAU VÁ: exec-verify 41/41 PASS (D1a cohort: 13/4/3/3/8 đúng bằng tay) · p2-verify 72/72 không hồi quy · spot F-701-03: plant position +100cp ngoài fill-engine → MISMATCH actual=100 sống JSON round-trip → dọn + reset checkpoint về baseline · tsc 0 lỗi src/ · lint src sạch (3 lỗi cũ examples/websocket ngoài phạm vi).
+- VÒNG 2 (rà lại toàn scope như chưa từng fix): 0 finding mới — 4 lớp sạch.
+- VÒNG XÁC NHẬN (§7, góc nhìn runtime+browser): exec-verify chạy lần 2 liên tiếp 41/41 (idempotency verify) · chu kỳ 23 agents THẬT qua nút UI "Chạy agent" (POST /api/agents/run 200 trong 87s): A11 trong WAVE_E "6/6 phép ĐẠT → BALANCED" + A12 CommittedCashView · browser desktop 1440 + mobile 390: funnel đơn điệu 9→2→2→2 + chip "Ngoài phễu 7" + AOV 79,3tr + tab Lệnh plan note VIC nguyên vẹn · 0 console error · 0 page error · dev.log 0 lỗi mới, tick 200 chảy liên tục.
+- Screenshots: upload/fixbug70-{desktop-kpi,mobile-kpi,plan-note,after-desktop,confirm-orders}.png (gitignored).
+
+Stage Summary:
+- Kết quả Fixbug: TRIỆT ĐỂ sau 1 vòng fix + 1 vòng rà lại + 1 vòng xác nhận sạch — 4 findings (P1: 2 · P2: 2), 0 còn treo.
+- Hai P1 đều lỗi "1 sự thật N nguồn"/"trộn semantics" — đúng họ bug mà blueprint E-P0-1 sinh ra để diệt: funnel giờ neo 1 cohort phê duyệt, mọi con số KPI card cùng một câu chuyện; POSITION_SIZE_PCT giờ thật sự đơn nguồn.
+- Dữ liệu prod không đổi: vị thế VIC 300 cp khôi phục đúng sau spot test · checkpoint exec.reconcile về baseline sạch (chu kỳ A11 sau đó đã chạy BALANCED) · 0 alert sót.
+- Commit + push fork (origin còn chờ user cấp quyền — PAT tài khoản phụ).
+- 2 câu hỏi kiến trúc P1 (review #69) trình bày trực tiếp cho user trong báo cáo.

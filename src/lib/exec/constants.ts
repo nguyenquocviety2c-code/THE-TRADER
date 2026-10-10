@@ -109,9 +109,12 @@ function readSlippagePct(v: unknown, fallback: number): number {
 export const PLAN_SLICE_COUNT = readPositiveInt(execCfg?.sliceCount, 3);
 /** Ngân sách trượt giá tối đa (PERCENT — 0.5% theo config A10 maxSlippagePct). */
 export const PLAN_SLIPPAGE_BUDGET_PCT = readSlippagePct(execCfg?.maxSlippagePct, 0.5);
-/** Loại lệnh mặc định theo config A10 (P0 luôn tạo LIMIT như hiện trạng). */
-export const PLAN_ORDER_TYPE: string =
-  typeof execCfg?.orderType === "string" && execCfg.orderType === "LIMIT" ? "LIMIT" : "LIMIT";
+/** Loại lệnh plan khai báo — P0 cố định LIMIT (đúng hành vi engine hiện tại:
+ *  chỉ khớp lệnh LIMIT theo điều kiện giá). F-701-04 (fixbug #71): trước đây
+ *  là ternary đọc config A10 `orderType` nhưng cả 2 nhánh đều "LIMIT" (đồng vị,
+ *  đọc mà không tiêu thụ) — config này sẽ được tiêu thụ THẬT khi E-P1-2 thêm
+ *  TWAP/MARKET; tới lúc đó mới mở khoá theo config. */
+export const PLAN_ORDER_TYPE = "LIMIT";
 
 /**
  * Hạn chờ khớp mặc định của ExecutionPlan — 1440 tick.

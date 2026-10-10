@@ -739,17 +739,22 @@ async function verifyKpi() {
     const after = await computeExecKpi(30);
 
     // D1 — "tính đúng bằng tay": so DELTA với công thức tay
+    // F-701-02 (fixbug #71): funnel neo cohort phê duyệt — chỉ lệnh gắn tín hiệu
+    // ACTED của window vào funnel (lệnh filled có signalId → +1); lệnh pending
+    // KHÔNG có signalId → +1 ordersOutOfFunnel, KHÔNG vào funnel.
     const expSignals = before.funnel.signals + 4;
     const expApproved = before.funnel.approved + 2;
-    const expOrders = before.funnel.ordersCreated + 2;
+    const expOrders = before.funnel.ordersCreated + 1;
     const expFilled = before.funnel.ordersFilled + 1;
+    const expOutOfFunnel = before.funnel.ordersOutOfFunnel + 1;
     check(
-      "D1a funnel đúng bằng tay: +4 tín hiệu · +2 duyệt · +2 lệnh · +1 khớp",
+      "D1a funnel đúng bằng tay: +4 tín hiệu · +2 duyệt · +1 lệnh (cohort) · +1 khớp",
       after.funnel.signals === expSignals &&
         after.funnel.approved === expApproved &&
         after.funnel.ordersCreated === expOrders &&
-        after.funnel.ordersFilled === expFilled,
-      `${after.funnel.signals}/${expSignals} · ${after.funnel.approved}/${expApproved} · ${after.funnel.ordersCreated}/${expOrders} · ${after.funnel.ordersFilled}/${expFilled}`
+        after.funnel.ordersFilled === expFilled &&
+        after.funnel.ordersOutOfFunnel === expOutOfFunnel,
+      `${after.funnel.signals}/${expSignals} · ${after.funnel.approved}/${expApproved} · ${after.funnel.ordersCreated}/${expOrders} · ${after.funnel.ordersFilled}/${expFilled} · ngoàiPhễu ${after.funnel.ordersOutOfFunnel}/${expOutOfFunnel}`
     );
     check(
       "D1b approvePct đúng công thức approved/signals",
@@ -781,6 +786,7 @@ async function verifyKpi() {
         after.funnel.approved >= 0 &&
         after.funnel.ordersCreated >= 0 &&
         after.funnel.ordersFilled >= 0 &&
+        after.funnel.ordersOutOfFunnel >= 0 &&
         after.funnel.holdCount >= 0 &&
         after.rejected >= 0 &&
         (after.approvePct == null || (after.approvePct >= 0 && after.approvePct <= 100)) &&

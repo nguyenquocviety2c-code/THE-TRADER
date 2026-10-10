@@ -151,7 +151,11 @@ export function ExecutiveKpi() {
                 max={Math.max(1, kpi.funnel.signals)}
               />
               <FunnelBar
-                step={{ label: "Lệnh tạo", value: kpi.funnel.ordersCreated, hint: "plan đi kèm từng lệnh" }}
+                step={{
+                  label: "Lệnh tạo",
+                  value: kpi.funnel.ordersCreated,
+                  hint: "lệnh từ phê duyệt window · plan đi kèm",
+                }}
                 max={Math.max(1, kpi.funnel.signals)}
               />
               <FunnelBar
@@ -179,6 +183,15 @@ export function ExecutiveKpi() {
               <Badge variant="outline" className="tabular-nums" title="Tín hiệu bị trader từ chối">
                 Từ chối {kpi.rejected}
               </Badge>
+              {kpi.funnel.ordersOutOfFunnel > 0 ? (
+                <Badge
+                  variant="outline"
+                  className="tabular-nums"
+                  title="Lệnh tạo trong window không từ phê duyệt tín hiệu window (thủ công/seed/đường cũ) — không vào funnel, hiển thị minh bạch (F-701-02)"
+                >
+                  Ngoài phễu {kpi.funnel.ordersOutOfFunnel}
+                </Badge>
+              ) : null}
               {Object.entries(kpi.signalStatusCounts).map(([status, count]) => (
                 <Badge key={status} variant="secondary" className="tabular-nums">
                   {status} {count}

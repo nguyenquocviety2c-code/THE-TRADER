@@ -16,10 +16,17 @@ export interface ExecKpiFunnel {
   signals: number;
   /** Đã duyệt → lệnh (ACTED — trader APPROVE/convert). */
   approved: number;
-  /** Lệnh tạo trong window (≈ approved trong window; lệch biên window nhỏ). */
+  /** Lệnh gắn tín hiệu ACTED của window (đường phê duyệt — “funnel phê duyệt”
+   *  §2 D1). Fixbug #71 F-701-02: trước đây đếm MỌI lệnh order.createdAt∈window
+   *  → trộn 2 cohorts (lệnh thủ công/seed/đường cũ làm bước 3 > bước 2).
+   *  Giờ neo về 1 cohort: lệnh chỉ vào funnel khi gắn tín hiệu actionable
+   *  ACTED của window; lệnh còn lại đếm riêng ordersOutOfFunnel. */
   ordersCreated: number;
-  /** Lệnh khớp toàn phần trong window. */
+  /** Lệnh của cohort đã khớp toàn phần. */
   ordersFilled: number;
+  /** Lệnh tạo trong window KHÔNG từ phễu phê duyệt window (thủ công/seed/
+   *  đường cũ) — hiển thị chip riêng để trung thực, không trộn vào funnel. */
+  ordersOutOfFunnel: number;
   /** Tín hiệu hết hạn chưa duyệt (churn — [DA tr1]). */
   expired: number;
   /** Tín hiệu GIỮ sinh trong window (ngoài funnel). */
@@ -78,7 +85,7 @@ export async function computeExecKpi(days = 30): Promise<ExecKpi> {
   const [signals, orders] = await Promise.all([
     db.signal.findMany({
       where: { createdAt: { gte: from, lt: to } },
-      select: { direction: true, status: true },
+      select: { id: true, direction: true, status: true },
     }),
     db.order.findMany({
       where: { createdAt: { gte: from, lt: to } },
@@ -87,6 +94,7 @@ export async function computeExecKpi(days = 30): Promise<ExecKpi> {
         quantity: true,
         price: true,
         avgFillPrice: true,
+        signalId: true,
       },
     }),
   ]);
@@ -100,8 +108,22 @@ export async function computeExecKpi(days = 30): Promise<ExecKpi> {
   const approved = actionable.filter((s) => s.status === "ACTED").length;
   const expired = actionable.filter((s) => s.status === "EXPIRED").length;
   const rejected = actionable.filter((s) => s.status === "REJECTED").length;
-  const ordersCreated = orders.length;
-  const ordersFilled = orders.filter((o) => o.status === "FILLED");
+
+  // ── F-701-02 (fixbug #71): neo cohort phễu phê duyệt ──
+  // Funnel = cohort tín hiệu actionable sinh trong window: lệnh chỉ được tính
+  // ở bước 3/4 khi gắn (signalId) với tín hiệu ACTED của chính cohort đó —
+  // giữ funnel ĐƠN ĐIỆU theo 1 dòng thời gian phê duyệt. Lệnh tạo trong window
+  // nhưng không từ phễu (thủ công/seed/đường cũ/tín hiệu trước window) không
+  // biến mất — đếm riêng ordersOutOfFunnel và UI hiển thị chip minh bạch.
+  const approvedSignalIds = new Set(
+    actionable.filter((s) => s.status === "ACTED").map((s) => s.id)
+  );
+  const funnelOrders = orders.filter(
+    (o) => o.signalId != null && approvedSignalIds.has(o.signalId)
+  );
+  const ordersCreated = funnelOrders.length;
+  const ordersFilled = funnelOrders.filter((o) => o.status === "FILLED");
+  const ordersOutOfFunnel = orders.length - ordersCreated;
 
   // AOV — notional lệnh khớp (avgFillPrice × quantity)
   const filledNotionals = ordersFilled
@@ -138,6 +160,7 @@ export async function computeExecKpi(days = 30): Promise<ExecKpi> {
       approved,
       ordersCreated,
       ordersFilled: ordersFilled.length,
+      ordersOutOfFunnel,
       expired,
       holdCount: signals.length - actionable.length,
     },

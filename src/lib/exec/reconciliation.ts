@@ -334,10 +334,14 @@ export async function runReconciliation(now = new Date()): Promise<Reconciliatio
       ...cur.positions.keys(),
     ]);
     const bad: { instrumentId: string; expected: number; actual: number }[] = [];
+    let expectedTotal = 0;
+    let actualTotal = 0;
     for (const instrumentId of universe) {
       const expected = expectedByInstrument.get(instrumentId) ?? 0;
       const actual =
         (cur.positions.get(instrumentId) ?? 0) - (prev.positions[instrumentId] ?? 0);
+      expectedTotal += expected;
+      actualTotal += actual;
       if (actual !== expected) {
         bad.push({ instrumentId, expected, actual });
       }
@@ -345,8 +349,10 @@ export async function runReconciliation(now = new Date()): Promise<Reconciliatio
     expectations.push({
       name: "position-delta",
       unit: "SHARES",
-      expected: [...expectedByInstrument.values()].reduce((s, v) => s + v, 0),
-      actual: bad.length === 0 ? [...expectedByInstrument.values()].reduce((s, v) => s + v, 0) : NaN,
+      // F-701-03 (fixbug #71): actual = tổng delta THẬT theo mã (trước đây NaN
+      // khi có lệch → JSON.stringify hoá null, mất con số trong output).
+      expected: expectedTotal,
+      actual: actualTotal,
       diff: bad.reduce((s, b) => s + Math.abs(b.actual - b.expected), 0),
       ok: bad.length === 0,
       ...(bad.length > 0 ? { details: { badInstruments: bad.slice(0, 5) } } : {}),
